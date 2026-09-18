@@ -1,0 +1,6 @@
+# dsh-trajectory bundle layer — applied when a profile lists this bundle.
+# `name` is a PACKAGE NAME resolved through the profile's node_modules
+# (or the $DSH_HOME/profiles/node_modules fallback), not a relative path.
+- insert:
+    - id: dsh-trajectory
+      name: dsh-trajectory

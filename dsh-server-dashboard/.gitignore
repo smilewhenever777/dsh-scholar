@@ -1,0 +1,7 @@
+node_modules/
+dist/
+dist-client/
+.verify/
+__recovered.js
+__dist-map.json
+*.tgz
