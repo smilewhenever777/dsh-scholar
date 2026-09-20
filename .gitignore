@@ -1,0 +1,12 @@
+# 白名单式忽略:根目录默认全部忽略,只放行以下条目
+# (私有目录/内部文档/截图/缓存/草稿一律不入公开仓)
+/*
+!/README.md
+!/.gitignore
+!/dsh-scholar/
+!/dsh-server-dashboard/
+!/dsh-trajectory/
+
+# 内部开发日志（含研究方向/真实论文/会话细节，不公开）
+dsh-scholar/AUDIT-*.md
+dsh-scholar/REQUIREMENTS.md
