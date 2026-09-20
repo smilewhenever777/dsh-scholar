@@ -5,7 +5,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type {
-  TrajEdge, TrajEdgeKind, TrajEntry, TrajGoal, TrajGoalLog, TrajGoalLog as GoalLog, TrajHypothesis, TrajHypStatus,
+  TrajEdge, TrajEdgeKind, TrajEntry, TrajGoal, TrajGoalLog, TrajHypothesis, TrajHypStatus,
   TrajMetric, TrajNode, TrajNodeKind, TrajNodeRefs, TrajProject, TrajStatus, TrajTrack,
 } from './shared/types.js';
 import { TRAJ_EDGE_KINDS, TRAJ_HYP_STATUS, TRAJ_LOG_TYPES, TRAJ_NODE_KINDS, TRAJ_STATUSES, TRAJ_TRACKS } from './shared/types.js';

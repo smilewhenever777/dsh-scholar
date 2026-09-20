@@ -206,6 +206,19 @@ export function analyzeTrajectory(file: TrajProjectFile, now = Date.now()): Traj
 /** 简单关键词提取:去停用词、取 ≥2 字的词 */
 function extractKeywords(text: string): Set<string> {
   const stop = new Set(['的', '了', '在', '是', '和', '与', '或', '不', '为', '有', '对', '从', '会', '能', '要', 'the', 'a', 'an', 'is', 'are', 'and', 'or', 'of', 'to', 'in', 'for', 'on', 'with', 'that', 'this', 'it']);
-  const words = text.toLowerCase().split(/[\s,;.、。;:?!""''()\[\]{}]+/);
-  return new Set(words.filter((w) => w.length >= 2 && !stop.has(w)));
+  const tokens = text.toLowerCase().split(/[\s,;.、。;:?!""''()\[\]{}]+/);
+  const out = new Set<string>();
+  for (const t of tokens) {
+    if (t.length < 2 || stop.has(t)) continue;
+    out.add(t);
+    // 中文 token(连续 CJK 字符 ≥3 字)额外提取 bigram,提供部分匹配能力
+    const cjk = t.match(/[一-鿿]/g);
+    if (cjk && cjk.length >= 3) {
+      for (let i = 0; i < cjk.length - 1; i++) {
+        const bi = cjk[i] + cjk[i + 1];
+        if (!stop.has(bi)) out.add(bi);
+      }
+    }
+  }
+  return out;
 }
