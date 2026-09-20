@@ -27,7 +27,12 @@ const GUIDANCE = [
   '研究主线图是**按工作区绑定**的研究项目进展图:每个 DSH 工作区(=一个研究方向)一份主线图,'
   + '节点=里程碑/创新点(idea)/实验/论文/写作,边=推进关系,主线=创新关键路径。'
   + '清单页是「项目梳理」视图:研究问题 → 主线演变 → 各节点的实验台账(数据与结论)。',
+  'v0.3 目标树结构:总目标(Goal,版本化)→ 子假设(Hypothesis,可证否/标轨迹)→ 实验(挂台账)。',
   '何时主动维护(无需用户要求):',
+  '- **定期健康检查** → `traj_review` 分析轨迹,发现冷滞/目标错配/证否未标等问题,以对话形式向用户提问,根据回答落盘决策。用户问「研究进展如何」「帮我梳理」时**必须先调此工具**。',
+  '- **研究目标变化** → `traj_goal_set`(确立/修订总目标,旧版留痕,记 pivot 原因)。',
+  '- **提出新假设** → `traj_hypothesis_add`(text + track:mainline/branch/detour)。',
+  '- **假设被验证/证否** → `traj_hypothesis_update`(status: validated/falsified + outcomeReason);走偏/回归改 track。',
   '- **完成一次实验/拿到一组数据/得出一个结论/做出一个决策** → `traj_entry_add` 记台账:data 写关键数字(数据集/指标/差值),conclusion 写判定与决策。这是项目「做到哪一步、数据是什么」的权威记录,必须清晰明确。',
   '- 用户规划新阶段、确立研究计划 → `traj_node_add`(里程碑/关键步骤传 mainline=true),再用 `traj_mainline_set` 串成创新故事线。',
   '- 开始一个新实验/新工作包 → `traj_node_add`(kind=experiment, status=in_progress;知道训练主机/日志路径/命令特征时传 refs.hostId/logPath/cmdPattern,图上会显示实时进度)。',

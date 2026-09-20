@@ -15,6 +15,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { TrajEdgeKind, TrajNode, TrajNodeKind, TrajProject, TrajProjectFile, TrajStatus } from './shared/types.js';
 import type { TrajStore } from './store.js';
 import { apiBase, fetchDashSnapshots, matchLiveProgress } from './liveprogress.js';
+import { analyzeTrajectory } from './analysis.js';
 
 const renderJson = (_args: unknown, value: unknown): ContentBlock[] => [
   { type: 'text', text: JSON.stringify(value, null, 2) },
@@ -147,6 +148,46 @@ function projectOverview(file: TrajProjectFile) {
 }
 
 export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStore>): void {
+      /* ---------- v0.3:traj_review(分析引擎 + 互动提问) ---------- */
+      ctx.tools.register(defineTool({
+        name: 'traj_review',
+        description:
+          '分析当前研究项目的轨迹状态,发现需要用户决策的问题并给出建议提问(研究主线图插件 v0.3)。'
+          + '分析规则:冷滞假设(R1)/孤儿实验(R2)/目标与实验方向错配(R3)/应证否未标(R4)/'
+          + '高频目标修订(R5)/已验证假设下的待办积压(R6)/偏离长期未回归(R7)。'
+          + '**使用时机**:用户问「研究进展如何」「帮我梳理一下」「有什么问题」时;'
+          + '或每隔几个工作会话主动调用一次(作为研究健康检查)。'
+          + '拿到 findings 后,**以对话形式**向用户提出 suggestedQuestion(可以改编得更自然),'
+          + '根据用户的回答调用 traj_goal_set / traj_hypothesis_update / traj_node_update 落盘决策。'
+          + '这是「AI 研究顾问」的核心工具——不是替用户做决定,而是发现值得问的问题。',
+        parameters: {},
+        output: {
+          schema: { type: 'object', additionalProperties: true },
+          render: renderJson,
+        },
+        
+        presentCall: () => callView('研究轨迹健康检查'),
+        presentResult: (_args: unknown, result: { value?: any; meta?: any }) => {
+          const v: any = result.value ?? {};
+          const f: any[] = v.findings ?? [];
+          const s: any = v.summary ?? {};
+          const high = f.filter((x) => x.severity === 'high').length;
+          return resultView(
+            `轨迹检查:${high > 0 ? `${high} 个需要决策` : f.length > 0 ? `${f.length} 个建议关注` : '健康'}`,
+            [
+              `目标 v${s.goalVersion ?? '?'} · 假设 ${s.activeHypotheses ?? 0} 活跃 / ${s.validatedHypotheses ?? 0} 证实 / ${s.falsifiedHypotheses ?? 0} 证否`,
+              f.length > 0 ? `发现 ${f.length} 个问题:${f.map((x) => `[${x.severity}] ${x.rule}`).join('; ')}` : '',
+            ].filter(Boolean).join(String.fromCharCode(10)),
+          );
+        },
+        async execute(args: any, exec: any) {
+          const store = await getStore();
+          const file = await resolveTarget(store, args, exec);
+          const review = analyzeTrajectory(file);
+          return toJson({ ok: true, ...review });
+        },
+      })),
+
       /* ---------- v0.3 层 0:traj_goal_set ---------- */
       ctx.tools.register(defineTool({
         name: 'traj_goal_set',
