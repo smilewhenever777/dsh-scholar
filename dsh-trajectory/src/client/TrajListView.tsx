@@ -1,10 +1,30 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import type { TrajEntry, TrajMetric, TrajNode, TrajProjectFile, TrajStatus } from '../shared/types';
+import type { TrajEntry, TrajGoal, TrajGoalLog, TrajHypothesis, TrajMetric, TrajNode, TrajProjectFile, TrajStatus } from '../shared/types';
 import { TRAJ_STATUSES } from '../shared/types';
 import type { DashProgress } from './dash';
 import type { TFunc } from './nav';
 import { Icon, Icons, relTime, SearchInput, statusColor, T, TrajStyles, truncate } from './ui';
 import { NODE_KIND_LABELS, STATUS_LABELS } from './locales';
+
+const HYP_STATUS_ZH: Record<string, string> = {
+  active: '进行中', validated: '已证实', falsified: '已证否', superseded: '已替代', parked: '已搁置',
+};
+const TRACK_ZH: Record<string, string> = {
+  mainline: '主线', branch: '探索分支', detour: '已偏离', returned: '已回归',
+};
+const TRACK_COLOR: Record<string, string> = {
+  mainline: 'var(--dsw-alias-state-business-primary, #4d6bfe)',
+  branch: 'var(--dsw-alias-label-caption)',
+  detour: 'var(--dsw-alias-state-warn-primary, #f5a524)',
+  returned: 'var(--dsw-alias-state-success-primary, #30a46c)',
+};
+const HYP_STATUS_COLOR: Record<string, string> = {
+  active: 'var(--dsw-alias-state-business-primary, #4d6bfe)',
+  validated: 'var(--dsw-alias-state-success-primary, #30a46c)',
+  falsified: 'var(--dsw-alias-state-error-primary, #e5484d)',
+  superseded: 'var(--dsw-alias-label-caption)',
+  parked: 'var(--dsw-alias-state-warn-primary, #f5a524)',
+};
 
 const GLYPH: Record<string, string> = {
   milestone: '★', idea: '◆', experiment: '▷', paper: '▣', writing: '✎', other: '○',
@@ -180,6 +200,164 @@ function openInScholar(refs: TrajNode['refs']): void {
   }));
 }
 
+/** v0.3 层 0:目标演化头部 — 当前目标 + 版本 + 演化历史折叠 */
+function GoalHeader({ t, file, goalLog }: { t: TFunc; file: TrajProjectFile; goalLog: TrajGoalLog[] }) {
+  const [showHistory, setShowHistory] = React.useState(false);
+  const activeGoal = file.goals?.find((g) => g.status === 'active')
+    ?? [...(file.goals ?? [])].sort((a, b) => b.version - a.version)[0];
+  if (!activeGoal) return null;
+
+  const supersededGoals = (file.goals ?? []).filter((g) => g.status === 'superseded');
+  const pct = (() => {
+    const hyps = (file.hypotheses ?? []).filter((h) => h.goalVersionId === activeGoal.id);
+    if (!hyps.length) return 0;
+    const done = hyps.filter((h) => h.status === 'validated').length;
+    return Math.round((done / hyps.length) * 100);
+  })();
+
+  return (
+    <div style={{
+      borderRadius: 11, padding: '12px 14px', marginBottom: 10,
+      border: '1px solid color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 35%, transparent)',
+      background: 'color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 8%, transparent)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+        <Icon d={Icons.bulb} size={14} color={T.business} />
+        <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.08em', color: T.business }}>
+          {t('digest.question')} · v{activeGoal.version}
+        </span>
+        <span style={{ flex: 1 }} />
+        <span style={{ fontSize: 12, fontWeight: 700 }}>{file.project.name}</span>
+      </div>
+      <div style={{ fontSize: 13.5, fontWeight: 600, lineHeight: 1.6, color: 'var(--dsw-alias-label-primary)' }}>
+        {activeGoal.text}
+      </div>
+      {/* 假设完成度 */}
+      {(file.hypotheses ?? []).filter((h) => h.goalVersionId === activeGoal.id).length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+          <span style={{ fontSize: 10.5, color: T.secondary, flex: 'none', fontVariantNumeric: 'tabular-nums' }}>
+            假设 {((file.hypotheses ?? []).filter((h) => h.goalVersionId === activeGoal.id && h.status === 'validated')).length}/{(file.hypotheses ?? []).filter((h) => h.goalVersionId === activeGoal.id).length} 证实
+          </span>
+          <span style={{ flex: 1, height: 5, borderRadius: 2.5, background: 'rgba(127,127,127,.18)', position: 'relative', overflow: 'hidden' }}>
+            <span className="traj-bar" style={{ position: 'absolute', inset: 0, width: `${pct}%`, borderRadius: 2.5, background: `linear-gradient(90deg, ${T.success}, color-mix(in srgb, ${T.success} 70%, ${T.business}))` }} />
+          </span>
+          <span style={{ fontSize: 13, fontWeight: 800, color: T.success, fontVariantNumeric: 'tabular-nums' }}><CountUp value={pct} />%</span>
+        </div>
+      )}
+      {/* 演化历史折叠 */}
+      {(supersededGoals.length > 0 || goalLog.length > 3) && (
+        <div style={{ marginTop: 8 }}>
+          <button
+            type="button"
+            onClick={() => setShowHistory(!showHistory)}
+            style={{
+              border: 'none', background: 'none', cursor: 'pointer', padding: 0,
+              fontSize: 10, color: T.business, display: 'inline-flex', alignItems: 'center', gap: 4,
+            }}
+          >
+            <span style={{ display: 'inline-flex', transform: showHistory ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}><Icon d={Icons.chevronDown} size={10} /></span>
+            目标演化({supersededGoals.length} 次修订 · {goalLog.length} 条日志)
+          </button>
+          {showHistory && (
+            <div style={{ marginTop: 6, maxHeight: 200, overflow: 'auto', fontSize: 10.5, lineHeight: 1.6 }}>
+              {goalLog.slice(0, 15).map((log) => (
+                <div key={log.id} style={{ display: 'flex', gap: 6, padding: '2px 0', borderBottom: '1px solid rgba(127,127,127,.08)' }}>
+                  <span style={{ color: T.caption, flex: 'none', minWidth: 42, fontVariantNumeric: 'tabular-nums' }}>
+                    {new Date(log.ts).getMonth() + 1}/{new Date(log.ts).getDate()}
+                  </span>
+                  <span style={{ color: T.secondary, flex: 1 }}>{log.description}</span>
+                </div>
+              ))}
+              {goalLog.length > 15 && <div style={{ color: T.caption, paddingTop: 4 }}>…另有 {goalLog.length - 15} 条</div>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** v0.3 层 1:假设卡 — 假设文本 + 状态/轨迹标签 + 下挂实验 */
+function HypothesisCard({ t, hyp, nodes, progress, onOpen, onDelete, onDeleteEntry, onStatus, defaultOpen }: {
+  t: TFunc;
+  hyp: TrajHypothesis;
+  nodes: TrajNode[];
+  progress: Map<string, any>;
+  onOpen: (n: TrajNode) => void;
+  onDelete: (n: TrajNode) => void;
+  onDeleteEntry?: (nodeId: string, entryId: string) => void;
+  onStatus?: (n: TrajNode, s: TrajStatus) => void;
+  defaultOpen?: boolean;
+}) {
+  const expNodes = nodes.filter((n) => n.hypothesisId === hyp.id);
+  const trackC = TRACK_COLOR[hyp.track] ?? T.caption;
+  const statusC = HYP_STATUS_COLOR[hyp.status] ?? T.caption;
+  const isMainline = hyp.track === 'mainline';
+
+  return (
+    <div
+      className="traj-stagger"
+      data-dsh-part="hypothesis-card"
+      style={{
+        borderRadius: 10,
+        border: `1px solid ${isMainline ? 'color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 25%, transparent)' : 'var(--dsw-alias-border-l2)'}`,
+        borderLeft: `3px solid ${trackC}`,
+        background: isMainline ? 'color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 4%, transparent)' : 'transparent',
+        padding: '8px 10px', marginBottom: 8,
+      }}
+    >
+      {/* 假设文本行 */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 7 }}>
+        <span style={{ fontSize: 11, color: trackC, flex: 'none', marginTop: 1 }}>◆</span>
+        <span style={{ fontSize: 12.5, fontWeight: 600, flex: 1, minWidth: 0, lineHeight: 1.45, color: hyp.status === 'falsified' ? T.caption : 'var(--dsw-alias-label-primary)', textDecoration: hyp.status === 'falsified' ? 'line-through' : undefined }}>
+          {hyp.text}
+        </span>
+        <span style={{
+          fontSize: 9, color: statusC, flex: 'none', padding: '1px 6px', borderRadius: 999,
+          background: `color-mix(in srgb, ${statusC} 13%, transparent)`, whiteSpace: 'nowrap',
+        }}>
+          {HYP_STATUS_ZH[hyp.status] ?? hyp.status}
+        </span>
+        <span style={{
+          fontSize: 9, color: trackC, flex: 'none', padding: '1px 6px', borderRadius: 999,
+          background: `color-mix(in srgb, ${trackC} 10%, transparent)`, whiteSpace: 'nowrap',
+        }}>
+          {TRACK_ZH[hyp.track] ?? hyp.track}
+        </span>
+      </div>
+      {/* outcome 原因 */}
+      {hyp.outcomeReason && (
+        <div style={{ marginTop: 3, marginLeft: 18, fontSize: 10.5, color: T.secondary, lineHeight: 1.5 }}>
+          {hyp.outcomeReason}
+        </div>
+      )}
+      {/* 下挂实验列表 */}
+      {expNodes.length > 0 && (
+        <div style={{ marginTop: 6, marginLeft: 6 }}>
+          {expNodes.map((node) => (
+            <DigestNode
+              key={node.id}
+              node={node}
+              progress={progress}
+              t={t}
+              onOpen={onOpen}
+              onDelete={onDelete}
+              onDeleteEntry={onDeleteEntry ? (entryId) => onDeleteEntry(node.id, entryId) : undefined}
+              onStatus={onStatus}
+              defaultOpen={defaultOpen}
+            />
+          ))}
+        </div>
+      )}
+      {expNodes.length === 0 && (
+        <div style={{ marginLeft: 18, marginTop: 4, fontSize: 10, color: T.caption, fontStyle: 'italic' }}>
+          (尚无实验)
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** 节点卡(梳理视图):标题/状态/进度 + 快捷流转 + 实验台账 */
 function DigestNode({ node, progress, t, onOpen, onDelete, onDeleteEntry, onStatus, accent, defaultOpen, present }: {
   node: TrajNode;
@@ -330,144 +508,63 @@ function DigestNode({ node, progress, t, onOpen, onDelete, onDeleteEntry, onStat
 export function TrajListView({ t, file, progress, onOpen, onDelete, onDeleteEntry, onStatus }: {
   t: TFunc;
   file: TrajProjectFile | null;
-  progress: Map<string, DashProgress>;
+  progress: Map<string, any>;
   onOpen: (node: TrajNode) => void;
   onDelete: (node: TrajNode) => void;
-  /** 删除节点上的实验台账(带确认;调 DELETE /traj/nodes/:id/entries/:eid) */
   onDeleteEntry: (nodeId: string, entryId: string) => void;
   onStatus?: (node: TrajNode, s: TrajStatus) => void;
 }) {
   const [query, setQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-  const [sortMode, setSortMode] = useState<SortMode>('mainline');
+  const [statusFilter, setStatusFilter] = useState<TrajStatus | 'all'>('all');
 
   const derived = useMemo(() => {
     if (!file) return null;
-    const byId = new Map(file.nodes.map((n) => [n.id, n]));
-    const mainline = file.project.mainline.filter((id) => byId.has(id)).map((id) => byId.get(id)!);
-    const mainlineSet = new Set(mainline.map((n) => n.id));
-    const branches = file.nodes
-      .filter((n) => !mainlineSet.has(n.id))
-      .sort((a, b) => openRank(a.status) - openRank(b.status) || b.updatedAt - a.updatedAt);
-    const doneMain = mainline.filter((n) => n.status === 'done').length;
+    const hyps = file.hypotheses ?? [];
+    const activeGoal = file.goals?.find((g) => g.status === 'active');
+    const currentHyps = activeGoal ? hyps.filter((h) => h.goalVersionId === activeGoal.id) : hyps;
     const statusCounts: Record<string, number> = { all: file.nodes.length };
     for (const s of TRAJ_STATUSES) statusCounts[s] = 0;
     for (const n of file.nodes) statusCounts[n.status] = (statusCounts[n.status] ?? 0) + 1;
-    const boundExp = file.nodes.filter((n) => n.kind === 'experiment' && n.refs && (n.refs.logPath || n.refs.cmdPattern));
-    const runningExp = boundExp.filter((n) => progress.has(n.id)).length;
     return {
-      mainline, branches, statusCounts,
-      doneMain, totalMain: mainline.length,
-      pct: mainline.length ? Math.round((doneMain / mainline.length) * 100) : 0,
-      entryCount: file.nodes.reduce((s, n) => s + (n.entries?.length ?? 0), 0),
-      boundExp: boundExp.length, runningExp,
+      currentHyps,
+      mainlineHyps: currentHyps.filter((h) => h.track === 'mainline'),
+      branchHyps: currentHyps.filter((h) => h.track !== 'mainline'),
+      statusCounts,
     };
-  }, [file, progress]);
+  }, [file]);
 
-  if (!file || !derived) {
-    return <ListSkeleton />;
-  }
+  if (!file || !derived) return <ListSkeleton />;
 
   const q = query.trim().toLowerCase();
   const matchQ = (n: TrajNode) => !q || [n.title, n.detail ?? '', ...(n.tags ?? []),
     ...(n.entries ?? []).map((e) => `${e.title} ${e.data ?? ''}`)]
-    .join(' ').toLowerCase().includes(q);
+    .join('').toLowerCase().includes(q);
   const matchS = (n: TrajNode) => statusFilter === 'all' || n.status === statusFilter;
-
-  const orderedMainline = sortMode === 'time'
-    ? [...derived.mainline].sort((a, b) => nodeTime(a) - nodeTime(b))
-    : derived.mainline;
-  const visMainline = orderedMainline.filter((n) => matchQ(n) && matchS(n));
-  const visBranches = derived.branches.filter((n) => matchQ(n) && matchS(n));
+  const filterNodes = (nodes: TrajNode[]) => nodes.filter((n) => matchQ(n) && matchS(n));
   const filtered = q !== '' || statusFilter !== 'all';
-  const statusOrder: TrajStatus[] = ['done', 'in_progress', 'blocked', 'todo', 'dropped'];
 
   return (
-    <div className="traj-scroll" data-dsh-plugin="dsh-trajectory" data-dsh-part="trajectory-list" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '6px 12px 14px' }}>
+    <div className="traj-scroll" data-dsh-plugin="dsh-trajectory" data-dsh-part="trajectory-list"
+      style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '6px 12px 14px' }}>
       <TrajStyles />
-
-      {/* 研究问题卡 + 主线进度头图(Linear/GitHub milestone 范式:自动计算完成度) */}
-      <div style={{
-        borderRadius: 11, padding: '10px 12px', marginBottom: 10,
-        border: '1px solid color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 30%, transparent)',
-        background: 'color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 7%, transparent)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
-          <Icon d={Icons.bulb} size={13} color={T.business} />
-          <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.08em', color: T.business }}>{t('digest.question')}</span>
-        </div>
-        <div style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.55, color: 'var(--dsw-alias-label-primary)' }}>
-          {file.project.researchQuestion || file.project.description || t('digest.questionEmpty')}
-        </div>
-        {/* 主线完成度条 */}
-        {derived.totalMain > 0 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 7 }}>
-            <span style={{ fontSize: 10, color: T.secondary, flex: 'none', fontVariantNumeric: 'tabular-nums' }}>
-              {t('digest.progress', { done: derived.doneMain, total: derived.totalMain })}
-            </span>
-            <span style={{ flex: 1, height: 5, borderRadius: 2.5, background: 'rgba(127,127,127,.18)', position: 'relative', overflow: 'hidden' }}>
-              <span className="traj-bar" style={{ position: 'absolute', inset: 0, width: `${derived.pct}%`, borderRadius: 2.5, background: `linear-gradient(90deg, ${T.success}, color-mix(in srgb, ${T.success} 70%, ${T.business}))` }} />
-            </span>
-            <span style={{ fontSize: 10, fontWeight: 700, color: T.success, flex: 'none', fontVariantNumeric: 'tabular-nums' }}><CountUp value={derived.pct} />%</span>
-          </div>
-        )}
-        {/* 状态分布堆叠条 + 统计 */}
-        <div style={{ display: 'flex', gap: 2, marginTop: 6, height: 4, borderRadius: 2, overflow: 'hidden' }}>
-          {statusOrder.filter((s) => derived.statusCounts[s] > 0).map((s) => (
-            <span key={s} style={{ flex: derived.statusCounts[s], background: statusColor(s), opacity: s === 'todo' ? 0.35 : 0.8 }} />
-          ))}
-        </div>
-        <div style={{ display: 'flex', gap: 10, marginTop: 5, fontSize: 9.5, color: T.caption, fontVariantNumeric: 'tabular-nums', flexWrap: 'wrap', alignItems: 'center' }}>
-          <span>{file.nodes.length} {t('digest.units.nodes')}</span>
-          <span>{derived.entryCount} {t('digest.units.entries')}</span>
-          {derived.boundExp > 0 && (
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-              <span style={{ width: 6, height: 6, borderRadius: 999, background: derived.runningExp > 0 ? T.teal : T.caption }} />
-              {t('digest.binding', { running: derived.runningExp, bound: derived.boundExp })}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* 工具栏:搜索 + 排序 + 状态筛选 */}
+      <GoalHeader t={t} file={file} goalLog={file.goalLog ?? []} />
       <div className="traj-noprint" style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' }}>
         <SearchInput value={query} onChange={setQuery} placeholder={t('digest.searchPh')} />
-        <div style={{ display: 'flex', borderRadius: 7, border: '1px solid var(--dsw-alias-border-l2)', overflow: 'hidden', flex: 'none' }}>
-          {(['mainline', 'time'] as SortMode[]).map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => setSortMode(m)}
-              style={{
-                border: 'none', cursor: 'pointer', padding: '3px 9px', fontSize: 10,
-                background: sortMode === m ? 'color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 16%, transparent)' : 'transparent',
-                color: sortMode === m ? T.business : T.secondary,
-                fontWeight: sortMode === m ? 600 : 400,
-              }}
-            >{t(m === 'mainline' ? 'digest.sortMainline' : 'digest.sortTime')}</button>
-          ))}
-        </div>
       </div>
       <div className="traj-noprint" style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
-        {(['all', ...TRAJ_STATUSES] as StatusFilter[]).map((s) => {
+        {(['all', ...TRAJ_STATUSES] as (TrajStatus | 'all')[]).map((s) => {
           const active = statusFilter === s;
           const count = derived.statusCounts[s] ?? 0;
           const color = s === 'all' ? T.secondary : statusColor(s);
           return (
-            <button
-              key={s}
-              type="button"
-              className="traj-press"
-              onClick={() => setStatusFilter(s)}
+            <button key={s} type="button" className="traj-press" onClick={() => setStatusFilter(s)}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 4, height: 19, padding: '0 7px',
                 borderRadius: 999, border: '1px solid', cursor: 'pointer', fontSize: 9.5,
                 borderColor: active ? color : 'var(--dsw-alias-border-l2)',
                 background: active ? `color-mix(in srgb, ${color} 15%, transparent)` : 'transparent',
                 color: active ? color : 'var(--dsw-alias-label-secondary)',
-                fontVariantNumeric: 'tabular-nums',
-              }}
-            >
+              }}>
               {s !== 'all' && <span style={{ width: 5, height: 5, borderRadius: 999, background: color }} />}
               {s === 'all' ? t('graph.all') : t(STATUS_LABELS[s])}
               <span style={{ opacity: 0.7 }}>{count}</span>
@@ -475,90 +572,66 @@ export function TrajListView({ t, file, progress, onOpen, onDelete, onDeleteEntr
           );
         })}
       </div>
-
-      {/* 主线里程碑时间线 */}
-      {visMainline.length > 0 && (
+      {derived.mainlineHyps.length > 0 && (
         <div style={{ marginBottom: 6 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, marginTop: 4 }}>
             <span aria-hidden style={{ width: 3.4, height: 11, borderRadius: 1.7, background: T.business }} />
-            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.06em', color: T.caption }}>
-              {t(sortMode === 'time' ? 'digest.mainlineTime' : 'digest.mainlineEvo')}
-            </span>
+            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.06em', color: T.caption }}>主线假设</span>
           </div>
-          <div style={{ position: 'relative', paddingLeft: 26 }}>
-            <span aria-hidden style={{
-              position: 'absolute', left: 9, top: 8, bottom: 8, width: 2, borderRadius: 1,
-              background: `color-mix(in srgb, ${T.business} 30%, transparent)`,
-            }} />
-            {visMainline.map((node, i) => {
-              const done = node.status === 'done';
-              const idx = file.project.mainline.indexOf(node.id);
-              return (
-                <div key={node.id} className="traj-stagger" style={{ position: 'relative', marginBottom: 10, ['--i' as string]: String(i) } as React.CSSProperties}>
-                  <span aria-hidden className={`traj-pop${done ? ' traj-done-dot' : ''}`} style={{
-                    position: 'absolute', left: -26, top: 4, width: 20, height: 20, borderRadius: 999,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: done ? T.success : node.status === 'in_progress' ? T.business : 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.2))',
-                    color: '#fff', fontSize: 10, fontWeight: 700,
-                    border: '2px solid var(--dsw-alias-bg-base)',
-                    zIndex: 1, fontVariantNumeric: 'tabular-nums', ['--i' as string]: String(i),
-                  } as React.CSSProperties}>
-                    {done ? '✓' : (sortMode === 'time' ? '' : idx + 1)}
-                  </span>
-                  {/* 时间序:圆点下方显示日期刻度 */}
-                  {sortMode === 'time' && (
-                    <span style={{
-                      position: 'absolute', left: -26, top: 26, width: 20, textAlign: 'center',
-                      fontSize: 8, color: T.caption, fontVariantNumeric: 'tabular-nums',
-                    }}>{fmtMD(nodeTime(node))}</span>
-                  )}
-                  <DigestNode node={node} progress={progress} t={t} onOpen={onOpen} onDelete={onDelete} onDeleteEntry={(eid) => onDeleteEntry(node.id, eid)} onStatus={onStatus} defaultOpen={!filtered} />
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* 分支工作 */}
-      {visBranches.length > 0 && (
-        <div style={{ marginBottom: 6 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, marginTop: 12 }}>
-            <span aria-hidden style={{ width: 3.4, height: 11, borderRadius: 1.7, background: T.caption }} />
-            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.06em', color: T.caption }}>{t('digest.branches')}</span>
-          </div>
-          {visBranches.map((n) => (
-            <DigestNode key={n.id} node={n} progress={progress} t={t} onOpen={onOpen} onDelete={onDelete} onDeleteEntry={(eid) => onDeleteEntry(n.id, eid)} onStatus={onStatus} />
+          {derived.mainlineHyps.map((hyp) => (
+            <HypothesisCard key={hyp.id} t={t} hyp={hyp} nodes={filterNodes(file.nodes.filter((n) => n.hypothesisId === hyp.id))}
+              progress={progress} onOpen={onOpen} onDelete={onDelete} onDeleteEntry={onDeleteEntry} onStatus={onStatus} />
           ))}
         </div>
       )}
-
-      {/* 筛选空态 */}
-      {filtered && visMainline.length === 0 && visBranches.length === 0 && (
+      {derived.branchHyps.length > 0 && (
+        <div style={{ marginBottom: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, marginTop: 12 }}>
+            <span aria-hidden style={{ width: 3.4, height: 11, borderRadius: 1.7, background: T.caption }} />
+            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.06em', color: T.caption }}>探索分支 / 偏离</span>
+          </div>
+          {derived.branchHyps.map((hyp) => (
+            <HypothesisCard key={hyp.id} t={t} hyp={hyp} nodes={filterNodes(file.nodes.filter((n) => n.hypothesisId === hyp.id))}
+              progress={progress} onOpen={onOpen} onDelete={onDelete} onDeleteEntry={onDeleteEntry} onStatus={onStatus} />
+          ))}
+        </div>
+      )}
+      {(() => {
+        const unassigned = filterNodes(file.nodes.filter((n) => !n.hypothesisId));
+        if (!unassigned.length) return null;
+        return (
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, marginTop: 12 }}>
+              <span style={{ width: 3.4, height: 11, borderRadius: 1.7, background: T.caption }} />
+              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.06em', color: T.caption }}>未分类实验</span>
+            </div>
+            {unassigned.map((n) => (
+              <DigestNode key={n.id} node={n} progress={progress} t={t} onOpen={onOpen} onDelete={onDelete}
+                onDeleteEntry={onDeleteEntry ? (eid) => onDeleteEntry(n.id, eid) : undefined} onStatus={onStatus} />
+            ))}
+          </div>
+        );
+      })()}
+      {filtered && !file.nodes.some((n) => matchQ(n) && matchS(n)) && (
         <div style={{ textAlign: 'center', color: T.caption, fontSize: 11.5, padding: '28px 0' }}>
           {t('digest.filterEmpty')}
-          <button type="button" onClick={() => { setQuery(''); setStatusFilter('all'); }} style={{ marginLeft: 8, border: 'none', background: 'none', color: T.business, cursor: 'pointer', fontSize: 11, textDecoration: 'underline' }}>
+          <button type="button" onClick={() => { setQuery(''); setStatusFilter('all'); }}
+            style={{ marginLeft: 8, border: 'none', background: 'none', color: T.business, cursor: 'pointer', fontSize: 11, textDecoration: 'underline' }}>
             {t('graph.showAll')}
           </button>
         </div>
       )}
-
-      {/* 待办(弱化;仅未筛选时展示) */}
-      {!filtered && derived.statusCounts.todo > 0 && (
+      {!filtered && file.nodes.filter((n) => n.status === 'todo').length > 0 && (
         <div style={{ marginTop: 14, paddingTop: 10, borderTop: '1px dashed var(--dsw-alias-border-l2)' }}>
           <div style={{ fontSize: 9.5, color: T.caption, marginBottom: 6 }}>{t('digest.todos')}</div>
           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
             {file.nodes.filter((n) => n.status === 'todo').map((n) => (
-              <button
-                key={n.id}
-                type="button"
-                onClick={() => onOpen(n)}
+              <button key={n.id} type="button" onClick={() => onOpen(n)}
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 4, border: '1px solid var(--dsw-alias-border-l2)',
                   background: 'transparent', borderRadius: 999, padding: '2px 9px', fontSize: 10,
                   color: T.secondary, cursor: 'pointer', maxWidth: 220, overflow: 'hidden',
-                }}
-              >
+                }}>
                 <span style={{ color: statusColor(n.status), fontSize: 9 }}>{GLYPH[n.kind] ?? '○'}</span>
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{truncate(n.title, 24)}</span>
               </button>
@@ -566,7 +639,6 @@ export function TrajListView({ t, file, progress, onOpen, onDelete, onDeleteEntr
           </div>
         </div>
       )}
-
       {file.nodes.length === 0 && (
         <div style={{ textAlign: 'center', color: T.caption, fontSize: 11.5, padding: '40px 0' }}>
           {t('common.empty')}
@@ -576,155 +648,51 @@ export function TrajListView({ t, file, progress, onOpen, onDelete, onDeleteEntr
   );
 }
 
-/* ---------- 汇报模式(story):复用清单页的视觉语言(问题卡/时间线/节点卡/台账),
-   只读投影变体——有层次有条理,组会投屏与抽屉「汇报」页签共用 ---------- */
+
 
 export function TrajStoryView({ t, file, progress, compact }: {
   t: TFunc;
   file: TrajProjectFile | null;
-  progress: Map<string, DashProgress>;
-  /** 抽屉内窄幅渲染:收紧留白 */
+  progress: Map<string, any>;
   compact?: boolean;
 }) {
   if (!file) return <div style={{ padding: 20, color: T.caption }}>{t('common.loading')}</div>;
-  const lg = !compact;
 
-  const byId = new Map(file.nodes.map((n) => [n.id, n]));
-  const mainline = file.project.mainline.filter((id) => byId.has(id)).map((id) => byId.get(id)!);
-  const mainlineSet = new Set(mainline.map((n) => n.id));
-  const branches = file.nodes
-    .filter((n) => !mainlineSet.has(n.id))
-    .sort((a, b) => openRank(a.status) - openRank(b.status) || b.updatedAt - a.updatedAt);
-  const doneMain = mainline.filter((n) => n.status === 'done').length;
-  const pct = mainline.length ? Math.round((doneMain / mainline.length) * 100) : 0;
-  const entryCount = file.nodes.reduce((s, n) => s + (n.entries?.length ?? 0), 0);
-  const statusCounts: Record<string, number> = {};
-  for (const s of TRAJ_STATUSES) statusCounts[s] = 0;
-  for (const n of file.nodes) statusCounts[n.status] = (statusCounts[n.status] ?? 0) + 1;
-  const statusOrder: TrajStatus[] = ['done', 'in_progress', 'blocked', 'todo', 'dropped'];
-  const boundExp = file.nodes.filter((n) => n.kind === 'experiment' && n.refs && (n.refs.logPath || n.refs.cmdPattern));
-  const runningExp = boundExp.filter((n) => progress.has(n.id)).length;
-  const blockers = file.nodes.filter((n) => n.status === 'blocked');
+  const goalLog = file.goalLog ?? [];
+  const hyps = file.hypotheses ?? [];
+  const activeGoal = file.goals?.find((g) => g.status === 'active')
+    ?? [...(file.goals ?? [])].sort((a, b) => b.version - a.version)[0];
+  const currentHyps = activeGoal ? hyps.filter((h) => h.goalVersionId === activeGoal.id) : hyps;
+  const mainlineHyps = currentHyps.filter((h) => h.track === 'mainline');
+  const branchHyps = currentHyps.filter((h) => h.track !== 'mainline');
   const todos = file.nodes.filter((n) => n.status === 'todo');
-
-  const SectionHead = ({ label, accent, top }: { label: string; accent?: string; top?: boolean }) => (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, marginTop: top ? 14 : 12 }}>
-      <span aria-hidden style={{ width: 3.4, height: 11, borderRadius: 1.7, background: accent ?? T.caption }} />
-      <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.06em', color: T.caption }}>{label}</span>
-    </div>
-  );
+  const lg = !compact;
 
   return (
     <div className="traj-scroll" data-dsh-part="trajectory-story" style={compact
       ? { flex: 1, minHeight: 0, overflow: 'auto', padding: '10px 12px 24px', width: '100%' }
       : { flex: 1, minHeight: 0, overflow: 'auto', padding: '18px 30px 36px', maxWidth: 880, margin: '0 auto', width: '100%' }}>
       <TrajStyles />
+      <GoalHeader t={t} file={file} goalLog={goalLog} />
 
-      {/* 研究问题卡(与清单同款:问题 + 进度头图 + 状态分布) */}
-      <div style={{
-        borderRadius: 11, padding: lg ? '12px 14px' : '10px 12px', marginBottom: 10,
-        border: '1px solid color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 30%, transparent)',
-        background: 'color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 7%, transparent)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
-          <Icon d={Icons.bulb} size={lg ? 14 : 13} color={T.business} />
-          <span style={{ fontSize: lg ? 11 : 10, fontWeight: 700, letterSpacing: '.08em', color: T.business }}>{t('digest.question')}</span>
-          <span style={{ flex: 1 }} />
-          <span style={{ fontSize: lg ? 12 : 10.5, fontWeight: 700, color: 'var(--dsw-alias-label-primary)' }}>{file.project.name}</span>
-        </div>
-        <div style={{ fontSize: lg ? 14 : 12.5, fontWeight: 600, lineHeight: 1.6, color: 'var(--dsw-alias-label-primary)' }}>
-          {file.project.researchQuestion || file.project.description || t('digest.questionEmpty')}
-        </div>
-        {mainline.length > 0 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-            <span style={{ fontSize: lg ? 11.5 : 10, color: T.secondary, flex: 'none', fontVariantNumeric: 'tabular-nums' }}>
-              {t('digest.progress', { done: doneMain, total: mainline.length })}
-            </span>
-            <span style={{ flex: 1, height: lg ? 6 : 5, borderRadius: 3, background: 'rgba(127,127,127,.18)', position: 'relative', overflow: 'hidden' }}>
-              <span className="traj-bar" style={{ position: 'absolute', inset: 0, width: `${pct}%`, borderRadius: 3, background: `linear-gradient(90deg, ${T.success}, color-mix(in srgb, ${T.success} 70%, ${T.business}))` }} />
-            </span>
-            {lg && <span style={{ fontSize: 14, fontWeight: 800, color: T.success, flex: 'none', fontVariantNumeric: 'tabular-nums' }}><CountUp value={pct} />%</span>}
+      {mainlineHyps.map((hyp, i) => (
+        <HypothesisCard key={hyp.id} t={t} hyp={hyp} nodes={file.nodes} progress={progress}
+          onOpen={() => {}} onDelete={() => {}} />
+      ))}
+
+      {branchHyps.length > 0 && (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, marginTop: 12 }}>
+            <span aria-hidden style={{ width: 3.4, height: 11, borderRadius: 1.7, background: T.caption }} />
+            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.06em', color: T.caption }}>探索分支</span>
           </div>
-        )}
-        <div style={{ display: 'flex', gap: 2, marginTop: 7, height: 4, borderRadius: 2, overflow: 'hidden' }}>
-          {statusOrder.filter((s) => statusCounts[s] > 0).map((s) => (
-            <span key={s} style={{ flex: statusCounts[s], background: statusColor(s), opacity: s === 'todo' ? 0.35 : 0.8 }} />
+          {branchHyps.map((hyp) => (
+            <HypothesisCard key={hyp.id} t={t} hyp={hyp} nodes={file.nodes} progress={progress}
+              onOpen={() => {}} onDelete={() => {}} />
           ))}
-        </div>
-        <div style={{ display: 'flex', gap: 10, marginTop: 5, fontSize: lg ? 10.5 : 9.5, color: T.caption, fontVariantNumeric: 'tabular-nums', flexWrap: 'wrap', alignItems: 'center' }}>
-          <span>{file.nodes.length} {t('digest.units.nodes')}</span>
-          <span>{entryCount} {t('digest.units.entries')}</span>
-          {boundExp.length > 0 && (
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-              <span style={{ width: 6, height: 6, borderRadius: 999, background: runningExp > 0 ? T.teal : T.caption }} />
-              {t('digest.binding', { running: runningExp, bound: boundExp.length })}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* 主线演变:与清单同款时间线(脊柱 + 编号圆点 + 节点卡 + 台账常开) */}
-      {mainline.length > 0 && (
-        <div style={{ marginBottom: 6 }}>
-          <SectionHead label={t('digest.mainlineEvo')} accent={T.business} top={false} />
-          <div style={{ position: 'relative', paddingLeft: 26 }}>
-            <span aria-hidden style={{
-              position: 'absolute', left: 9, top: 8, bottom: 8, width: 2, borderRadius: 1,
-              background: `color-mix(in srgb, ${T.business} 30%, transparent)`,
-            }} />
-            {mainline.map((node, i) => {
-              const done = node.status === 'done';
-              return (
-                <div key={node.id} className="traj-stagger" style={{ position: 'relative', marginBottom: 10, ['--i' as string]: String(i) } as React.CSSProperties}>
-                  <span aria-hidden className={`traj-pop${done ? ' traj-done-dot' : ''}`} style={{
-                    position: 'absolute', left: -26, top: 4, width: 20, height: 20, borderRadius: 999,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: done ? T.success : node.status === 'in_progress' ? T.business : 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.2))',
-                    color: '#fff', fontSize: 10, fontWeight: 700,
-                    border: '2px solid var(--dsw-alias-bg-base)',
-                    zIndex: 1, fontVariantNumeric: 'tabular-nums', ['--i' as string]: String(i),
-                  } as React.CSSProperties}>
-                    {done ? '✓' : i + 1}
-                  </span>
-                  <DigestNode node={node} progress={progress} t={t} present />
-                </div>
-              );
-            })}
-          </div>
-        </div>
+        </>
       )}
 
-      {/* 分支工作(与清单同款卡) */}
-      {branches.length > 0 && (
-        <div style={{ marginBottom: 6 }}>
-          <SectionHead label={t('digest.branches')} />
-          {branches.map((n) => (
-            <DigestNode key={n.id} node={n} progress={progress} t={t} present />
-          ))}
-        </div>
-      )}
-
-      {/* 当前卡点(琥珀警示条卡) */}
-      {blockers.length > 0 && (
-        <div>
-          <SectionHead label={t('story.blockers')} accent={T.warning} />
-          {blockers.map((n) => (
-            <div key={n.id} style={{
-              borderRadius: 10, border: '1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary, #f5a524) 35%, transparent)',
-              borderLeft: `3px solid ${T.warning}`,
-              background: 'color-mix(in srgb, var(--dsw-alias-state-warn-primary, #f5a524) 6%, transparent)',
-              padding: '8px 12px', marginBottom: 8,
-            }}>
-              <div style={{ fontSize: lg ? 13 : 12, fontWeight: 600, lineHeight: 1.4 }}>
-                <span style={{ color: T.warning, marginRight: 6 }}>●</span>{n.title}
-              </div>
-              {n.detail && <div style={{ fontSize: lg ? 11.5 : 10.5, color: T.secondary, lineHeight: 1.55, marginTop: 3 }}>{n.detail}</div>}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* 下一步(弱化 chips,与清单同款) */}
       {todos.length > 0 && (
         <div style={{ marginTop: 14, paddingTop: 10, borderTop: '1px dashed var(--dsw-alias-border-l2)' }}>
           <div style={{ fontSize: 9.5, color: T.caption, marginBottom: 6 }}>{t('digest.todos')}</div>
@@ -732,20 +700,13 @@ export function TrajStoryView({ t, file, progress, compact }: {
             {todos.map((n) => (
               <span key={n.id} style={{
                 display: 'inline-flex', alignItems: 'center', gap: 4, border: '1px solid var(--dsw-alias-border-l2)',
-                background: 'transparent', borderRadius: 999, padding: '2px 9px', fontSize: 10,
-                color: T.secondary, maxWidth: 220, overflow: 'hidden',
+                borderRadius: 999, padding: '2px 9px', fontSize: 10, color: T.secondary,
               }}>
                 <span style={{ color: statusColor(n.status), fontSize: 9 }}>{GLYPH[n.kind] ?? '○'}</span>
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{truncate(n.title, 24)}</span>
+                {truncate(n.title, 24)}
               </span>
             ))}
           </div>
-        </div>
-      )}
-
-      {file.nodes.length === 0 && (
-        <div style={{ textAlign: 'center', color: T.caption, fontSize: 11.5, padding: '40px 0' }}>
-          {t('common.empty')}
         </div>
       )}
     </div>

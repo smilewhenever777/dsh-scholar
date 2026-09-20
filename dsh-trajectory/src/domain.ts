@@ -5,9 +5,10 @@
  */
 import { randomUUID } from 'node:crypto';
 import type {
-  TrajEdge, TrajEdgeKind, TrajEntry, TrajMetric, TrajNode, TrajNodeKind, TrajNodeRefs, TrajProject, TrajStatus,
+  TrajEdge, TrajEdgeKind, TrajEntry, TrajGoal, TrajGoalLog, TrajGoalLog as GoalLog, TrajHypothesis, TrajHypStatus,
+  TrajMetric, TrajNode, TrajNodeKind, TrajNodeRefs, TrajProject, TrajStatus, TrajTrack,
 } from './shared/types.js';
-import { TRAJ_EDGE_KINDS, TRAJ_NODE_KINDS, TRAJ_STATUSES } from './shared/types.js';
+import { TRAJ_EDGE_KINDS, TRAJ_HYP_STATUS, TRAJ_LOG_TYPES, TRAJ_NODE_KINDS, TRAJ_STATUSES, TRAJ_TRACKS } from './shared/types.js';
 
 export const MAX_PROJECTS = 20;
 export const MAX_NODES = 500;
@@ -23,6 +24,15 @@ export function newNodeId(): string {
 }
 export function newEdgeId(): string {
   return `e_${Date.now().toString(36)}${randomUUID().slice(0, 6)}`;
+}
+export function newGoalId(): string {
+  return `g_${Date.now().toString(36)}${randomUUID().slice(0, 6)}`;
+}
+export function newHypothesisId(): string {
+  return `h_${Date.now().toString(36)}${randomUUID().slice(0, 6)}`;
+}
+export function newLogId(): string {
+  return `l_${Date.now().toString(36)}${randomUUID().slice(0, 6)}`;
 }
 
 /* ---------- workspace binding ---------- */
@@ -333,4 +343,88 @@ export function countsByStatus(nodes: Iterable<TrajNode>): Record<TrajStatus, nu
   const counts: Record<TrajStatus, number> = { todo: 0, in_progress: 0, blocked: 0, done: 0, dropped: 0 };
   for (const n of nodes) if (TRAJ_STATUSES.includes(n.status)) counts[n.status] += 1;
   return counts;
+}
+
+
+/* ═══════════════ v0.3 层 0:总目标(版本化) ═══════════════ */
+
+export function createGoal(input: { projectId: string; text: string; version?: number }, now = Date.now()): TrajGoal {
+  const text = (input.text ?? '').trim();
+  if (!text) throw new Error('目标陈述不能为空');
+  return {
+    id: newGoalId(),
+    projectId: input.projectId,
+    text,
+    version: input.version ?? 1,
+    status: 'active',
+    createdAt: now,
+  };
+}
+
+/** 修订目标:旧目标标 superseded,新目标 version+1。 */
+export function reviseGoal(
+  existing: TrajGoal,
+  newText: string,
+  reason: string,
+  now = Date.now(),
+): { superseded: TrajGoal; next: TrajGoal } {
+  const text = newText.trim();
+  if (!text) throw new Error('新目标陈述不能为空');
+  const superseded: TrajGoal = {
+    ...existing,
+    status: 'superseded',
+    supersededAt: now,
+    supersededReason: reason?.trim() || undefined,
+  };
+  const next: TrajGoal = createGoal({ projectId: existing.projectId, text, version: existing.version + 1 }, now);
+  return { superseded, next };
+}
+
+/* ═══════════════ v0.3 层 1:子假设 ═══════════════ */
+
+export function createHypothesis(
+  input: { projectId: string; goalVersionId: string; text: string; track?: TrajTrack },
+  now = Date.now(),
+): TrajHypothesis {
+  const text = (input.text ?? '').trim();
+  if (!text) throw new Error('假设陈述不能为空');
+  const track = input.track && TRAJ_TRACKS.includes(input.track) ? input.track : 'mainline';
+  return {
+    id: newHypothesisId(),
+    projectId: input.projectId,
+    goalVersionId: input.goalVersionId,
+    text,
+    status: 'active',
+    track,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function applyHypothesisPatch(
+  existing: TrajHypothesis,
+  patch: { text?: string; status?: TrajHypStatus; track?: TrajTrack; outcomeReason?: string },
+  now = Date.now(),
+): TrajHypothesis {
+  const next: TrajHypothesis = { ...existing, updatedAt: now };
+  if (patch.text !== undefined) {
+    const text = patch.text.trim();
+    if (!text) throw new Error('假设陈述不能为空');
+    next.text = text;
+  }
+  if (patch.status !== undefined && TRAJ_HYP_STATUS.includes(patch.status)) next.status = patch.status;
+  if (patch.track !== undefined && TRAJ_TRACKS.includes(patch.track)) next.track = patch.track;
+  if (patch.outcomeReason !== undefined) next.outcomeReason = patch.outcomeReason.trim() || undefined;
+  return next;
+}
+
+/* ═══════════════ 演化日志 ═══════════════ */
+
+export function createGoalLog(
+  input: { projectId: string; type: TrajGoalLog['type']; description: string },
+  now = Date.now(),
+): TrajGoalLog {
+  const description = (input.description ?? '').trim();
+  if (!description) throw new Error('日志描述不能为空');
+  return { id: newLogId(), projectId: input.projectId, ts: now, type: input.type, description };
 }

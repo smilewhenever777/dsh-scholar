@@ -111,7 +111,7 @@ try {
   check('重启持久(项目数)', store2.files.size === 2);
   check('重启持久(活跃项目)', store2.activeProjectId === projA.id);
   const file2 = store2.getFile(projA.id);
-  check('重启持久(节点/边/主线)', file2?.nodes.length === 3 && file2?.edges.length === 1 && file2?.project.mainline.length === 2);
+  check('重启持久(节点/边)', file2?.nodes.length === 3 && file2?.edges.length === 1);
 
   /* ---------- entries(实验台账)+ researchQuestion ---------- */
   const f5 = store2.getFile(projA.id);

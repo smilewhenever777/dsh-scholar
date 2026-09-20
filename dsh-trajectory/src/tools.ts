@@ -147,7 +147,125 @@ function projectOverview(file: TrajProjectFile) {
 }
 
 export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStore>): void {
-  ctx.effect(() => {
+      /* ---------- v0.3 层 0:traj_goal_set ---------- */
+      ctx.tools.register(defineTool({
+        name: 'traj_goal_set',
+        description:
+          '设置或修订研究项目的**总目标**(研究主线图插件 v0.3)。首次调用确立 Goal v1;'
+          + '再次调用(文本不同)会修订:旧目标标 superseded(留痕),新目标版本+1,旧假设自动标 superseded。'
+          + '用户说「研究问题改为 X」「目标调整为 Y」「我们发现…方向变了」时调用。'
+          + 'reason 填变化原因(如「F330C 在 DVTOD 上失败,转向层级融合适应」)。',
+        parameters: {
+          text: { type: 'string', required: true, description: '总目标陈述(一句话)' },
+          reason: { type: 'string', description: '修订原因(为什么变;首次确立可省略)' },
+        },
+        output: {
+          schema: {
+            type: 'object', additionalProperties: false,
+            properties: { ok: { type: 'boolean' }, revised: { type: 'boolean' }, goal: { type: 'json' } },
+          },
+          render: renderJson,
+        },
+        
+        presentCall: (args: any) => callView(`设置研究目标:${String(args.text ?? '').slice(0, 30)}`, { reason: args.reason }),
+        presentResult: (args: any, result: { value?: any; meta?: any }) => {
+          const v: any = result.value ?? {};
+          const g: any = v.goal ?? {};
+          return resultView(`${v.revised ? `目标已修订(v${g.version})` : '目标已确立(v1)'}:${String(g.text ?? '').slice(0, 36)}`,
+            [g.supersededReason ? `原因: ${g.supersededReason}` : ''].filter(Boolean).join('\n'));
+        },
+        async execute(args: any, exec: any) {
+          const store = await getStore();
+          const file = await resolveTarget(store, args, exec);
+          const r = await store.setGoal(file.project.id, args.text, args.reason);
+          return { ok: true, revised: r.revised, goal: toJson(r.goal) };
+        },
+      })),
+
+      /* ---------- v0.3 层 1:traj_hypothesis_add ---------- */
+      ctx.tools.register(defineTool({
+        name: 'traj_hypothesis_add',
+        description:
+          '在当前总目标下添加**子假设**(研究主线图插件 v0.3)。假设是要验证的具体推断,'
+          + '可以后续被证实(validated)/证否(falsified)/搁置(parked)。'
+          + 'track 标注轨迹:mainline=主线(默认)/branch=探索分支/detour=已偏离。'
+          + '用户说「我们的假设是 X」「试试这个方向」时调用。',
+        parameters: {
+          text: { type: 'string', required: true, description: '假设陈述(要验证什么)' },
+          track: {
+            type: 'string', enum: ['mainline', 'branch', 'detour', 'returned'],
+            description: '轨迹标签(默认 mainline):主线/探索分支/已偏离/已回归',
+          },
+        },
+        output: {
+          schema: {
+            type: 'object', additionalProperties: false,
+            properties: { ok: { type: 'boolean' }, hypothesis: { type: 'json' } },
+          },
+          render: renderJson,
+        },
+        
+        presentCall: (args: any) => callView(`添加假设:${String(args.text ?? '').slice(0, 30)}`, { track: args.track }),
+        presentResult: (args: any, result: { value?: any; meta?: any }) => {
+          const v: any = result.value ?? {};
+          const h: any = v.hypothesis ?? {};
+          return resultView(`假设已添加(${h.track}):${String(h.text ?? '').slice(0, 30)}`, `id: ${h.id}`);
+        },
+        async execute(args: any, exec: any) {
+          const store = await getStore();
+          const file = await resolveTarget(store, args, exec);
+          const hyp = await store.addHypothesis(file.project.id, { text: args.text, track: args.track });
+          return { ok: true, hypothesis: toJson(hyp) };
+        },
+      })),
+
+      /* ---------- v0.3 层 1:traj_hypothesis_update ---------- */
+      ctx.tools.register(defineTool({
+        name: 'traj_hypothesis_update',
+        description:
+          '更新子假设的状态/轨迹(研究主线图插件 v0.3)。假设被验证或证否时**必须**调用此工具记录结果:'
+          + 'validated=已证实 / falsified=已证否 / parked=搁置 / superseded=被新假设替代。'
+          + 'outcomeReason 填结果原因(如「FLIR 上 +1.66pp 但 DVTOD 上 -20pp,数据集敏感」)。'
+          + 'track 变更用于标记走偏(mainline→detour)或回归(detour→returned)。',
+        parameters: {
+          id: { type: 'string', required: true, description: '假设 id(traj_overview 可查)' },
+          status: {
+            type: 'string', enum: ['active', 'validated', 'falsified', 'superseded', 'parked'],
+            description: '新状态',
+          },
+          track: {
+            type: 'string', enum: ['mainline', 'branch', 'detour', 'returned'],
+            description: '新轨迹标签',
+          },
+          outcomeReason: { type: 'string', description: '结果原因(证否/搁置时必填)' },
+          text: { type: 'string', description: '修改假设陈述' },
+        },
+        output: {
+          schema: {
+            type: 'object', additionalProperties: false,
+            properties: { ok: { type: 'boolean' }, hypothesis: { type: 'json' } },
+          },
+          render: renderJson,
+        },
+        
+        presentCall: (args: any) => callView(`更新假设:${String(args.id ?? '').slice(0, 24)}`, { status: args.status, track: args.track }),
+        presentResult: (args: any, result: { value?: any; meta?: any }) => {
+          const v: any = result.value ?? {};
+          const h: any = v.hypothesis ?? {};
+          return resultView(`假设已更新:${String(h.text ?? args.id ?? '').slice(0, 30)}`,
+            `${h.status} · ${h.track}${h.outcomeReason ? ` · ${h.outcomeReason}` : ''}`);
+        },
+        async execute(args: any, exec: any) {
+          const store = await getStore();
+          const file = await resolveTarget(store, args, exec);
+          const hyp = await store.updateHypothesis(file.project.id, args.id, {
+            status: args.status, track: args.track, outcomeReason: args.outcomeReason, text: args.text,
+          });
+          return { ok: true, hypothesis: toJson(hyp) };
+        },
+      })),
+
+      ctx.effect(() => {
     const disposers = [
       /* ---------- 1. traj_overview ---------- */
       ctx.tools.register(defineTool({

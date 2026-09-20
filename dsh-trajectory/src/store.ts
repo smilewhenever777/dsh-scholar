@@ -12,11 +12,12 @@
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { TrajEdge, TrajEntry, TrajNode, TrajProject, TrajProjectFile, TrajStats } from './shared/types.js';
+import type { TrajEdge, TrajEntry, TrajGoal, TrajGoalLog, TrajHypothesis, TrajHypStatus, TrajNode, TrajProject, TrajProjectFile, TrajStats, TrajTrack } from './shared/types.js';
 import { TRAJ_STATUSES } from './shared/types.js';
 import {
-  applyNodePatch, countsByStatus, createEntry, createNode, applyProjectPatch, MAX_EDGES, MAX_NODES, MAX_PROJECTS,
-  newEdgeValidated, newProjectId, normalizeMainline, normalizeWorkspaceKey, wsBasename,
+  applyNodePatch, applyHypothesisPatch, countsByStatus, createEntry, createGoal, createGoalLog,
+  createHypothesis, createNode, applyProjectPatch, MAX_EDGES, MAX_NODES, MAX_PROJECTS,
+  newEdgeValidated, newProjectId, normalizeMainline, normalizeWorkspaceKey, reviseGoal, wsBasename,
 } from './domain.js';
 import type { NodeInput, NodePatch } from './domain.js';
 
@@ -58,6 +59,10 @@ export class TrajStore {
           raw && typeof raw.project?.id === 'string' && typeof raw.project?.name === 'string'
           && Array.isArray(raw.nodes) && Array.isArray(raw.edges)
         ) {
+          if (!Array.isArray(raw.goals)) raw.goals = [];
+          if (!Array.isArray(raw.hypotheses)) raw.hypotheses = [];
+          if (!Array.isArray(raw.goalLog)) raw.goalLog = [];
+          if (!Array.isArray(raw.project.mainline)) raw.project.mainline = [];
           this.files.set(raw.project.id, raw);
           ok = true;
         }
@@ -76,6 +81,14 @@ export class TrajStore {
         this.activeProjectId = meta.activeProjectId;
       }
     } catch { /* first run or corrupt — fall through to auto-select */ }
+    // v0.3 存量迁移(旧格式自动升级)
+    for (const f of this.files.values()) {
+      if (this.migrateIfNeeded(f)) {
+        await this.saveFile(f);
+        console.log(`[dsh-trajectory] 项目「${f.project.name}」已从 v0.2 迁移到 v0.3 目标树结构`);
+      }
+    }
+
     if (!this.activeProjectId) {
       const mostRecent = this.listProjectFiles().sort((a, b) => b.project.updatedAt - a.project.updatedAt)[0];
       if (mostRecent) this.activeProjectId = mostRecent.project.id;
@@ -202,7 +215,7 @@ export class TrajStore {
       throw new Error(`项目数已达上限（${MAX_PROJECTS}），请先归并旧项目`);
     }
     const { project } = build();
-    this.files.set(project.id, { project, nodes: [], edges: [] });
+    this.files.set(project.id, { project, nodes: [], edges: [], goals: [], hypotheses: [], goalLog: [] });
     await this.saveFile(this.files.get(project.id)!);
     if (activate || !this.activeProjectId) {
       this.activeProjectId = project.id;
@@ -300,6 +313,152 @@ export class TrajStore {
       await this.saveFile(f);
       return f.project;
     });
+  }
+
+  /* ═══════════ v0.3 层 0:Goal CRUD ═══════════ */
+
+  getActiveGoal(projectId: string): TrajGoal | null {
+    const f = this.files.get(projectId);
+    if (!f) return null;
+    return f.goals.find((g) => g.status === 'active')
+      ?? [...f.goals].sort((a, b) => b.version - a.version)[0] ?? null;
+  }
+
+  async setGoal(projectId: string, text: string, reason?: string): Promise<{ goal: TrajGoal; revised: boolean }> {
+    return this.mutate(async () => {
+      const f = this.files.get(projectId);
+      if (!f) throw new Error(`项目不存在: ${projectId}`);
+      const cur = this.getActiveGoal(projectId);
+      if (!cur) {
+        const goal = createGoal({ projectId, text });
+        f.goals.push(goal);
+        f.goalLog.push(createGoalLog({ projectId, type: 'goal_created', description: `目标确立(v1): ${text}` }));
+        await this.saveFile(f);
+        return { goal, revised: false };
+      }
+      if (cur.text.trim() === text.trim()) return { goal: cur, revised: false };
+      const { superseded, next } = reviseGoal(cur, text, reason ?? '');
+      const idx = f.goals.findIndex((g) => g.id === cur.id);
+      f.goals.splice(idx, 1, superseded);
+      f.goals.push(next);
+      for (const h of f.hypotheses) {
+        if (h.goalVersionId === cur.id && h.status === 'active') {
+          const patched = applyHypothesisPatch(h, { status: 'superseded', outcomeReason: '目标已修订' });
+          f.hypotheses.splice(f.hypotheses.indexOf(h), 1, patched);
+        }
+      }
+      f.goalLog.push(createGoalLog({
+        projectId,
+        type: reason?.trim() ? 'goal_pivoted' : 'goal_revised',
+        description: `目标 v${cur.version}→v${next.version}: ${reason?.trim() || text}`,
+      }));
+      await this.saveFile(f);
+      return { goal: next, revised: true };
+    });
+  }
+
+  /* ═══════════ v0.3 层 1:Hypothesis CRUD ═══════════ */
+
+  async addHypothesis(projectId: string, input: { text: string; track?: string; goalVersionId?: string }): Promise<TrajHypothesis> {
+    return this.mutate(async () => {
+      const f = this.files.get(projectId);
+      if (!f) throw new Error(`项目不存在: ${projectId}`);
+      const goal = input.goalVersionId
+        ? f.goals.find((g) => g.id === input.goalVersionId && g.status === 'active')
+        : this.getActiveGoal(projectId);
+      if (!goal) throw new Error('没有活跃目标,请先用 traj_goal_set 确立总目标');
+      const hyp = createHypothesis({
+        projectId,
+        goalVersionId: goal.id,
+        text: input.text,
+        track: (input.track as TrajTrack) || 'mainline',
+      });
+      f.hypotheses.push(hyp);
+      f.goalLog.push(createGoalLog({ projectId, type: 'hyp_added', description: `添加假设(${hyp.track}): ${input.text}` }));
+      await this.saveFile(f);
+      return hyp;
+    });
+  }
+
+  async updateHypothesis(projectId: string, hypId: string, patch: { text?: string; status?: string; track?: string; outcomeReason?: string }): Promise<TrajHypothesis> {
+    return this.mutate(async () => {
+      const f = this.files.get(projectId);
+      if (!f) throw new Error(`项目不存在: ${projectId}`);
+      const idx = f.hypotheses.findIndex((h) => h.id === hypId);
+      if (idx < 0) throw new Error(`假设不存在: ${hypId}`);
+      const prev = f.hypotheses[idx];
+      const next = applyHypothesisPatch(prev, {
+        text: patch.text,
+        status: patch.status as TrajHypStatus,
+        track: patch.track as TrajTrack,
+        outcomeReason: patch.outcomeReason,
+      });
+      f.hypotheses.splice(idx, 1, next);
+      if (patch.status && patch.status !== prev.status) {
+        const logType = patch.status === 'validated' ? 'hyp_validated'
+          : patch.status === 'falsified' ? 'hyp_falsified'
+          : patch.status === 'superseded' ? 'hyp_pivoted' : 'hyp_track_changed';
+        f.goalLog.push(createGoalLog({
+          projectId, type: logType,
+          description: `假设「${prev.text.slice(0, 30)}」→ ${patch.status}${patch.outcomeReason ? `: ${patch.outcomeReason}` : ''}`,
+        }));
+      }
+      if (patch.track && patch.track !== prev.track) {
+        f.goalLog.push(createGoalLog({
+          projectId, type: 'hyp_track_changed',
+          description: `假设「${prev.text.slice(0, 30)}」轨迹 ${prev.track} → ${patch.track}`,
+        }));
+      }
+      await this.saveFile(f);
+      return next;
+    });
+  }
+
+  listHypotheses(projectId: string): TrajHypothesis[] {
+    const f = this.files.get(projectId);
+    if (!f) return [];
+    return [...f.hypotheses].sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  listGoalLog(projectId: string): TrajGoalLog[] {
+    const f = this.files.get(projectId);
+    if (!f) return [];
+    return [...f.goalLog].sort((a, b) => b.ts - a.ts);
+  }
+
+  /* ═══════════ v0.2 → v0.3 存量迁移 ═══════════ */
+
+  private migrateIfNeeded(f: TrajProjectFile): boolean {
+    if ((f.goals ?? []).length > 0) return false;
+    const p = f.project;
+    const now = Date.now();
+
+    const rq = p.researchQuestion?.trim() || p.description?.trim();
+    if (!rq) return false;
+
+    const goal = createGoal({ projectId: p.id, text: rq }, now);
+    f.goals.push(goal);
+    f.goalLog.push(createGoalLog({ projectId: p.id, type: 'goal_created', description: `目标确立(v1,从旧格式迁移): ${rq}` }));
+
+    if ((p.mainline ?? []).length > 0) {
+      const byId = new Map(f.nodes.map((n) => [n.id, n]));
+      for (const nodeId of p.mainline) {
+        const node = byId.get(nodeId);
+        if (!node) continue;
+        const hyp = createHypothesis({ projectId: p.id, goalVersionId: goal.id, text: node.title, track: 'mainline' }, now);
+        f.hypotheses.push(hyp);
+        node.hypothesisId = hyp.id;
+      }
+      p.mainline = [];
+    }
+
+    const unassigned = f.nodes.filter((n) => !n.hypothesisId);
+    if (unassigned.length > 0) {
+      const hyp = createHypothesis({ projectId: p.id, goalVersionId: goal.id, text: '未分类(旧格式迁移)', track: 'branch' }, now);
+      f.hypotheses.push(hyp);
+      for (const n of unassigned) n.hypothesisId = hyp.id;
+    }
+    return true;
   }
 
   /** 给节点追加一条实验台账(已有工作/数据/结论)。 */

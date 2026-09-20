@@ -101,6 +101,95 @@ export function registerTrajRoutes(
   getConfig: () => TrajConfig,
   updateConfig: (patch: Partial<TrajConfig>) => Promise<void>,
 ): void {
+  /* ---------- v0.3 层 0:Goal 路由 ---------- */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'prefix',
+    path: '/traj/goals',
+    handler: async (req, res) => {
+      try {
+        const store = await getStore();
+        const { rest } = pathInfo(req, '/traj/goals');
+
+        if (!rest || rest === '/') {
+          if (req.method === 'GET') {
+            const file = await store.resolveProject({ ws: new URL(req.url ?? '/', 'http://localhost').searchParams.get('ws') ?? undefined });
+            sendJson(res, 200, { goals: file.goals, activeGoalId: store.getActiveGoal(file.project.id)?.id ?? null });
+            return;
+          }
+          if (req.method === 'POST') {
+            const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+            const file = await store.resolveProject({
+              ws: typeof body.ws === 'string' ? body.ws : undefined,
+              projectId: typeof body.projectId === 'string' && body.projectId ? body.projectId : undefined,
+            });
+            const r = await store.setGoal(file.project.id, String(body.text ?? ''), typeof body.reason === 'string' ? body.reason : undefined);
+            sendJson(res, 200, { goal: r.goal, revised: r.revised });
+            return;
+          }
+          return sendJson(res, 405, { error: 'method not allowed' });
+        }
+        return sendJson(res, 404, { error: 'not found' });
+      } catch (err) {
+        sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  } satisfies WebRoute));
+
+  /* ---------- v0.3 层 1:Hypothesis 路由 ---------- */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'prefix',
+    path: '/traj/hypotheses',
+    handler: async (req, res) => {
+      try {
+        const store = await getStore();
+        const { rest } = pathInfo(req, '/traj/hypotheses');
+
+        if (!rest || rest === '/') {
+          if (req.method === 'GET') {
+            const file = await store.resolveProject({ ws: new URL(req.url ?? '/', 'http://localhost').searchParams.get('ws') ?? undefined });
+            sendJson(res, 200, { hypotheses: store.listHypotheses(file.project.id) });
+            return;
+          }
+          if (req.method === 'POST') {
+            const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+            const file = await store.resolveProject({
+              ws: typeof body.ws === 'string' ? body.ws : undefined,
+              projectId: typeof body.projectId === 'string' && body.projectId ? body.projectId : undefined,
+            });
+            const hyp = await store.addHypothesis(file.project.id, {
+              text: String(body.text ?? ''),
+              track: typeof body.track === 'string' ? body.track : undefined,
+            });
+            sendJson(res, 201, { hypothesis: hyp });
+            return;
+          }
+          return sendJson(res, 405, { error: 'method not allowed' });
+        }
+
+        const id = decodeURIComponent(rest.slice(1));
+        if (!id || id.includes('/')) return sendJson(res, 404, { error: 'not found' });
+        if (req.method === 'PUT') {
+          const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+          const file = await store.resolveProject({
+            ws: typeof body.ws === 'string' ? body.ws : undefined,
+            projectId: typeof body.projectId === 'string' && body.projectId ? body.projectId : undefined,
+          });
+          const hyp = await store.updateHypothesis(file.project.id, id, {
+            text: typeof body.text === 'string' ? body.text : undefined,
+            status: typeof body.status === 'string' ? body.status : undefined,
+            track: typeof body.track === 'string' ? body.track : undefined,
+            outcomeReason: typeof body.outcomeReason === 'string' ? body.outcomeReason : undefined,
+          });
+          sendJson(res, 200, { hypothesis: hyp });
+          return;
+        }
+        sendJson(res, 405, { error: 'method not allowed' });
+      } catch (err) {
+        sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  } satisfies WebRoute));
+
   /* ---------- overview (badge polling) ---------- */
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
