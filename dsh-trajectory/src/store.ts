@@ -341,10 +341,12 @@ export class TrajStore {
       const idx = f.goals.findIndex((g) => g.id === cur.id);
       f.goals.splice(idx, 1, superseded);
       f.goals.push(next);
-      for (const h of f.hypotheses) {
+      // 旧目标下的 active 假设继承到新目标(改 goalVersionId),不自动标 superseded。
+      // 目标文本修订不等于假设作废——哪些假设真正失效应由 AI/用户显式判断。
+      for (let i = 0; i < f.hypotheses.length; i++) {
+        const h = f.hypotheses[i];
         if (h.goalVersionId === cur.id && h.status === 'active') {
-          const patched = applyHypothesisPatch(h, { status: 'superseded', outcomeReason: '目标已修订' });
-          f.hypotheses.splice(f.hypotheses.indexOf(h), 1, patched);
+          f.hypotheses[i] = { ...h, goalVersionId: next.id, updatedAt: Date.now() };
         }
       }
       f.goalLog.push(createGoalLog({
