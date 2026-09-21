@@ -163,6 +163,8 @@ function normalizeRefs(raw: unknown): TrajNodeRefs | undefined {
 
 export interface NodeInput {
   projectId?: string;
+  /** v0.3:归属假设 id */
+  hypothesisId?: string;
   kind?: TrajNodeKind;
   title?: string;
   status?: TrajStatus;
@@ -182,6 +184,7 @@ export function createNode(
   const node: TrajNode = {
     id: newNodeId(),
     projectId: input.projectId,
+    hypothesisId: input.hypothesisId || undefined,
     kind,
     title,
     status,
@@ -204,6 +207,8 @@ export interface NodePatch {
   detail?: string;
   refs?: unknown;
   tags?: string[];
+  /** v0.3:归属假设 id(传空串清除) */
+  hypothesisId?: string;
   /** 实验台账(整体替换;addEntry/removeEntry 组合使用) */
   entries?: TrajEntry[];
 }
@@ -226,6 +231,10 @@ export function applyNodePatch(existing: TrajNode, patch: NodePatch, now = Date.
     const refs = normalizeRefs(patch.refs);
     if (refs) next.refs = refs;
     else delete next.refs;
+  }
+  if (patch.hypothesisId !== undefined) {
+    next.hypothesisId = patch.hypothesisId.trim() || undefined;
+    if (!next.hypothesisId) delete next.hypothesisId;
   }
   if (patch.tags !== undefined) {
     next.tags = [...new Set(patch.tags.map((t) => String(t).trim()).filter(Boolean))];

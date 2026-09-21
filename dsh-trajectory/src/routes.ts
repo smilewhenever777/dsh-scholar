@@ -440,6 +440,7 @@ export function registerTrajRoutes(
           if (typeof body.kind === 'string' && TRAJ_NODE_KINDS.includes(body.kind as TrajNodeKind)) patch.kind = body.kind;
           if (typeof body.status === 'string' && TRAJ_STATUSES.includes(body.status as TrajStatus)) patch.status = body.status;
           if (typeof body.detail === 'string') patch.detail = body.detail;
+          if (typeof body.hypothesisId === 'string') patch.hypothesisId = body.hypothesisId || undefined;
           if (Array.isArray(body.tags)) patch.tags = body.tags;
           // explicit refs object wins; flat ref fields (cardId=… etc.) merge into a replace-block
           if (body.refs !== undefined && typeof body.refs === 'object' && !Array.isArray(body.refs)) {

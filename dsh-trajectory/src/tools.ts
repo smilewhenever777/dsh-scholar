@@ -579,6 +579,7 @@ export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStor
             description: '依赖来源节点 id 列表(traj_overview 可查);自动创建 enables 边',
           },
           mainline: { type: 'boolean', description: '是否追加到创新主线末尾(关键路径节点传 true)' },
+          hypothesisId: { type: 'string', description: '归属的子假设 id(强烈建议传入;不传会自动挂到默认假设并返回提示)' },
           cardId: { type: 'string', description: '关联 scholar idea 卡 id(idea_card_search 可查)' },
           paperId: { type: 'string', description: '关联 scholar 论文 id(paper_search 可查)' },
           hostId: { type: 'string', description: '实验绑定:dashboard 主机 id' },
@@ -604,8 +605,30 @@ export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStor
         async execute(args: any, exec: any) {
           const store = await getStore();
           const file = await resolveTarget(store, args, exec, { autoCreate: true });
+          // v0.3:确保有活跃目标;没有则从 description 或首个节点标题自动创建
+          let activeGoal = store.getActiveGoal(file.project.id);
+          if (!activeGoal) {
+            const fallbackText = file.project.description?.trim() || file.project.researchQuestion?.trim() || file.project.name;
+            const r = await store.setGoal(file.project.id, fallbackText);
+            activeGoal = r.goal;
+          }
+          // v0.3:hypothesisId 未传时,自动创建/复用"默认假设"挂载,并在返回值中提示 AI
+          let hypothesisId = typeof args.hypothesisId === 'string' && args.hypothesisId ? args.hypothesisId : undefined;
+          let autoHypothesis = false;
+          if (!hypothesisId) {
+            const hyps = store.listHypotheses(file.project.id);
+            const defaultHyp = hyps.find((h) => h.goalVersionId === activeGoal!.id && h.text === '默认假设(自动创建)');
+            if (defaultHyp) {
+              hypothesisId = defaultHyp.id;
+            } else {
+              const hyp = await store.addHypothesis(file.project.id, { text: '默认假设(自动创建)', track: 'mainline' });
+              hypothesisId = hyp.id;
+            }
+            autoHypothesis = true;
+          }
           const node = await store.addNode({
             projectId: file.project.id,
+            hypothesisId,
             kind: args.kind as TrajNodeKind | undefined,
             title: args.title,
             status: args.status as TrajStatus | undefined,
@@ -618,7 +641,12 @@ export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStor
             parentIds: Array.isArray(args.parentIds) ? args.parentIds : undefined,
             mainline: args.mainline === true,
           });
-          return { ok: true, node: toJson(node), ...cmdPatternWarning(args.cmdPattern) };
+          return {
+            ok: true,
+            node: toJson(node),
+            ...(autoHypothesis ? { hint: '已自动挂载到"默认假设"。建议用 traj_hypothesis_add 创建更精确的假设(如「XX 方法在 YY 数据集上能否超越基线」),再用 traj_node_update 将此实验关上去。' } : {}),
+            ...cmdPatternWarning(args.cmdPattern),
+          };
         },
       })),
 
