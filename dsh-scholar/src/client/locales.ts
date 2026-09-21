@@ -4,6 +4,12 @@
 import type { CardCategory, CardStatus, GraphEdgeKind } from '../shared/types';
 
 export const zh = {
+  "paper.retry": "重试",
+  "card.view.group": "按论文分组",
+  "card.view.kanban": "看板",
+  "card.view.table": "表格",
+  "card.view.grid": "网格",
+  "card.view.list": "列表",
   'nav.title': '学者工作台',
   'nav.label': '学者',
   'drawer.expand': '整窗展开',
@@ -332,6 +338,12 @@ export const zh = {
 };
 
 export const en: typeof zh = {
+  "paper.retry": "Retry",
+  "card.view.group": "Group by paper",
+  "card.view.kanban": "Kanban",
+  "card.view.table": "Table",
+  "card.view.grid": "Grid",
+  "card.view.list": "List",
   'nav.title': 'Scholar Workbench',
   'nav.label': 'Scholar',
   'drawer.expand': 'Expand',

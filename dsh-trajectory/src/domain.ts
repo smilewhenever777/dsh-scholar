@@ -201,6 +201,7 @@ export function createNode(
 }
 
 export interface NodePatch {
+  mainline?: boolean;
   title?: string;
   kind?: TrajNodeKind;
   status?: TrajStatus;

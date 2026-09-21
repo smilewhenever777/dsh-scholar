@@ -1,0 +1,18 @@
+{
+  "name": "dsh-plugin-development",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node tests/run.mjs --build-only",
+    "test": "node tests/run.mjs",
+    "check:release": "node tests/release-check.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "playwright": "1.62.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "engines": { "node": ">=20" }
+}

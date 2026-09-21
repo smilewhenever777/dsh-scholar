@@ -1,4 +1,5 @@
-import React, { useEffect, useRef } from 'react';
+import { useModalFocus } from './modalFocus';
+import React from 'react';
 import { createPortal } from 'react-dom';
 
 /* ---------- shared UI primitives styled after DSH's design tokens ---------- */
@@ -23,10 +24,10 @@ export const T = {
 
 /**
  * z-index 约定（与 dsh-web-ui 社区惯例对齐，两个插件必须使用同一张表）：
- * 抽屉 70（让位于 shell 自身弹层）；居中弹窗 200；
+ * 抽屉 70（让位于 shell 自身弹层）；居中弹窗 2147483100（高于插件浮窗）；
  * 悬浮层（toast / HUD）一律 2147483000 —— 略低于 int32 上限，留调试余量。
  */
-export const Z = { drawer: 70, modal: 200, float: 2147483000 } as const;
+export const Z = { drawer: 70, modal: 2147483100, float: 2147483000 } as const;
 
 /**
  * One-shot global stylesheet: everything inline styles cannot express
@@ -250,7 +251,7 @@ export function Btn(props: {
       className="sch-press"
       style={{
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-        height: 26, padding: '0 10px',
+        minHeight: 26, padding: '3px 10px', lineHeight: 1.4,
         border: `1px solid ${tone === 'primary' || tone === 'soft' ? 'transparent' : 'var(--dsw-alias-border-l2)'}`,
         background,
         borderRadius: 7, cursor: disabled ? 'default' : 'pointer',
@@ -271,8 +272,8 @@ export function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
       {...rest}
       className={`sch-input ${rest.className ?? ''}`}
       style={{
-        height: 26, display: 'block', width: '100%', boxSizing: 'border-box',
-        padding: '0 8px', borderRadius: 7, border: '1px solid var(--dsw-alias-border-l2)',
+        minHeight: 26, lineHeight: 1.4, display: 'block', width: '100%', boxSizing: 'border-box',
+        padding: '3px 8px', borderRadius: 7, border: '1px solid var(--dsw-alias-border-l2)',
         background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'var(--dsw-alias-label-primary)',
         fontSize: 12, transition: 'border-color .12s ease, box-shadow .12s ease', ...style,
       }}
@@ -305,7 +306,7 @@ export function Select({ children, style, ...rest }: React.SelectHTMLAttributes<
         {...rest}
         className={`sch-input ${rest.className ?? ''}`}
         style={{
-          height: 26, appearance: 'none', WebkitAppearance: 'none', paddingRight: 20,
+          minHeight: 26, lineHeight: 1.4, paddingTop: 3, paddingBottom: 3, appearance: 'none', WebkitAppearance: 'none', paddingRight: 20,
           borderRadius: 7, border: '1px solid var(--dsw-alias-border-l2)',
           background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'var(--dsw-alias-label-primary)',
           fontSize: 11.5, cursor: 'pointer', boxSizing: 'border-box', width: '100%',
@@ -462,19 +463,20 @@ export function Chip({ label, active, onClick, color }: { label: string; active?
 
 /** importance stars ⭐1-5 */
 export function Stars({ value, onChange, size = 11 }: { value: number; onChange?: (v: number) => void; size?: number }) {
-  return (
-    <span style={{ display: 'inline-flex', gap: 1, color: T.warning, cursor: onChange ? 'pointer' : 'default' }}>
-      {[1, 2, 3, 4, 5].map((i) => (
-        <span
-          key={i}
-          onClick={onChange ? (e) => { e.stopPropagation(); onChange(i); } : undefined}
-          style={{ opacity: i <= value ? 1 : 0.25, fontSize: size, lineHeight: 1 }}
-        >
-          ★
-        </span>
-      ))}
-    </span>
-  );
+  const keys = (e: React.KeyboardEvent, i: number) => {
+    const next = e.key === 'ArrowRight' || e.key === 'ArrowUp' ? Math.min(5, i + 1)
+      : e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? Math.max(1, i - 1) : e.key === 'Home' ? 1 : e.key === 'End' ? 5 : null;
+    if (next !== null && onChange) {
+      e.preventDefault(); e.stopPropagation(); onChange(next);
+      (e.currentTarget.parentElement?.children[next - 1] as HTMLElement | undefined)?.focus();
+    }
+  };
+  return <span role={onChange ? 'radiogroup' : undefined} aria-label={onChange ? '重要性 / Importance' : undefined} style={{ display: 'inline-flex', gap: 2, color: T.warning }}>
+    {[1, 2, 3, 4, 5].map(i => onChange ? <button type="button" role="radio" aria-checked={i === value} aria-label={i + ' / 5'} tabIndex={i === (value || 1) ? 0 : -1} key={i}
+      onKeyDown={e => keys(e, i)} onClick={e => { e.stopPropagation(); onChange(i); }}
+      style={{ border: 0, background: 'none', color: 'inherit', padding: 2, cursor: 'pointer', opacity: i <= value ? 1 : .3, fontSize: size, lineHeight: 1 }}>★</button>
+      : <span key={i} style={{ opacity: i <= value ? 1 : .25, fontSize: size, lineHeight: 1 }}>★</span>)}
+  </span>;
 }
 
 /** status color for cards */
@@ -536,49 +538,19 @@ function opaqueBase(): string {
   return cachedOpaque;
 }
 
-/** 叠放 Modal 的栈:Esc 只关最顶层那一个。 */
-const modalStack: symbol[] = [];
-
 export function Modal({ title, onClose, children, width = 480 }: {
   title: string;
   onClose: () => void;
   children: React.ReactNode;
   width?: number;
 }) {
-  const boxRef = useRef<HTMLDivElement>(null);
-  const idRef = useRef(Symbol('scholar-modal'));
-  /** onClose 常是内联箭头函数——用 ref 承接,避免 effect 随父组件每次渲染重启 */
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-
-  useEffect(() => {
-    const id = idRef.current;
-    modalStack.push(id);
-    /** 关闭时把焦点还给打开弹窗的触发元素 */
-    const trigger = document.activeElement;
-    // 打开即聚焦第一个表单控件(无控件则聚焦弹窗本体)
-    const first = boxRef.current?.querySelector<HTMLElement>('input, textarea, select');
-    (first ?? boxRef.current)?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      if (modalStack[modalStack.length - 1] !== id) return; // 只响应最顶层
-      e.stopPropagation();
-      onCloseRef.current();
-    };
-    document.addEventListener('keydown', onKey, true);
-    return () => {
-      document.removeEventListener('keydown', onKey, true);
-      const i = modalStack.indexOf(id);
-      if (i >= 0) modalStack.splice(i, 1);
-      if (trigger instanceof HTMLElement && document.contains(trigger)) trigger.focus();
-    };
-  }, []);
-
+  const { boxRef, layer } = useModalFocus(onClose);
   return createPortal(
     <div
+      data-dsh-plugin="dsh-scholar"
       className="sch-modal-bd"
       style={{
-        position: 'fixed', inset: 0, zIndex: Z.modal, background: 'rgba(0,0,0,.45)',
+        position: 'fixed', inset: 0, zIndex: Z.modal + layer, background: 'rgba(0,0,0,.45)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
       }}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
@@ -604,7 +576,7 @@ export function Modal({ title, onClose, children, width = 480 }: {
         <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', maxHeight: '82vh' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: '1px solid var(--dsw-alias-border-l2)', flex: 'none' }}>
             <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>{title}</span>
-            <IconButton label="close" onClick={onClose} icon={<Icon d={Icons.close} size={14} />} />
+            <IconButton label={document.documentElement.lang.startsWith('en') ? 'Close' : '关闭'} onClick={onClose} icon={<Icon d={Icons.close} size={14} />} />
           </div>
           <div className="sch-scroll" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '12px 14px' }}>{children}</div>
         </div>

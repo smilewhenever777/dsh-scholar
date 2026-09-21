@@ -1,3 +1,4 @@
+import { queueMutation } from './mutationQueue';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { CardCategory, CardStatus, IdeaCard, Paper } from '../shared/types';
@@ -208,8 +209,12 @@ export function BookshelfView({ t }: { t: TFunc }) {
     if (opErrorTimer.current) clearTimeout(opErrorTimer.current);
     opErrorTimer.current = setTimeout(() => setOpError(null), 6000);
   };
-  const saveCard = async (draft: CardDraft) => {
-    const body = {
+  const formSaving = useRef(false);
+  useEffect(() => () => { if (opErrorTimer.current) clearTimeout(opErrorTimer.current); }, []);
+  const saveCard = async (draft: CardDraft, patch?: Partial<Pick<IdeaCard, 'importance' | 'status'>>): Promise<boolean> => {
+    if (!patch && formSaving.current) return false;
+    if (!patch) formSaving.current = true;
+    const body = patch ?? {
       title: draft.title,
       insight: draft.insight,
       paperId: draft.paperId ?? '',
@@ -225,11 +230,14 @@ export function BookshelfView({ t }: { t: TFunc }) {
     };
     try {
       if (draft.id) {
-        const res = await api<{ card: IdeaCard }>(`/scholar/cards/${encodeURIComponent(draft.id)}`, {
+        const res = await queueMutation('card:' + draft.id, () => api<{ card: IdeaCard }>(`/scholar/cards/${encodeURIComponent(draft.id!)}`, {
           method: 'PUT',
           body: JSON.stringify(body),
-        });
-        setModal((m) => (m ? { ...m, card: res.card, editing: false } : m));
+        }));
+        const fields = patch ? Object.fromEntries(Object.keys(patch).map(k => [k, res.card[k as keyof IdeaCard]])) : res.card;
+        setModal(m => m && m.card.id === draft.id && !(patch && m.editing) ? { ...m, card: { ...m.card, ...fields }, editing: patch ? m.editing : false } : m);
+        setCards(cur => cur.map(c => c.id === draft.id ? { ...c, ...fields } : c));
+        setAllCards(cur => cur.map(c => c.id === draft.id ? { ...c, ...fields } : c));
       } else {
         const res = await api<{ card: IdeaCard; similar?: { id: string; title: string; score: number }[] }>('/scholar/cards', { method: 'POST', body: JSON.stringify(body) });
         setCreating(false);
@@ -238,20 +246,20 @@ export function BookshelfView({ t }: { t: TFunc }) {
         if (res.similar?.length) {
           showToast(t('card.similarWarn', { titles: res.similar.map((x) => truncate(x.title, 16)).join('；') }));
         }
-        if (res.card) {
-          const fresh = await api<{ card: IdeaCard }>(`/scholar/cards/${encodeURIComponent(res.card.id)}`).catch(() => null);
-          if (fresh) setModal({ card: fresh.card, editing: false });
-        }
+        if (res.card) setModal({ card: res.card, editing: false });
       }
       setError('');
-      setSaveError('');
-      setCreatingDirty(false);
-      setEditDirty(false);
-      await Promise.all([load(), loadAll()]);
+      if (!patch) setSaveError('');
+      setOpError(cur => cur?.cardId === draft.id ? null : cur);
+      if (!patch) { setCreatingDirty(false); setEditDirty(false); }
+      // The write succeeded. A refresh failure must not report a failed creation.
+      if (!patch) await Promise.all([load(), loadAll()]).catch(() => setError(t('common.partialLoadFailed')));
+      return true;
     } catch (e) {
-      // 保存错误渲染进 CardForm 内部(与 invalid 同位),不再被 Modal 遮罩挡住
-      setSaveError(e instanceof Error ? e.message : String(e));
-    }
+      const msg = e instanceof Error ? e.message : String(e);
+      if (patch && draft.id) showOpError(draft.id, msg); else setSaveError(msg);
+      return false;
+    } finally { if (!patch) formSaving.current = false; }
   };
 
   const removeCard = async (id: string) => {
@@ -270,7 +278,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
     if ((status === 'adopted' || status === 'dropped')
       && !window.confirm(t('card.confirmStatus', { status: t(STATUS_LABELS[status]) }))) return;
     try {
-      await saveCard({ ...card, status });
+      await saveCard(card, { status });
     } catch (e) {
       showOpError(card.id, e instanceof Error ? e.message : String(e)); // E10
     }
@@ -278,6 +286,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
 
   /** 关闭"新建卡片"弹窗(含脏数据确认) */
   const closeCreate = () => {
+    if (formSaving.current) return;
     if (creatingDirty && !window.confirm(t('common.confirmDiscard'))) return;
     setCreating(false);
     setPrefillPaperId(null);
@@ -287,6 +296,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
 
   /** 从编辑态退回详情(含脏数据确认) */
   const cancelEdit = () => {
+    if (formSaving.current) return;
     if (editDirty && !window.confirm(t('common.confirmDiscard'))) return;
     setModal((m) => (m ? { ...m, editing: false } : m));
     setEditDirty(false);
@@ -444,7 +454,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
   /* ---------- toolbar ---------- */
   const toolbar = (
     <div style={{ flex: 'none' }}>
-      <div style={{ padding: '8px 10px 6px', display: 'flex', gap: 6, alignItems: 'center' }}>
+      <div style={{ padding: '8px 10px 6px', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
         <SearchInput value={q} onChange={setQ} placeholder={t('card.searchPh')} />
         <IconButton
           label={t('paper.filters')}
@@ -475,7 +485,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
           {(['group', 'kanban', 'table', 'grid', 'list'] as const).map((m) => (
             <IconButton
               key={m}
-              label={m}
+              label={t('card.view.' + m)}
               size={22}
               active={viewMode === m}
               onClick={() => setViewMode(m)}
@@ -532,7 +542,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
   );
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+    <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       <SchStyles />
       {toolbar}
       {error && <div style={{ color: T.danger, padding: '2px 12px 6px', fontSize: 11 }}>{error}</div>}
@@ -546,7 +556,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
         <div style={{ color: T.warning, padding: '2px 12px 6px', fontSize: 11 }}>{degraded}</div>
       )}
 
-      <div className="sch-scroll" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '0 10px 12px' }}>
+      <div className="sch-scroll" style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', padding: '0 10px 12px' }}>
         {!loading && cards.length === 0 && !error && (
           q || filtersActive ? (
             <EmptyState icon={<Icon d={Icons.search} size={34} />} title={t('common.empty')} />
@@ -621,7 +631,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
                             style={{
                               display: 'flex', alignItems: 'center', gap: 7, width: '100%', textAlign: 'left',
                               border: 'none', background: 'none', cursor: 'pointer',
-                              padding: '5px 6px', borderRadius: 7, color: 'var(--dsh-alias-label-primary)',
+                              padding: '5px 6px', borderRadius: 7, color: 'var(--dsw-alias-label-primary)',
                               marginBottom: 2,
                               // stagger 序号（封顶防长列表等太久）
                               ['--sch-i' as string]: Math.min(ci, 18),
@@ -676,7 +686,8 @@ export function BookshelfView({ t }: { t: TFunc }) {
                         && !window.confirm(t('card.confirmStatus', { status: t(STATUS_LABELS[st]) }))) return;
                       // E10:确认成功才播放落位动画(失败不得显示成功效果),
                       // 失败提示绑定该卡(看板列头红条),不再静默
-                      void saveCard({ ...c, status: st }).then(() => {
+                      void saveCard(c, { status: st }).then((ok) => {
+                        if (!ok) return;
                         setDroppedId(id);
                         setTimeout(() => setDroppedId((cur) => (cur === id ? null : cur)), 700);
                       }).catch((err: unknown) => {
@@ -712,7 +723,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
                             textAlign: 'left', cursor: 'grab', border: '1px solid var(--dsw-alias-border-l2)',
                             background: T.cardBg, borderRadius: 9, padding: '8px 9px',
                             ['--sch-i' as string]: Math.min(ci, 14),
-                            color: 'var(--dsh-alias-label-primary)',
+                            color: 'var(--dsw-alias-label-primary)',
                           }}
                         >
                           <div style={{ fontSize: 11.5, fontWeight: 650, lineHeight: 1.45, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
@@ -797,7 +808,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
                         display: 'grid', gridTemplateColumns: 'minmax(140px,2.2fr) 62px 64px minmax(90px,1.2fr) 44px 72px',
                         width: '100%', alignItems: 'center', gap: 4, padding: '5px 8px', textAlign: 'left',
                         background: 'transparent', border: 'none', borderBottom: '1px solid color-mix(in srgb, var(--dsw-alias-border-l2) 55%, transparent)',
-                        cursor: 'pointer', color: 'var(--dsh-alias-label-primary)', fontSize: 11,
+                        cursor: 'pointer', color: 'var(--dsw-alias-label-primary)', fontSize: 11,
                       }}
                     >
                       <span style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
@@ -841,7 +852,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
                       ['--sch-i' as string]: Math.min(i, 20),
                       textAlign: 'left', border: '1px solid var(--dsw-alias-border-l2)',
                       background: 'transparent',
-                      borderRadius: 12, padding: 11, cursor: 'pointer', color: 'var(--dsh-alias-label-primary)',
+                      borderRadius: 12, padding: 11, cursor: 'pointer', color: 'var(--dsw-alias-label-primary)',
                       display: 'flex', flexDirection: 'column', gap: 7, minHeight: 150,
                     }}
                   >
@@ -953,7 +964,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
                   display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left',
                   border: '1px solid var(--dsw-alias-border-l2)',
                   background: 'transparent', borderRadius: 9,
-                  padding: '7px 11px', marginBottom: 6, cursor: 'pointer', color: 'var(--dsh-alias-label-primary)',
+                  padding: '7px 11px', marginBottom: 6, cursor: 'pointer', color: 'var(--dsw-alias-label-primary)',
                 }}
               >
                 <span style={{ fontWeight: 650, fontSize: 12.5, flex: 'none', maxWidth: 230, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -999,6 +1010,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
           onClose={() => { if (modal.editing) cancelEdit(); else setModal(null); }}
           width={520}
         >
+          {opError?.cardId === modal.card.id && <div role="alert" style={{ color: T.danger, marginBottom: 8 }}>{opError.msg}</div>}
           {modal.editing ? (
             <CardForm
               draft={withLivePaper(modal.card)}
@@ -1022,7 +1034,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
                       <Chip label={t(CATEGORY_LABELS[modal.card.category])} color={accent} />
                       <Chip label={t(STATUS_LABELS[modal.card.status])} color={statusColor(modal.card.status)} />
                       <span style={{ flex: 1 }} />
-                      <Stars value={modal.card.importance} onChange={(v) => void saveCard({ ...modal.card!, importance: v })} />
+                      <Stars value={modal.card.importance} onChange={(v) => void saveCard(modal.card, { importance: v })} />
                     </div>
                     <div style={{ fontWeight: 700, fontSize: 14.5, marginTop: 11, lineHeight: 1.45 }}>{modal.card.title}</div>
                     <div style={{

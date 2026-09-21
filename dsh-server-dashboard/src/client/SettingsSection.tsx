@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 interface HostRow {
   id: string;
@@ -16,6 +16,7 @@ interface HostRow {
 }
 
 interface ConfigResponse {
+  revision: string;
   config: {
     hosts: HostRow[];
     refreshIntervalS: number;
@@ -26,6 +27,7 @@ interface ConfigResponse {
 
 /** PUT /dash/config 的响应:后端会回 {ok, config};旧版只回 {ok:true}(无 config 字段) */
 interface PutConfigResponse {
+  revision?: string;
   ok?: boolean;
   config?: ConfigResponse['config'];
 }
@@ -62,7 +64,15 @@ async function api<T = unknown>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function ServerDashboardSettings({ t }: { t: T }) {
+  const revision = useRef('');
+  const writing = useRef(false);
+  const liveHosts = useRef<HostRow[]>([]);
+  const testPending = useRef(new Map<string, symbol>());
+  const discoverPending = useRef(new Map<string, symbol>());
+  const signature = (h: HostRow) => JSON.stringify([h.host, h.port, h.username, h.authKind, h.identityFile, h.hostKeyFingerprint]);
+  const currentHost = (row: HostRow) => liveHosts.current.some(h => h.id === row.id && signature(h) === signature(row));
   const [hosts, setHosts] = useState<HostRow[]>([]);
+  liveHosts.current = hosts;
   const [refreshIntervalS, setRefreshIntervalS] = useState(30);
   const [staleMinutes, setStaleMinutes] = useState(10);
   const [alertIdleMin, setAlertIdleMin] = useState(5);
@@ -74,6 +84,9 @@ export function ServerDashboardSettings({ t }: { t: T }) {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [editing, setEditing] = useState<HostRow | null>(null);
+  const editingBase = useRef<HostRow | null>(null);
+  const editingNew = useRef(false);
+  const beginEdit = (row: HostRow, isNew = false) => { editingNew.current = isNew; editingBase.current = { ...row }; setEditing({ ...row }); };
   const [secrets, setSecrets] = useState<Record<string, { password?: string; privateKey?: string }>>({});
   const [testResult, setTestResult] = useState<Record<string, string>>({});
   /** 正在测试连接的主机 id 集合(E08:并行多台时各自独立防重,一个完成不解锁另一个) */
@@ -84,8 +97,13 @@ export function ServerDashboardSettings({ t }: { t: T }) {
   const load = useCallback(async () => {
     try {
       setLoading(true);
+      setConfigReady(false);
       const res = await api<ConfigResponse>('/dash/config');
-      setHosts(res.config.hosts ?? []);
+      if (!Array.isArray(res.config?.hosts) || !res.revision) throw new Error(t('settings.reloadRequired'));
+      revision.current = res.revision;
+      setConfigReady(true);
+      liveHosts.current = res.config.hosts;
+      setHosts(res.config.hosts);
       setRefreshIntervalS(res.config.refreshIntervalS ?? 30);
       setStaleMinutes(res.config.staleMinutes ?? 10);
       setAlertIdleMin(res.config.alertIdleMin ?? 5);
@@ -102,37 +120,46 @@ export function ServerDashboardSettings({ t }: { t: T }) {
 
   /** PUT 成功且后端返回了新 config 时以后端为权威回显(并发 PUT 相互覆盖后
    *  界面不停留在旧值);旧版后端只回 {ok:true},此时沿用本地乐观状态 */
-  const syncConfig = (body: PutConfigResponse) => {
-    if (!body?.config) return;
-    setHosts(body.config.hosts ?? []);
-    if (typeof body.config.refreshIntervalS === 'number') setRefreshIntervalS(body.config.refreshIntervalS);
-    if (typeof body.config.staleMinutes === 'number') setStaleMinutes(body.config.staleMinutes);
+  const syncConfig = (body: PutConfigResponse, fields?: string[]) => {
+    if (!body?.config || !body.revision) return;
+    revision.current = body.revision;
+    liveHosts.current = body.config.hosts ?? [];
+    setHosts(liveHosts.current);
+    if ((!fields || fields.includes('refreshIntervalS')) && typeof body.config.refreshIntervalS === 'number') setRefreshIntervalS(body.config.refreshIntervalS);
+    if ((!fields || fields.includes('staleMinutes')) && typeof body.config.staleMinutes === 'number') setStaleMinutes(body.config.staleMinutes);
     setConfigReady(true);
-    if (typeof body.config.alertIdleMin === 'number') setAlertIdleMin(body.config.alertIdleMin);
+    if ((!fields || fields.includes('alertIdleMin')) && typeof body.config.alertIdleMin === 'number') setAlertIdleMin(body.config.alertIdleMin);
   };
 
-  const saveIntervals = async () => {
-    // E11:阈值保存只提交阈值——后端对省略字段保持持久值,不会用本页可能过期的
-    // hosts 快照覆盖并发保存的主机编辑;ready 守卫防未知基线提交(E04)
-    if (!configReady || mutationBusy) return;
+  const mutate = async (patch: Record<string, unknown>): Promise<PutConfigResponse> => {
+    const res = await api<PutConfigResponse>('/dash/config', { method: 'PATCH', body: JSON.stringify({ ...patch, revision: revision.current }) });
+    syncConfig(res, Object.keys(patch));
+    setError('');
+    return res;
+  };
+  const beginWrite = () => {
+    if (!configReady || writing.current || loading) return false;
+    writing.current = true;
     setMutationBusy(true);
+    return true;
+  };
+  const endWrite = () => { writing.current = false; setMutationBusy(false); };
+  const writeError = (e: unknown) => {
+    setError(e instanceof Error ? e.message : String(e));
+    // Keep the draft; an explicit reload is required after conflict/partial failure.
+  };
+  const saveIntervals = async () => {
+    if (!beginWrite()) return;
     try {
-      const res = await api<PutConfigResponse>('/dash/config', {
-        method: 'PUT',
-        body: JSON.stringify({ refreshIntervalS, staleMinutes, alertIdleMin }),
-      });
-      syncConfig(res);
-      setError('');
+      await mutate({ refreshIntervalS, staleMinutes, alertIdleMin });
       setNotice(t('settings.saved'));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setMutationBusy(false);
-    }
+    } catch (e) { writeError(e); } finally { endWrite(); }
   };
 
   /** 连接测试(一次真实 SSH 握手):per-host testing 态 + 期间禁用按钮 */
   const runTest = async (row: HostRow, secret?: { password?: string; privateKey?: string }) => {
+    if (testPending.current.has(row.id)) return;
+    const token = Symbol(); testPending.current.set(row.id, token);
     setTesting((cur) => new Set(cur).add(row.id)); // E08:按主机加锁
     try {
       const res = await api<{ ok: boolean; detail: string }>('/dash/test', {
@@ -144,47 +171,38 @@ export function ServerDashboardSettings({ t }: { t: T }) {
           password: secret?.password, privateKey: secret?.privateKey,
         }),
       });
-      setTestResult((m) => ({ ...m, [row.id]: (res.ok ? '✅ ' : '❌ ') + res.detail }));
+      if (currentHost(row) && testPending.current.get(row.id) === token) setTestResult((m) => ({ ...m, [row.id]: (res.ok ? '✅ ' : '❌ ') + res.detail }));
     } catch (e) {
       setTestResult((m) => ({ ...m, [row.id]: '❌ ' + (e instanceof Error ? e.message : String(e)) }));
     } finally {
+      testPending.current.delete(row.id);
       setTesting((cur) => { const n = new Set(cur); n.delete(row.id); return n; }); // E08:只清自身
     }
   };
 
   const save = async (row: HostRow) => {
     // E04/E11:未知基线不提交;本页共享写锁防两处保存交错覆盖
-    if (!configReady || mutationBusy) return;
-    setMutationBusy(true);
+    if (!beginWrite()) return;
     try {
-    await saveInner(row);
-    } finally { setMutationBusy(false); }
+      await saveInner(row);
+    } finally { endWrite(); }
   };
   const saveInner = async (row: HostRow) => {
     const previous = hosts.find(h => h.id === row.id);
-    if (previous?.hostKeyFingerprint && previous.hostKeyFingerprint !== row.hostKeyFingerprint
+    if (editingBase.current?.hostKeyFingerprint && editingBase.current.hostKeyFingerprint !== row.hostKeyFingerprint
       && !window.confirm(t('settings.confirmFingerprint'))) return;
-    const next = hosts.some((h) => h.id === row.id)
-      ? hosts.map((h) => (h.id === row.id ? row : h))
-      : [...hosts, row];
     const savedSecret = secrets[row.id];
     try {
-      // always send the interval thresholds too — the host keeps them when
-      // omitted, but sending them makes the PUT idempotent against races.
-      // secrets 只发当前行:其他行的一次性密钥草稿尚未保存,整张 map 随发
-      // 会给从未落盘的行误建孤儿凭据
-      const put = await api<PutConfigResponse>('/dash/config', {
-        method: 'PUT',
-        body: JSON.stringify({
-          hosts: next,
-          refreshIntervalS,
-          staleMinutes,
-          alertIdleMin,
-          secrets: savedSecret ? { [row.id]: savedSecret } : undefined,
-        }),
+      if (!previous && !editingNew.current) throw new Error(t('settings.hostRemoved'));
+      const { id, credentialRef: _ref, ...values } = row;
+      const changes = Object.fromEntries(Object.entries(values).filter(([key, value]) =>
+        value !== editingBase.current?.[key as keyof HostRow]));
+      const put = await mutate({
+        ...(previous ? { updateHost: { id, changes } } : { addHosts: [row] }),
+        secrets: savedSecret ? { [row.id]: savedSecret } : undefined,
       });
-      if (put.config) syncConfig(put);
-      else setHosts(next);
+      setTestResult(m => { const next = { ...m }; delete next[row.id]; return next; });
+      setDiscovered(m => { const next = { ...m }; delete next[row.id]; return next; });
       setEditing(null);
       setSecrets((s) => {
         const copy = { ...s };
@@ -193,29 +211,30 @@ export function ServerDashboardSettings({ t }: { t: T }) {
       });
       // auto-test right after saving, with the one-off secret still in hand
       // (an existing credentialRef falls back to the vault server-side)
-      await runTest(put.config?.hosts.find(h => h.id === row.id) ?? row, savedSecret);
+      void runTest(put.config?.hosts.find(h => h.id === row.id) ?? row, savedSecret);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
   const remove = async (id: string) => {
+    if (!configReady || writing.current) return;
     const row = hosts.find((h) => h.id === id);
     if (row && !window.confirm(t('settings.confirmDelete', { name: row.name || row.host }))) return;
-    const next = hosts.filter((h) => h.id !== id);
+    if (!beginWrite()) return;
     try {
-      const res = await api<PutConfigResponse>('/dash/config', { method: 'PUT', body: JSON.stringify({ hosts: next, refreshIntervalS, staleMinutes, alertIdleMin }) });
-      if (res.config) syncConfig(res);
-      else setHosts(next);
+      await mutate({ removeHostId: id });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-    }
+    } finally { endWrite(); }
   };
 
   interface LogCandidate { pid: number; user: string; cmd: string; logPath: string; size: number; mtimeMs: number; source: string }
   const [discovering, setDiscovering] = useState<Set<string>>(new Set());
   const [discovered, setDiscovered] = useState<Record<string, LogCandidate[]>>({});
   const discoverLogs = async (row: HostRow) => {
+    if (discoverPending.current.has(row.id)) return;
+    const token = Symbol(); discoverPending.current.set(row.id, token);
     try {
       setDiscovering((cur) => new Set(cur).add(row.id)); // E08:按主机加锁
       const res = await api<{ candidates: LogCandidate[] }>('/dash/discover-logs', {
@@ -228,35 +247,33 @@ export function ServerDashboardSettings({ t }: { t: T }) {
           identityFile: row.identityFile || undefined,
         }),
       });
-      setDiscovered((m) => ({ ...m, [row.id]: res.candidates ?? [] }));
+      if (currentHost(row) && discoverPending.current.get(row.id) === token) setDiscovered((m) => ({ ...m, [row.id]: res.candidates ?? [] }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      discoverPending.current.delete(row.id);
       setDiscovering((cur) => { const n = new Set(cur); n.delete(row.id); return n; }); // E08:只清自身
     }
   };
 
   const applyLog = async (row: HostRow, logPath: string) => {
-    const next = hosts.map((h) => (h.id === row.id ? { ...h, logPath } : h));
+    if (!beginWrite()) return;
     try {
-      const res = await api<PutConfigResponse>('/dash/config', { method: 'PUT', body: JSON.stringify({ hosts: next, refreshIntervalS, staleMinutes, alertIdleMin }) });
-      if (res.config) syncConfig(res);
-      else setHosts(next);
-      setDiscovered((m) => ({ ...m, [row.id]: [] }));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+      await mutate({ updateHost: { id: row.id, changes: { logPath } } });
+      setDiscovered(m => ({ ...m, [row.id]: [] }));
+    } catch (e) { writeError(e); } finally { endWrite(); }
   };
 
   const importSsh = async () => {
+    if (!beginWrite()) return;
     try {
       setImporting(true);
       const res = await api<{ hosts: { alias: string; host: string; port: number; username: string; identityFile?: string }[] }>('/dash/import-ssh');
-      const existing = new Set(hosts.map((h) => `${h.host}:${h.port}`));
+      const existing = new Set(hosts.map((h) => `${h.username}@${h.host}:${h.port}`));
       const usedIds = new Set(hosts.map((h) => h.id));
       const source = res.hosts.filter((h) => {
         if (!h.host) return false;
-        const key = `${h.host}:${h.port}`;
+        const key = `${h.username}@${h.host}:${h.port}`;
         if (existing.has(key)) return false;
         existing.add(key); // dedupe WITHIN the import batch too (aliases sharing a target)
         return true;
@@ -279,10 +296,7 @@ export function ServerDashboardSettings({ t }: { t: T }) {
           logPath: '',
         };
       });
-      const next = [...hosts, ...added];
-      const put = await api<PutConfigResponse>('/dash/config', { method: 'PUT', body: JSON.stringify({ hosts: next, refreshIntervalS, staleMinutes, alertIdleMin }) });
-      if (put.config) syncConfig(put);
-      else setHosts(next);
+      if (added.length) await mutate({ addHosts: added });
       setNotice(added.length > 0
         ? t('settings.imported', { added: added.length, skipped: res.hosts.length - added.length })
         : t('settings.importNone'));
@@ -290,6 +304,7 @@ export function ServerDashboardSettings({ t }: { t: T }) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setImporting(false);
+      endWrite();
     }
   };
 
@@ -300,8 +315,8 @@ export function ServerDashboardSettings({ t }: { t: T }) {
     : hosts;
 
   return (
-    <div style={{ padding: '12px 16px', fontSize: 12, maxWidth: 560 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+    <div style={{ padding: '12px 16px', fontSize: 12, maxWidth: 560, minWidth: 0, boxSizing: 'border-box', width: '100%' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 10 }}>
         <span style={{ fontWeight: 600, fontSize: 13 }}>{t('settings.nav')}</span>
         <span style={{ flex: 1 }} />
         <input
@@ -310,13 +325,13 @@ export function ServerDashboardSettings({ t }: { t: T }) {
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
         />
-        <button type="button" style={btn} onClick={importSsh} disabled={importing}>
+        <button type="button" style={btn} onClick={importSsh} disabled={!configReady || mutationBusy || importing}>
           {importing ? '…' : t('settings.importSsh')}
         </button>
-        <button type="button" style={btn} onClick={() => setEditing(emptyHost())}>{t('settings.addHost')}</button>
+        <button type="button" style={btn} disabled={!configReady || mutationBusy} onClick={() => beginEdit(emptyHost(), true)}>{t('settings.addHost')}</button>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, padding: '8px 10px', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8 }}>
-        <label style={{ ...label, margin: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, marginBottom: 12, padding: '8px 10px', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8 }}>
+        <label style={{ ...label, whiteSpace: 'nowrap', margin: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
           {t('settings.refreshIntervalShort')}
           <input
             type="number" min={10} max={300} step={5}
@@ -327,7 +342,7 @@ export function ServerDashboardSettings({ t }: { t: T }) {
           />
           {t('settings.seconds')}
         </label>
-        <label style={{ ...label, margin: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+        <label style={{ ...label, whiteSpace: 'nowrap', margin: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
           {t('settings.staleShort')}
           <input
             type="number" min={1} max={1440} step={1}
@@ -338,7 +353,7 @@ export function ServerDashboardSettings({ t }: { t: T }) {
           />
           {t('settings.staleSuffix')}
         </label>
-        <label style={{ ...label, margin: 0, display: 'flex', alignItems: 'center', gap: 6 }} title={t('settings.alertIdleHint')}>
+        <label style={{ ...label, whiteSpace: 'nowrap', margin: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }} title={t('settings.alertIdleHint')}>
           {t('settings.alertIdleShort')}
           <input
             type="number" min={1} max={120} step={1}
@@ -352,7 +367,8 @@ export function ServerDashboardSettings({ t }: { t: T }) {
         <span style={{ flex: 1 }} />
         <button type="button" style={btn} onClick={() => void saveIntervals()} disabled={!configReady || mutationBusy || loading}>{t('settings.save')}</button>
       </div>
-      {error && <div style={{ color: 'var(--dsw-alias-state-danger, #e5484d)', marginBottom: 8 }}>{error}</div>}
+      {(!configReady || error) && !loading && <button type="button" style={btn} disabled={mutationBusy} onClick={() => void load()}>{t('settings.reload')}</button>}
+      {error && <div role="alert" style={{ color: 'var(--dsw-alias-state-danger, #e5484d)', marginBottom: 8 }}>{error}</div>}
       {!error && notice && <div style={{ color: 'var(--dsw-alias-state-success-primary, #30a46c)', marginBottom: 8 }}>{notice}</div>}
       {loading && <div style={{ color: 'var(--dsw-alias-label-caption)' }}>{t('settings.loading')}</div>}
       {!loading && hosts.length === 0 && (
@@ -365,7 +381,7 @@ export function ServerDashboardSettings({ t }: { t: T }) {
       )}
       {shown.map((row) => (
         <div key={row.id} style={{ border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, padding: 10, marginBottom: 8 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
             <span style={{ fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.name || row.host}>{row.name || row.host}</span>
             {row.pinned && <span style={{ fontSize: 10, color: 'var(--dsw-alias-state-business-primary, #4d6bfe)' }}>{t('settings.pinnedTag')}</span>}
             {row.archived && <span style={{ fontSize: 10, color: 'var(--dsw-alias-label-caption)' }}>{t('host.archivedTag')}</span>}
@@ -376,8 +392,8 @@ export function ServerDashboardSettings({ t }: { t: T }) {
             <button type="button" style={btn} onClick={() => void discoverLogs(row)} disabled={discovering.has(row.id)}>
               {discovering.has(row.id) ? t('settings.discovering') : `🔍 ${t('settings.discover')}`}
             </button>
-            <button type="button" style={btn} onClick={() => setEditing({ ...row })}>{t('settings.edit')}</button>
-            <button type="button" style={btn} onClick={() => void remove(row.id)}>{t('settings.remove')}</button>
+            <button type="button" style={btn} disabled={mutationBusy} onClick={() => beginEdit(row)}>{t('settings.edit')}</button>
+            <button type="button" style={btn} disabled={!configReady || mutationBusy} onClick={() => void remove(row.id)}>{t('settings.remove')}</button>
           </div>
           <div style={{ fontSize: 11, color: 'var(--dsw-alias-label-caption)', marginTop: 2 }}>
             {row.username}@{row.host}:{row.port}
@@ -391,7 +407,7 @@ export function ServerDashboardSettings({ t }: { t: T }) {
             </div>
           )}
           {(discovered[row.id] ?? []).map((c) => (
-            <div key={`${c.source}-${c.pid}-${c.logPath}`} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, marginTop: 4 }}>
+            <div key={`${c.source}-${c.pid}-${c.logPath}`} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, fontSize: 11, marginTop: 4 }}>
               <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`pid ${c.pid} (${c.user}) ${c.cmd}`}>
                 {c.logPath}
                 <span style={{ color: 'var(--dsw-alias-label-caption)' }}>
@@ -399,7 +415,7 @@ export function ServerDashboardSettings({ t }: { t: T }) {
                   {c.size < 0 ? ` · ⚠️ ${t('settings.noPerm')}` : ` · ${(c.size / 1024).toFixed(0)}KB · ${new Date(c.mtimeMs).toLocaleTimeString()}`}
                 </span>
               </span>
-              <button type="button" style={btn} disabled={c.size < 0} onClick={() => void applyLog(row, c.logPath)}>{t('settings.useIt')}</button>
+              <button type="button" style={btn} disabled={c.size < 0 || !configReady || mutationBusy} onClick={() => void applyLog(row, c.logPath)}>{t('settings.useIt')}</button>
             </div>
           ))}
           {testResult[row.id] && <div style={{ fontSize: 11, marginTop: 4 }}>{testResult[row.id]}</div>}
@@ -482,12 +498,12 @@ export function ServerDashboardSettings({ t }: { t: T }) {
           )}
           <label style={label}>{t('f.logPath')}</label>
           <input style={input} value={editing.logPath} onChange={(e) => setEditing({ ...editing, logPath: e.target.value })} />
-          <label style={{ ...label, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <label style={{ ...label, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
             <input type="checkbox" checked={editing.pinned} onChange={(e) => setEditing({ ...editing, pinned: e.target.checked })} />
             {t('settings.pin')}
           </label>
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-            <button type="button" style={btn} onClick={() => void save(editing)} disabled={!editing.name || !editing.host}>{t('settings.save')}</button>
+            <button type="button" style={btn} disabled={!configReady || mutationBusy || !editing.name || !editing.host} onClick={() => void save(editing)}>{t('settings.save')}</button>
             <button type="button" style={btn} onClick={() => setEditing(null)}>{t('settings.cancel')}</button>
           </div>
         </div>

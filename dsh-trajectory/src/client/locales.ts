@@ -2,6 +2,17 @@
 import type { TrajEdgeKind, TrajNodeKind, TrajStatus } from '../shared/types';
 
 export const zh = {
+  'node.searchPaper': '关联论文',
+  'node.searchCard': '关联想法',
+  'node.searchHost': '关联服务器',
+  "node.lookup": "搜索名称后选择；也可手动输入 ID",
+  "node.manual": "高级：手动填写关联",
+  "node.lookupUnavailable": "关联插件暂不可用，可手动输入；已有引用会保留",
+  "node.bindingPreview": "已缓存的日志与进程（选择后才关联）",
+  "node.bindingNeed": "仅选主机不足以匹配实验，请选择日志或填写进程特征",
+  "node.bindingAmbiguous": "匹配到多条来源，请填写更精确的日志或进程特征",
+  "node.bindingNone": "缓存中无匹配来源；不会自动连接服务器",
+  "node.draftRestored": "已恢复本次会话的未保存草稿",
   'nav.title': '研究主线图',
   'nav.label': '主线',
   'drawer.collapse': '收起',
@@ -180,6 +191,17 @@ export const zh = {
 export type ZhDict = typeof zh;
 
 export const en: ZhDict = {
+  'node.searchPaper': 'Link paper',
+  'node.searchCard': 'Link idea',
+  'node.searchHost': 'Link server',
+  "node.lookup": "Search by name, or enter an ID manually",
+  "node.manual": "Advanced: enter references manually",
+  "node.lookupUnavailable": "Reference plugin unavailable. Existing references are kept; manual entry is available.",
+  "node.bindingPreview": "Cached logs and processes (select to bind)",
+  "node.bindingNeed": "Select a log or enter a command pattern to identify an experiment.",
+  "node.bindingAmbiguous": "Multiple sources match. Specify a more precise log or command pattern.",
+  "node.bindingNone": "No cached source matches. No server connection is started.",
+  "node.draftRestored": "Unsaved draft restored for this session.",
   'nav.title': 'Research Trajectory',
   'nav.label': 'Trajectory',
   'drawer.collapse': 'Collapse',

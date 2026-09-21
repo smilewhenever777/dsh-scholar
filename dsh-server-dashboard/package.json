@@ -1,7 +1,7 @@
 {
   "name": "dsh-server-dashboard",
   "version": "0.2.0",
-  "description": "DSH 远程服务器看板：SSH 展示 GPU/CPU/内存/磁盘状态、占用进程与训练日志曲线",
+  "description": "DSH 服务器看板：SSH 多主机 GPU 与系统监控、训练日志曲线、状态告警和实验进度关联",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -29,7 +29,8 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsdown && node scripts/wrap-client.mjs",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json --noEmit && tsdown && node scripts/wrap-client.mjs",
+    "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "typecheck:client": "tsc -p tsconfig.client.json --noEmit"
   },

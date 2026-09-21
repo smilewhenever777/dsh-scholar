@@ -6,6 +6,9 @@
 !/dsh-scholar/
 !/dsh-server-dashboard/
 !/dsh-trajectory/
+!/tests/
+!/package.json
+!/package-lock.json
 
 # 内部开发日志（含研究方向/真实论文/会话细节，不公开）
 dsh-scholar/AUDIT-*.md

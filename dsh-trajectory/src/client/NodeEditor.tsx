@@ -1,3 +1,4 @@
+import { ReferenceSearch, type ReferenceOption } from './ReferenceSearch';
 import React, { useEffect, useRef, useState } from 'react';
 import type { TrajNode, TrajNodeKind, TrajProjectFile, TrajStatus } from '../shared/types';
 import { TRAJ_NODE_KINDS, TRAJ_STATUSES } from '../shared/types';
@@ -12,89 +13,124 @@ export interface NodeEditorRequest {
   editing: TrajNode | null;
 }
 
-export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
-  t: TFunc;
-  file: TrajProjectFile;
-  editing: TrajNode | null;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const [title, setTitle] = useState(editing?.title ?? '');
-  const [kind, setKind] = useState<TrajNodeKind>(editing?.kind ?? 'other');
-  const [status, setStatus] = useState<TrajStatus>(editing?.status ?? 'todo');
-  const [detail, setDetail] = useState(editing?.detail ?? '');
-  const [tags, setTags] = useState((editing?.tags ?? []).join(', '));
-  // F18/R09:归属假设选择(空串 = 无归属;编辑器保存时总是显式提交)
-  const [hypoId, setHypoId] = useState<string>(editing?.hypothesisId ?? '');
-  const [mainline, setMainline] = useState(!!editing && file.project.mainline.includes(editing.id));
-  const [parents, setParents] = useState<string[]>([]);
-  const [cardId, setCardId] = useState(editing?.refs?.cardId ?? '');
-  const [cardLabel, setCardLabel] = useState(editing?.refs?.cardLabel ?? '');
-  const [paperId, setPaperId] = useState(editing?.refs?.paperId ?? '');
-  const [paperLabel, setPaperLabel] = useState(editing?.refs?.paperLabel ?? '');
-  const [hostId, setHostId] = useState(editing?.refs?.hostId ?? '');
-  const [logPath, setLogPath] = useState(editing?.refs?.logPath ?? '');
-  const [cmdPattern, setCmdPattern] = useState(editing?.refs?.cmdPattern ?? '');
+interface EditorProps {
+  t: TFunc; file: TrajProjectFile; editing: TrajNode | null; onClose: () => void; onSaved: () => void;
+}
+function draftOf(file: TrajProjectFile, editing: TrajNode | null) {
+  return { title: editing?.title ?? '', kind: editing?.kind ?? 'other' as TrajNodeKind,
+    status: editing?.status ?? 'todo' as TrajStatus, detail: editing?.detail ?? '',
+    tags: (editing?.tags ?? []).join(', '), hypoId: editing?.hypothesisId ?? '',
+    mainline: !!editing && file.project.mainline.includes(editing.id), parents: [] as string[],
+    cardId: editing?.refs?.cardId ?? '', cardLabel: editing?.refs?.cardLabel ?? '',
+    paperId: editing?.refs?.paperId ?? '', paperLabel: editing?.refs?.paperLabel ?? '',
+    hostId: editing?.refs?.hostId ?? '', logPath: editing?.refs?.logPath ?? '', cmdPattern: editing?.refs?.cmdPattern ?? '' };
+}
+type Draft = ReturnType<typeof draftOf>;
+// Memory only; no research text is written to browser storage. Bounded to 20 drafts.
+const drafts = new Map<string, { draft: Draft; baseline: Draft }>();
+export function NodeEditorModal(props: EditorProps) {
+  const target = props.file.project.id + ':' + (props.editing?.id ?? 'new');
+  return <NodeEditorForm key={target} {...props} target={target} />;
+}
+function NodeEditorForm({ t, file, editing, onClose, onSaved, target }: EditorProps & { target: string }) {
+  const [initial] = useState(() => drafts.get(target)?.draft ?? draftOf(file, editing));
+  const initialRef = useRef(drafts.get(target)?.baseline ?? draftOf(file, editing));
+  const [restored] = useState(() => drafts.has(target));
+  const [title, setTitle] = useState(initial.title);
+  const [kind, setKind] = useState(initial.kind);
+  const [status, setStatus] = useState(initial.status);
+  const [detail, setDetail] = useState(initial.detail);
+  const [tags, setTags] = useState(initial.tags);
+  const [hypoId, setHypoId] = useState(initial.hypoId);
+  const [mainline, setMainline] = useState(initial.mainline);
+  const [parents, setParents] = useState(initial.parents);
+  const [cardId, setCardId] = useState(initial.cardId);
+  const [cardLabel, setCardLabel] = useState(initial.cardLabel);
+  const [paperId, setPaperId] = useState(initial.paperId);
+  const [paperLabel, setPaperLabel] = useState(initial.paperLabel);
+  const [hostId, setHostId] = useState(initial.hostId);
+  const [logPath, setLogPath] = useState(initial.logPath);
+  const [cmdPattern, setCmdPattern] = useState(initial.cmdPattern);
+  const finished = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const busy = useRef(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [delArm, setDelArm] = useState(false);
 
   const removeNode = async () => {
-    if (!editing) return;
+    if (!editing || busy.current) return;
+    busy.current = true;
     setSaving(true);
     setError('');
     try {
       await api(`/traj/nodes/${encodeURIComponent(editing.id)}`, { method: 'DELETE' });
+      finished.current = true; drafts.delete(target);
+      if (mounted.current) onClose();
       onSaved();
-      onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      busy.current = false;
       setSaving(false);
     }
   };
 
-  // F19:只在切换编辑目标(不同节点/新建)时初始化表单——父组件每 ~10s 轮询
-  // 会产生新的 file 对象,旧实现对每次刷新都重置表单,未保存草稿被静默清空
-  const lastTargetRef = useRef<string>('');
+  const draft = { title, kind, status, detail, tags, hypoId, mainline, parents, cardId, cardLabel, paperId, paperLabel, hostId, logPath, cmdPattern };
+  const draftRef = useRef(draft); draftRef.current = draft;
+  const dirty = JSON.stringify(draft) !== JSON.stringify(initialRef.current);
+  useEffect(() => () => {
+    if (!finished.current && JSON.stringify(draftRef.current) !== JSON.stringify(initialRef.current)) {
+      drafts.set(target, { draft: draftRef.current, baseline: initialRef.current });
+      while (drafts.size > 20) drafts.delete(drafts.keys().next().value!);
+    } else drafts.delete(target);
+  }, [target]);
   useEffect(() => {
-    const targetKey = editing ? 'edit:' + editing.id : 'create';
-    if (lastTargetRef.current === targetKey) return;
-    lastTargetRef.current = targetKey;
-    setTitle(editing?.title ?? '');
-    setKind(editing?.kind ?? 'other');
-    setStatus(editing?.status ?? 'todo');
-    setDetail(editing?.detail ?? '');
-    setTags((editing?.tags ?? []).join(', '));
-    setHypoId(editing?.hypothesisId ?? '');
-    setMainline(!!editing && file.project.mainline.includes(editing.id));
-    setParents([]);
-    setCardId(editing?.refs?.cardId ?? '');
-    setCardLabel(editing?.refs?.cardLabel ?? '');
-    setPaperId(editing?.refs?.paperId ?? '');
-    setPaperLabel(editing?.refs?.paperLabel ?? '');
-    setHostId(editing?.refs?.hostId ?? '');
-    setLogPath(editing?.refs?.logPath ?? '');
-    setCmdPattern(editing?.refs?.cmdPattern ?? '');
-  }, [editing, file]);
-
-  // E05:dirty = 任一可编辑字段偏离编辑基线(轮询刷新不重置表单的修复保留)
-  const initialRef = useRef<{ title: string; kind: string; status: string; detail: string; tags: string; hypoId: string; mainline: boolean }>({
-    title: editing?.title ?? '', kind: editing?.kind ?? 'other', status: editing?.status ?? 'todo',
-    detail: editing?.detail ?? '', tags: (editing?.tags ?? []).join(', '), hypoId: editing?.hypothesisId ?? '',
-    mainline: !!editing && file.project.mainline.includes(editing.id),
-  });
-  const dirty = title !== initialRef.current.title || kind !== initialRef.current.kind
-    || status !== initialRef.current.status || detail !== initialRef.current.detail
-    || tags !== initialRef.current.tags || hypoId !== initialRef.current.hypoId
-    || mainline !== initialRef.current.mainline;
-  // 所有关闭路径统一入口:干净直关;脏时确认(继续编辑=保留,放弃更改=关闭)
+    const unload = (e: BeforeUnloadEvent) => { if (dirty || busy.current) { e.preventDefault(); e.returnValue = ''; } };
+    window.addEventListener('beforeunload', unload);
+    return () => window.removeEventListener('beforeunload', unload);
+  }, [dirty]);
   const requestClose = () => {
-    if (!dirty || saving) { onClose(); return; }
-    if (window.confirm(t('node.confirmDiscard'))) onClose();
+    if (busy.current) return;
+    if (dirty && !window.confirm(t('node.confirmDiscard'))) return;
+    finished.current = true; drafts.delete(target); onClose();
   };
+  const [paperOptions, setPaperOptions] = useState<ReferenceOption[]>([]);
+  const [cardOptions, setCardOptions] = useState<ReferenceOption[]>([]);
+  type Binding = { hostId: string; host: string; gpu: number; logPath: string; command: string; at: number };
+  const [hostOptions, setHostOptions] = useState<ReferenceOption[]>([]);
+  const [bindings, setBindings] = useState<Binding[]>([]);
+  const [lookupFailed, setLookupFailed] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    let alive = true;
+    type Source = { id: string; title: string };
+    type Snapshot = { at?: number; gpus?: { index?: number; log?: { path?: string }; processes?: { cmd?: string }[] }[] };
+    void Promise.allSettled([
+      api<{ papers: Source[] }>('/scholar/papers', { signal: controller.signal }),
+      api<{ cards: Source[] }>('/scholar/cards', { signal: controller.signal }),
+      api<{ hosts: { id: string; name: string }[]; snapshots: Record<string, Snapshot> }>('/dash/snapshots?cached=1', { signal: controller.signal }),
+    ]).then(([p, c, h]) => {
+      if (!alive) return;
+      setLookupFailed([p, c, h].some(x => x.status === 'rejected'));
+      if (p.status === 'fulfilled') setPaperOptions((p.value.papers ?? []).map(x => ({ id: x.id, label: x.title })));
+      if (c.status === 'fulfilled') setCardOptions((c.value.cards ?? []).map(x => ({ id: x.id, label: x.title })));
+      if (h.status === 'fulfilled') {
+        setHostOptions((h.value.hosts ?? []).map(x => ({ id: x.id, label: x.name })));
+        setBindings((h.value.hosts ?? []).flatMap(host => {
+          const snap = h.value.snapshots?.[host.id];
+          return (snap?.gpus ?? []).map(gpu => ({ hostId: host.id, host: host.name, gpu: gpu.index ?? 0, logPath: gpu.log?.path ?? '', command: (gpu.processes ?? []).map(p => p.cmd ?? '').filter(Boolean).join(' | '), at: snap?.at ?? 0 }));
+        }));
+      }
+    }).finally(() => clearTimeout(timer));
+    return () => { alive = false; controller.abort(); clearTimeout(timer); };
+  }, []);
+  const matches = bindings.filter(b => (!hostId || b.hostId === hostId) && (logPath ? b.logPath.replace(/\/+$/, '') === logPath.replace(/\/+$/, '') : !!cmdPattern && b.command.toLowerCase().includes(cmdPattern.toLowerCase())));
   const save = async () => {
-    if (saving) return;
+    if (busy.current) return;
+    busy.current = true;
     setSaving(true);
     setError('');
     try {
@@ -108,20 +144,10 @@ export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
           method: 'PUT',
           body: JSON.stringify({
             title, kind, status, detail, tags: tags.split(/[,，]/).map((x) => x.trim()).filter(Boolean),
-            refs: refBody,
+            refs: refBody, mainline, projectId: file.project.id,
             hypothesisId: hypoId, // F18:显式归属(空串 = 解除)
           }),
         });
-        const wasMainline = file.project.mainline.includes(editing.id);
-        if (mainline !== wasMainline) {
-          const next = mainline
-            ? [...file.project.mainline, editing.id]
-            : file.project.mainline.filter((x) => x !== editing.id);
-          await api(`/traj/projects/${encodeURIComponent(file.project.id)}`, {
-            method: 'PUT',
-            body: JSON.stringify({ mainline: next }),
-          });
-        }
       } else {
         await api('/traj/nodes', {
           method: 'POST',
@@ -137,17 +163,21 @@ export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
           }),
         });
       }
+      finished.current = true; drafts.delete(target);
+      if (mounted.current) onClose();
       onSaved();
-      onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      busy.current = false;
       setSaving(false);
     }
   };
 
   return (
     <Modal title={editing ? t('node.edit') : t('node.new')} onClose={requestClose} width={460}>
+      <fieldset disabled={saving} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
+      {restored && <div role="status" style={{ fontSize: 11, color: T.caption }}>{t('node.draftRestored')}</div>}
       <Field label={t('node.title')}>
         <Input value={title} placeholder={t('node.titlePh')} onChange={(e) => setTitle(e.target.value)} autoFocus />
       </Field>
@@ -215,6 +245,21 @@ export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
         </label>
       </Field>
 
+      <ReferenceSearch label={t('node.searchPaper')} options={paperOptions} value={paperId} onSelect={o => { setPaperId(o.id); setPaperLabel(o.label); }} />
+      <ReferenceSearch label={t('node.searchCard')} options={cardOptions} value={cardId} onSelect={o => { setCardId(o.id); setCardLabel(o.label); }} />
+      <ReferenceSearch label={t('node.searchHost')} options={hostOptions} value={hostId} onSelect={o => setHostId(o.id)} />
+      {lookupFailed && <div role="status" style={{ fontSize: 11, color: T.caption }}>{t('node.lookupUnavailable')}</div>}
+      <details style={{ marginBottom: 10 }}>
+        <summary>{t('node.bindingPreview')}</summary>
+        {bindings.filter(b => !hostId || b.hostId === hostId).map((b, i) => <button type="button" key={i} onClick={() => { setHostId(b.hostId); setLogPath(b.logPath); if (!b.logPath) setCmdPattern(b.command.split(' | ')[0]); }}
+          style={{ display: 'block', width: '100%', textAlign: 'left', color: T.primary, background: 'none', border: '1px solid var(--dsw-alias-border-l2)', padding: 6, overflowWrap: 'anywhere' }}>
+          {b.host} · GPU {b.gpu} · {b.at ? new Date(b.at).toLocaleString() : '—'}<br />{b.logPath || b.command}
+        </button>)}
+      </details>
+      <div role="status" style={{ fontSize: 11, color: matches.length > 1 ? T.warning : T.caption, marginBottom: 8 }}>
+        {!logPath && !cmdPattern ? t('node.bindingNeed') : matches.length > 1 ? t('node.bindingAmbiguous') : matches.length === 0 ? t('node.bindingNone') : matches.map(b => b.host + ' · GPU ' + b.gpu + ' · ' + b.logPath).join('')}
+      </div>
+      <div style={{ fontSize: 11, color: T.caption }}>{t('node.manual')}</div>
       <div style={{ borderTop: '1px solid var(--dsw-alias-border-l2)', marginTop: 4, paddingTop: 8 }}>
         <div style={{ display: 'flex', gap: 8 }}>
           <div style={{ flex: 1 }}>
@@ -263,6 +308,7 @@ export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
         <Btn onClick={requestClose}>{t('common.cancel')}</Btn>
         <Btn tone="primary" disabled={!title.trim() || saving} onClick={() => void save()}>{t('common.save')}</Btn>
       </div>
+      </fieldset>
     </Modal>
   );
 }

@@ -1,7 +1,7 @@
 {
   "name": "dsh-trajectory",
   "version": "0.2.0",
-  "description": "DSH 研究主线图：研究项目进展 DAG + 实验实时进度 + agent 主动维护",
+  "description": "DSH 研究主线图：按工作区管理研究目标、假设、DAG、实验台账及论文与服务器进度关联",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -29,7 +29,8 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsdown && node scripts/wrap-client.mjs",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json --noEmit && tsdown && node scripts/wrap-client.mjs",
+    "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "smoke": "node scripts/smoke-test.mjs",
     "typecheck:client": "tsc -p tsconfig.client.json --noEmit"

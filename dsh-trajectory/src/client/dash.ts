@@ -59,9 +59,7 @@ function tqdmFromLines(lines: string[] | undefined): { pct: number; label: strin
 function gpuMatches(gpu: SnapGpu, node: TrajNode): boolean {
   const refs = node.refs;
   if (!refs) return false;
-  if (refs.logPath && gpu.log?.path) {
-    if (normPath(gpu.log.path) === normPath(refs.logPath)) return true;
-  }
+  if (refs.logPath) return !!gpu.log?.path && normPath(gpu.log.path) === normPath(refs.logPath);
   if (refs.cmdPattern) {
     const pat = refs.cmdPattern.toLowerCase();
     if ((gpu.processes ?? []).some((p) => typeof p.cmd === 'string' && p.cmd.toLowerCase().includes(pat))) return true;
@@ -134,7 +132,7 @@ export function useDashProgress(nodes: TrajNode[], enabled: boolean): Map<string
       if (body?.snapshots && body.hosts) {
         for (const node of bindings) {
           const hostFilter = node.refs?.hostId;
-          let hit: DashProgress | null = null;
+          const hits: DashProgress[] = [];
           for (const host of body.hosts) {
             if (hostFilter && host.id !== hostFilter) continue;
             const snap = body.snapshots[host.id];
@@ -142,11 +140,11 @@ export function useDashProgress(nodes: TrajNode[], enabled: boolean): Map<string
             for (const gpu of snap.gpus ?? []) {
               if (!gpuMatches(gpu, node)) continue;
               const p = progressOfGpu(gpu, staleMs);
-              if (p) { hit = p; break; }
+              if (p) hits.push(p);
             }
-            if (hit) break;
+
           }
-          if (hit) next.set(node.id, hit);
+          if (hits.length === 1) next.set(node.id, hits[0]);
         }
       }
       setMap(next);

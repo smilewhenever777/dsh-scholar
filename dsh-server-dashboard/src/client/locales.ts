@@ -1,5 +1,8 @@
 /** zh/en dictionaries for the serverDashboard namespace (zh is the key source of truth). */
 export const zh = {
+  'settings.hostRemoved': '该主机已被其他窗口删除，请核对后重新添加；编辑草稿已保留。',
+  "settings.reload": "重新加载配置（保留编辑草稿）",
+  "settings.reloadRequired": "配置缺少版本，请更新插件并重新加载",
   'f.credAuto': '保存凭据后自动生成',
   'f.fingerprint': 'SSH 主机指纹',
   'f.fingerprintHint': '首次连接可自动记录；更换指纹前请通过可信渠道核对。',
@@ -163,6 +166,9 @@ export const zh = {
 } as const;
 
 export const en: Record<keyof typeof zh, string> = {
+  'settings.hostRemoved': 'This host was removed elsewhere. Review it before adding again; your draft is kept.',
+  "settings.reload": "Reload config (keep draft)",
+  "settings.reloadRequired": "Configuration version missing. Update the plugin and reload.",
   'f.credAuto': 'Generated when credentials are saved',
   'f.fingerprint': 'SSH host fingerprint',
   'f.fingerprintHint': 'Recorded on first connection; verify through a trusted channel before changing it.',

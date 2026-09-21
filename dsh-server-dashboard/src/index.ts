@@ -14,6 +14,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from 'schemastery';
+import { createHash } from 'node:crypto';
 import { credentialRef } from '@deepseek-ai/dsh-credentials';
 // 仅加载 dsh-settings 的 Context 类型增强(ctx.settings);0.1.5 起无值导出需要
 import type {} from '@deepseek-ai/dsh-settings';
@@ -51,6 +52,8 @@ export interface DashboardHostConfig {
 }
 
 export interface DashboardConfig {
+  /** Advances even for a credential-only change (the secret itself stays in the vault). */
+  revision?: number;
   hosts: DashboardHostConfig[];
   refreshIntervalS: number;
   staleMinutes: number;
@@ -75,6 +78,7 @@ const HostSchema = z.object({
 });
 
 const DashboardConfigSchema = z.object({
+  revision: z.number().step(1).min(0).default(0),
   hosts: z.array(HostSchema).default([]),
   refreshIntervalS: z.number().step(1).min(10).max(300).default(30),
   staleMinutes: z.number().step(1).min(1).max(1440).default(10),
@@ -123,6 +127,14 @@ async function migrateSavedCredentials(ctx: Context, scope: { get(): unknown; up
   for (const host of initial.hosts) {
     const old = host.credentialRef, next = derivedCredName(host.id);
     if (!old || old === next || !CRED_NAME.test(old)) continue;
+    // A prior migration may already have created this host's canonical entry
+    // while settings still use a custom alias such as SD_A5000_KEY. Normalizing
+    // to the host's own existing entry never reads a client-selected secret.
+    const current = await ctx.credentials.resolve(credentialRef(next));
+    if (current?.value) {
+      migrated.set(host.id, old);
+      continue;
+    }
     const legacy = [
       `SD_${host.id.replace(/[^A-Za-z0-9]/g, c => '_' + c.codePointAt(0)!.toString(16))}`,
       `SD_${host.id.replace(/[^A-Za-z0-9_]/g, '_')}`,
@@ -132,12 +144,9 @@ async function migrateSavedCredentials(ctx: Context, scope: { get(): unknown; up
       ctx.logger.warn(`主机 ${host.id} 的旧凭据引用有歧义，请重新输入凭据`);
       continue;
     }
-    const current = await ctx.credentials.resolve(credentialRef(next));
-    if (!current?.value) {
-      const value = await ctx.credentials.resolve(credentialRef(old));
-      if (!value?.value) continue;
-      await ctx.credentials.set(credentialRef(next), value.value);
-    }
+    const value = await ctx.credentials.resolve(credentialRef(old));
+    if (!value?.value) continue;
+    await ctx.credentials.set(credentialRef(next), value.value);
     migrated.set(host.id, old);
   }
   if (migrated.size) {
@@ -150,8 +159,8 @@ async function migrateSavedCredentials(ctx: Context, scope: { get(): unknown; up
   }
 }
 
-/** Cached resolveAuth result per host; invalidated by PUT /dash/config or by an
- *  identity-file mtime change, so polling does not re-read key files each round. */
+/** Cached file-based authentication per host, invalidated by settings or file
+ * changes. Vault values are resolved afresh for each actual poll. */
 interface AuthCacheEntry {
   credentialRef: string;
   /** connection coordinates — a host edit must not serve a stale auth */
@@ -163,7 +172,7 @@ interface AuthCacheEntry {
 async function resolveAuth(ctx: Context, cfg: DashboardHostConfig, cache?: Map<string, AuthCacheEntry>): Promise<SshAuth> {
   const ref = derivedCredName(cfg.id);
   // R02:指纹必须进缓存签名——TOFU 写入 pin 后旧的无 pin 缓存条目立即失效
-  const sig = `${cfg.authKind}|${cfg.username}@${cfg.host}:${cfg.port}|${cfg.hostKeyFingerprint ?? ""}|${cfg.credentialRef}`;
+  const sig = `${cfg.authKind}|${cfg.username}@${cfg.host}:${cfg.port}|${cfg.hostKeyFingerprint ?? ""}|${cfg.credentialRef}|${cfg.identityFile}`;
   let identityMtimeMs = -1;
   if (cfg.authKind === 'key' && cfg.identityFile) {
     try {
@@ -172,7 +181,10 @@ async function resolveAuth(ctx: Context, cfg: DashboardHostConfig, cache?: Map<s
     } catch { identityMtimeMs = -1; }
   }
   const hit = cache?.get(cfg.id);
-  if (hit && hit.credentialRef === ref && hit.sig === sig && hit.identityMtimeMs === identityMtimeMs) return hit.auth;
+  // Vault values can rotate independently of dashboard settings. Resolve these
+  // on every actual poll; an in-flight old resolve must not poison later polls.
+  const usesVault = cfg.authKind !== 'none' && cfg.credentialRef === ref;
+  if (!usesVault && hit && hit.credentialRef === ref && hit.sig === sig && hit.identityMtimeMs === identityMtimeMs) return hit.auth;
   const auth: SshAuth = { host: cfg.host, port: cfg.port, username: cfg.username };
   if (cfg.hostKeyFingerprint) auth.hostKeyFingerprint = cfg.hostKeyFingerprint;
   // 1) credential vault (explicitly stored private key / password) — always
@@ -192,6 +204,9 @@ async function resolveAuth(ctx: Context, cfg: DashboardHostConfig, cache?: Map<s
   // 3) authKind 'none': mirror OpenSSH default identities
   if (cfg.authKind === 'none' && !auth.privateKey && !auth.password) {
     auth.privateKey = await readDefaultIdentity();
+  }
+  if (cfg.authKind !== 'none' && !auth.privateKey && !auth.password) {
+    throw new Error('未找到该主机的已绑定凭据，请在设置中重新保存认证信息；已有旧引用可能尚未迁移');
   }
   cache?.set(cfg.id, { credentialRef: ref, sig, identityMtimeMs, auth });
   return auth;
@@ -414,8 +429,17 @@ export function planLogPathUpdates(
 
 export function apply(ctx: Context) {
   const scope = ctx.settings.register(NS, DashboardConfigSchema, {});
+  // Every plugin-owned config writer shares this queue. A content revision also
+  // detects settings changes made outside this plugin and survives host restarts.
+  let configQueue: Promise<unknown> = Promise.resolve();
+  const withConfigLock = <T,>(fn: () => Promise<T>): Promise<T> => {
+    const task = configQueue.then(fn);
+    configQueue = task.catch(() => undefined);
+    return task;
+  };
+  const revisionOf = (config: DashboardConfig) => createHash('sha256').update(JSON.stringify(config)).digest('hex');
   let credentialMigration: Promise<void> | undefined;
-  const ensureCredentials = () => credentialMigration ??= migrateSavedCredentials(ctx, scope).catch(error => {
+  const ensureCredentials = () => credentialMigration ??= withConfigLock(() => migrateSavedCredentials(ctx, scope)).catch(error => {
     credentialMigration = undefined;
     throw error;
   });
@@ -440,9 +464,16 @@ export function apply(ctx: Context) {
   // single-flight: concurrent snapshot requests share one polling round
   let inflight: Promise<Record<string, ServerSnapshot>> | null = null;
   let lastRun = 0;
-  // resolveAuth result cache per host (invalidated by PUT /dash/config; see
-  // AuthCacheEntry for the identity-file mtime part of the key)
+  // File-based auth cache; vault values bypass it and updates clear backoff.
   const authCache = new Map<string, AuthCacheEntry>();
+  ctx.on('credentials/reference-updated', ref => {
+    for (const host of (scope.get() as DashboardConfig).hosts) {
+      if (derivedCredName(host.id) !== ref) continue;
+      authCache.delete(host.id);
+      backoff.delete(host.id);
+      lastRun = 0;
+    }
+  });
   // staleness observation cursors: hostId → log path → {mtime,size,changeAt};
   // the incremental rule lives in refreshLogActivity/planLogPathUpdates
   const logActivity = new Map<string, Record<string, LogActivity>>();
@@ -496,9 +527,12 @@ export function apply(ctx: Context) {
           if (!auth.hostKeyFingerprint) {
             auth.onFingerprint = (fp) => {
               try {
-                const cur = scope.get() as DashboardConfig;
-                const hosts = cur.hosts.map((h) => (h.id === hostCfg.id ? { ...h, hostKeyFingerprint: fp } : h));
-                void scope.update({ hosts }).then(() => {
+                void withConfigLock(async () => {
+                  const cur = scope.get() as DashboardConfig;
+                  const live = cur.hosts.find(h => h.id === hostCfg.id);
+                  if (!live || !sameAuthIdentity(live, hostCfg) || live.identityFile !== hostCfg.identityFile || live.hostKeyFingerprint) return;
+                  await scope.update({ hosts: cur.hosts.map(h => h.id === live.id ? { ...h, hostKeyFingerprint: fp } : h) });
+                }).then(() => {
                   // R02:回写后立即失效缓存——旧 auth 对象的 verifier 还在自动接受分支,
                   // 不失效则下轮轮询继续无 pin 连接(另一把主机密钥仍会被接受)
                   authCache.delete(hostCfg.id);
@@ -545,14 +579,18 @@ export function apply(ctx: Context) {
       for (const id of [...logActivity.keys()]) if (!(id in nextActivity)) logActivity.delete(id);
       // host-level logPath lifecycle: stalled path → auto-clear, empty path → adopt a fresh GPU log
       try {
-        const patches = planLogPathUpdates(config, snapsForPlan, Object.fromEntries([...logActivity.entries()]), config.staleMinutes, Date.now());
+        let patches = planLogPathUpdates(config, snapsForPlan, Object.fromEntries([...logActivity.entries()]), config.staleMinutes, Date.now());
         if (patches.length > 0) {
-          const byId = new Map(patches.map((p) => [p.id, p.logPath]));
-          // re-read the config right before writing: a concurrent PUT during
-          // this poll must not be overwritten by our stale host list (lost update)
-          const fresh = scope.get() as DashboardConfig;
-          const next = fresh.hosts.map((h) => (byId.has(h.id) ? { ...h, logPath: byId.get(h.id) as string } : h));
-          await scope.update({ hosts: next });
+          await withConfigLock(async () => {
+            const fresh = scope.get() as DashboardConfig;
+            patches = patches.filter(p => {
+              const before = config.hosts.find(h => h.id === p.id);
+              const live = fresh.hosts.find(h => h.id === p.id);
+              return before && live && sameAuthIdentity(before, live) && before.logPath === live.logPath;
+            });
+            const byId = new Map(patches.map(p => [p.id, p.logPath]));
+            if (patches.length) await scope.update({ hosts: fresh.hosts.map(h => byId.has(h.id) ? { ...h, logPath: byId.get(h.id)! } : h) });
+          });
           for (const p of patches) {
             const st = hostState.get(p.id);
             if (st) {
@@ -581,7 +619,7 @@ export function apply(ctx: Context) {
       }
       // recycle state (and pooled SSH connections) of hosts removed from the
       // config outside our PUT handler (direct settings edits)
-      sweepRemovedHosts(new Set(config.hosts.map((h) => h.id)));
+      sweepRemovedHosts(new Set((scope.get() as DashboardConfig).hosts.map((h) => h.id)));
     return cacheSnapshot();
   }
 
@@ -736,7 +774,7 @@ export function apply(ctx: Context) {
       const force = query.get('force') === '1';
       const forceHost = query.get('host') ?? undefined;
       try {
-        const snapshots = await pollAll(config, force, forceHost);
+        const snapshots = query.get('cached') === '1' ? cacheSnapshot() : await pollAll(config, force, forceHost);
         // F23:把增量新鲜度盖章进每条 log(host 级与每 GPU 级)——消费方
         // (面板/trajectory/morning/statusbar)统一读 fresh/changeAt,不再跨时钟计算
         const staleMs = Math.max(1, config.staleMinutes) * 60_000;
@@ -782,87 +820,114 @@ export function apply(ctx: Context) {
       try {
         await ensureCredentials();
         if (req.method === 'GET') {
-          const config = scope.get() as DashboardConfig;
-          sendJson(res, 200, { config });
-          return;
+          return await withConfigLock(async () => {
+            const config = scope.get() as DashboardConfig;
+            sendJson(res, 200, { config, revision: revisionOf(config) });
+          });
         }
-        if (req.method === 'PUT') {
+        if (req.method === 'PUT' || req.method === 'PATCH') {
           const body = JSON.parse(await readBody(req)) as {
+            revision?: string;
             hosts?: DashboardHostConfig[];
+            addHosts?: DashboardHostConfig[];
+            updateHost?: { id: string; changes: Partial<DashboardHostConfig> };
+            removeHostId?: string;
             secrets?: Record<string, { password?: string; privateKey?: string }>;
             refreshIntervalS?: number;
             staleMinutes?: number;
           };
-          const hosts = body.hosts;
-          if (!Array.isArray(hosts)) return sendJson(res, 400, { error: 'hosts 必须是数组' });
-          // duplicate ids would share one CollectState and reconnect every poll
-          const seenIds = new Set<string>();
-          for (const h of hosts) {
-            if (seenIds.has(h.id)) return sendJson(res, 400, { error: `主机 id 重复：${h.id}` });
-            seenIds.add(h.id);
-          }
-          // omitted fields keep their persisted values — a hosts-only PUT (host
-          // edit, import, log apply) must not reset the interval thresholds
-          const current = scope.get() as DashboardConfig;
-          const refreshIntervalS = body.refreshIntervalS ?? current.refreshIntervalS;
-          const staleMinutes = body.staleMinutes ?? current.staleMinutes;
-          const alertIdleMin = (body as { alertIdleMin?: number }).alertIdleMin ?? current.alertIdleMin;
-          // validate against the schema before persisting
-          DashboardConfigSchema({ hosts, refreshIntervalS, staleMinutes, alertIdleMin });
-          // secrets are ALWAYS stored under the server-derived SD_<hostId> name;
-          // a client-supplied credentialRef is never used as a vault address
-          // (prevents overwriting arbitrary existing credentials). The config
-          // field is normalized for display only.
-          const secretIds = new Set(Object.entries(body.secrets ?? {})
-            .filter(([, s]) => s?.privateKey || s?.password)
-            .map(([id]) => id));
-          for (const row of hosts) {
-            const previous = current.hosts.find(h => h.id === row.id);
-            const secret = body.secrets?.[row.id];
-            if (secretIds.has(row.id) && (row.authKind === 'none'
-              || (row.authKind === 'key' ? !secret?.privateKey || !!secret?.password : !secret?.password || !!secret?.privateKey))) {
-              return sendJson(res, 400, { error: `主机 ${row.id} 的凭据与认证方式不匹配` });
+          return await withConfigLock(async () => {
+            const current = scope.get() as DashboardConfig;
+            if (!body.revision || body.revision !== revisionOf(current)) {
+              return sendJson(res, 409, { error: '配置已变化或缺少版本，请重新加载并核对后保存', conflict: true });
             }
-            if (previous?.credentialRef && !sameAuthIdentity(previous, row) && !secretIds.has(row.id) && row.authKind !== 'none') {
-              return sendJson(res, 400, { error: `主机 ${row.id} 的地址、用户或认证方式已改变，请重新输入凭据` });
+            const operations = [body.hosts, body.addHosts, body.updateHost, body.removeHostId].filter(x => x !== undefined);
+            if (operations.length > 1) return sendJson(res, 400, { error: '每次只允许一种主机操作' });
+            if (body.hosts !== undefined && !Array.isArray(body.hosts) || body.addHosts !== undefined && !Array.isArray(body.addHosts)) {
+              return sendJson(res, 400, { error: 'hosts 必须是数组' });
             }
-            row.credentialRef = secretIds.has(row.id) || (previous && sameAuthIdentity(previous, row)
-              && previous.credentialRef === derivedCredName(row.id)) ? derivedCredName(row.id) : '';
-          }
-          const prevHostIds = new Set(current.hosts.map((h) => h.id));
-          await scope.update({ hosts, refreshIntervalS, staleMinutes, alertIdleMin });
-          // config changed: clear the failure backoff + poll throttle so the
-          // next request re-probes immediately ("fixed the credentials but the
-          // card stayed red for up to 30min" case), drop the auth cache, and
-          // re-arm the events watcher at the new interval
-          backoff.clear();
-          lastRun = 0;
-          authCache.clear();
-          scheduleWatcher(Math.max(WATCHER_MIN_MS, refreshIntervalS * 1000));
-          // drop runtime state of hosts that no longer exist (cache/backoff/state leak)
-          sweepRemovedHosts(new Set(hosts.map((h) => h.id)));
-          // removed hosts take their derived credential with them — otherwise
-          // stale SD_<id> keys accumulate in the vault forever
-          for (const gone of [...prevHostIds].filter((id) => !seenIds.has(id))) {
+            let hosts = (body.hosts ?? current.hosts).map(h => ({ ...h }));
+            if (body.addHosts) hosts.push(...body.addHosts.map(h => ({ ...h })));
+            if (body.updateHost) {
+              const { id, changes } = body.updateHost;
+              if (!hosts.some(h => h.id === id)) return sendJson(res, 404, { error: '主机不存在，请重新加载' });
+              const allowed = new Set(['name', 'host', 'port', 'username', 'authKind', 'identityFile', 'hostKeyFingerprint', 'logPath', 'pinned', 'archived']);
+              if (!changes || Object.keys(changes).some(k => !allowed.has(k))) return sendJson(res, 400, { error: '主机修改字段无效' });
+              hosts = hosts.map(h => h.id === id ? { ...h, ...changes, id } : h);
+            }
+            if (body.removeHostId !== undefined) hosts = hosts.filter(h => h.id !== body.removeHostId);
+            // duplicate ids would share one CollectState and reconnect every poll
+            const seenIds = new Set<string>();
+            for (const h of hosts) {
+              if (seenIds.has(h.id)) return sendJson(res, 400, { error: `主机 id 重复：${h.id}` });
+              seenIds.add(h.id);
+            }
+            // omitted fields keep their persisted values — a hosts-only PUT (host
+            // edit, import, log apply) must not reset the interval thresholds
+            const refreshIntervalS = body.refreshIntervalS ?? current.refreshIntervalS;
+            const staleMinutes = body.staleMinutes ?? current.staleMinutes;
+            const alertIdleMin = (body as { alertIdleMin?: number }).alertIdleMin ?? current.alertIdleMin;
+            // validate against the schema before persisting
+            hosts = DashboardConfigSchema({ hosts, refreshIntervalS, staleMinutes, alertIdleMin }).hosts;
+            // secrets are ALWAYS stored under the server-derived SD_<hostId> name;
+            // a client-supplied credentialRef is never used as a vault address
+            // (prevents overwriting arbitrary existing credentials). The config
+            // field is normalized for display only.
+            const secretIds = new Set(Object.entries(body.secrets ?? {})
+              .filter(([, s]) => s?.privateKey || s?.password)
+              .map(([id]) => id));
+            for (const row of hosts) {
+              const previous = current.hosts.find(h => h.id === row.id);
+              const secret = body.secrets?.[row.id];
+              if (secretIds.has(row.id) && (row.authKind === 'none'
+                || (row.authKind === 'key' ? !secret?.privateKey || !!secret?.password : !secret?.password || !!secret?.privateKey))) {
+                return sendJson(res, 400, { error: `主机 ${row.id} 的凭据与认证方式不匹配` });
+              }
+              if (previous?.credentialRef && !sameAuthIdentity(previous, row) && !secretIds.has(row.id) && row.authKind !== 'none') {
+                return sendJson(res, 400, { error: `主机 ${row.id} 的地址、用户或认证方式已改变，请重新输入凭据` });
+              }
+              row.credentialRef = secretIds.has(row.id) || (previous && sameAuthIdentity(previous, row)
+                && previous.credentialRef === derivedCredName(row.id)) ? derivedCredName(row.id) : '';
+            }
+            const prevHostIds = new Set(current.hosts.map((h) => h.id));
+            await scope.update({ hosts, refreshIntervalS, staleMinutes, alertIdleMin, revision: (current.revision ?? 0) + 1 });
+            // config changed: clear the failure backoff + poll throttle so the
+            // next request re-probes immediately ("fixed the credentials but the
+            // card stayed red for up to 30min" case), drop the auth cache, and
+            // re-arm the events watcher at the new interval
+            backoff.clear();
+            lastRun = 0;
+            authCache.clear();
+            scheduleWatcher(Math.max(WATCHER_MIN_MS, refreshIntervalS * 1000));
+            // drop runtime state of hosts that no longer exist (cache/backoff/state leak)
+            sweepRemovedHosts(new Set(hosts.map((h) => h.id)));
+            // removed hosts take their derived credential with them — otherwise
+            // stale SD_<id> keys accumulate in the vault forever
+            let credentialCleanupFailed = false;
+            for (const gone of [...prevHostIds].filter((id) => !seenIds.has(id))) {
+              try {
+                await ctx.credentials.unset(credentialRef(derivedCredName(gone)));
+              } catch { credentialCleanupFailed = true; }
+            }
+            // persist the supplied secrets; ids not in the host list are ignored.
+            // Failure here is reported as 500: the config half IS already saved,
+            // and a 400 would make the client believe nothing happened.
             try {
-              await (ctx.credentials as unknown as { remove?: (ref: unknown) => Promise<void> }).remove?.(credentialRef(derivedCredName(gone)));
-            } catch { /* vault without remove support — key stays, harmless */ }
-          }
-          // persist the supplied secrets; ids not in the host list are ignored.
-          // Failure here is reported as 500: the config half IS already saved,
-          // and a 400 would make the client believe nothing happened.
-          try {
-            for (const [id, secret] of Object.entries(body.secrets ?? {})) {
-              if (!seenIds.has(id)) continue;
-              const name = derivedCredName(id);
-              if (secret?.privateKey) await ctx.credentials.set(credentialRef(name), secret.privateKey);
-              else if (secret?.password) await ctx.credentials.set(credentialRef(name), secret.password);
+              for (const [id, secret] of Object.entries(body.secrets ?? {})) {
+                if (!seenIds.has(id)) continue;
+                const name = derivedCredName(id);
+                if (secret?.privateKey) await ctx.credentials.set(credentialRef(name), secret.privateKey);
+                else if (secret?.password) await ctx.credentials.set(credentialRef(name), secret.password);
+              }
+            } catch (err) {
+              return sendJson(res, 500, { error: '配置已保存，但凭据写入失败，请重新加载并重新输入凭据' });
             }
-          } catch (err) {
-            return sendJson(res, 500, { error: `配置已保存，但凭据写入失败：${err instanceof Error ? err.message : String(err)}` });
-          }
-          sendJson(res, 200, { ok: true, config: { hosts, refreshIntervalS, staleMinutes, alertIdleMin } });
-          return;
+            if (credentialCleanupFailed) {
+              return sendJson(res, 500, { error: '主机配置已保存，但已删除主机的凭据清理失败，请在宿主凭据管理中检查残留凭据' });
+            }
+            const config = scope.get() as DashboardConfig;
+            sendJson(res, 200, { ok: true, config, revision: revisionOf(config) });
+          });
         }
         sendJson(res, 405, { error: 'method not allowed' });
       } catch (err) {

@@ -509,6 +509,7 @@ export function registerTrajRoutes(
           if (typeof body.kind === 'string' && TRAJ_NODE_KINDS.includes(body.kind as TrajNodeKind)) patch.kind = body.kind;
           if (typeof body.status === 'string' && TRAJ_STATUSES.includes(body.status as TrajStatus)) patch.status = body.status;
           if (typeof body.detail === 'string') patch.detail = body.detail;
+          if (typeof body.mainline === 'boolean') patch.mainline = body.mainline;
           // F18:null = 显式解除归属(空串落 patch 即清);string = 设置;缺省 = 不动
           if (body.hypothesisId === null) patch.hypothesisId = '';
           else if (typeof body.hypothesisId === 'string') patch.hypothesisId = body.hypothesisId;

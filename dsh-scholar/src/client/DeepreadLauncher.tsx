@@ -3,7 +3,7 @@
  *
  * 设计：面板配置（单篇/多篇、模式、透镜开关、上下文论文/卡片多选、focus 可编辑）
  * → POST /scholar/read/run 后台直跑（jobs 不可用时脱离任务系统执行）
- * （对用户不可见，dsh-trajectory 同款机制）→ 输入框只注入一句短触发语并发送。
+ * 需要对话交付时，只填入空白编辑器或复制文本，由用户确认发送。
  * 透镜不再强制：quick 速读恒不带；map 默认勾选可取消。
  */
 import React, { useEffect, useMemo, useState } from 'react';
@@ -16,59 +16,59 @@ import { Btn, Icon, Icons, Modal, SchStyles, SearchInput, T, Textarea, truncate 
 type ComposerDelivery = 'sent' | 'filled' | 'clipboard' | 'failed';
 
 /**
- * 把短触发语注入宿主对话输入框并发送（同页 DOM 注入）。
- * 目标判定：只认插件 DOM（[data-dsh-plugin]）之外的输入框——否则会误中面板自己的
- * textarea；宿主实况是 contenteditable 富文本编辑器，优先走它，textarea 为兜底。
- * contenteditable：全选 + execCommand insertText；textarea：原生 setter + input 事件
- * （包 try/catch：受控组件对合成事件的重入可能抛错，不阻断收尾）。
- * 发送按钮按 aria-label/title 定位，260ms 等 React 解锁。
+ * 只填入插件区域外唯一的空白编辑器。复杂富文本、草稿或歧义目标均复制降级。
+ * 不自动发送；剪贴板不可用或被拒绝时必须明确通知调用方失败。
  */
 // E07:非破坏交付——宿主输入框为空且唯一可识别才填入(不自动点发送);
 // 已有草稿/附件/多编辑器时降级为剪贴板复制,绝不覆盖用户未发送的内容。
 export function deliverToComposer(text: string, done: (r: ComposerDelivery) => void): void {
-  const visible = (el: Element): boolean => (el as HTMLElement).offsetParent !== null;
+  const visible = (el: Element): boolean => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
   const inPlugin = (el: Element): boolean => !!el.closest('[data-dsh-plugin]');
-  const ces = [...document.querySelectorAll('[contenteditable="true"]')].filter((el) => visible(el) && !inPlugin(el));
+  const ces = [...document.querySelectorAll('[contenteditable]:not([contenteditable="false"])')].filter((el) => visible(el) && !inPlugin(el));
   const tas = [...document.querySelectorAll('textarea')].filter((el) => visible(el) && !inPlugin(el));
-  const ce = ces.length === 1 ? ces[0] as HTMLElement : undefined;
-  const ta = !ce && tas.length === 1 ? tas[0] as HTMLTextAreaElement : undefined;
-  const ceEmpty = ce ? (ce.textContent ?? '').trim() === '' : false;
-  const taEmpty = ta ? ta.value.trim() === '' : false;
-  // 目标不存在/不唯一/草稿非空 → 只复制(用户自行粘贴,原草稿不动)
-  if ((!ce && !ta) || (ce && !ceEmpty) || (ta && !taEmpty)) {
-    navigator.clipboard?.writeText(text).then(() => done('clipboard'), () => done('failed'));
-    return;
-  }
-  let injected = false;
-  if (ce) {
-    ce.focus();
-    const sel = window.getSelection();
-    if (sel) {
-      const range = document.createRange();
-      range.selectNodeContents(ce);
-      sel.removeAllRanges();
-      sel.addRange(range);
+  const copy = () => {
+    if (!navigator.clipboard?.writeText) { done('failed'); return; }
+    try { void navigator.clipboard.writeText(text).then(() => done('clipboard'), () => done('failed')); }
+    catch { done('failed'); }
+  };
+  // All candidates count, including a textarea beside rich-text editors.
+  if (ces.length + tas.length !== 1) { copy(); return; }
+  const ce = ces[0] as HTMLElement | undefined;
+  const ta = tas[0] as HTMLTextAreaElement | undefined;
+  // Only an empty editor or the conventional single BR placeholder is safe.
+  const emptyCE = ce && [...ce.childNodes].every(n => n.nodeType === Node.TEXT_NODE ? !n.textContent?.trim() : n instanceof HTMLBRElement && !n.attributes.length);
+  if (ce ? !emptyCE : !ta || ta.value.trim() || ta.disabled || ta.readOnly) { copy(); return; }
+  try {
+    let injected = false;
+    if (ce) {
+      ce.focus();
+      const sel = window.getSelection();
+      if (sel) {
+        const range = document.createRange();
+        range.selectNodeContents(ce);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      injected = document.execCommand('insertText', false, text);
+    } else if (ta) {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+      if (setter) {
+        setter.call(ta, text);
+        try {
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+        } catch { /* 受控组件对合成事件重入抛错不阻断 */ }
+        injected = ta.value === text;
+      }
     }
-    injected = document.execCommand('insertText', false, text);
-  } else if (ta) {
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
-    if (setter) {
-      setter.call(ta, text);
-      try {
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
-      } catch { /* 受控组件对合成事件重入抛错不阻断 */ }
-      injected = ta.value === text;
+    if (!injected) {
+      copy();
+      return;
     }
-  }
-  if (!injected) {
-    navigator.clipboard?.writeText(text).then(() => done('clipboard'), () => done('failed'));
-    return;
-  }
-  // E07:填入即止——不自动点发送(全页找'发送'按钮会误触别的会话/编辑器);
-  // 通知用户检查后手动发送
-  done('filled');
+    // E07:填入即止——不自动点发送(全页找'发送'按钮会误触别的会话/编辑器);
+    // 通知用户检查后手动发送
+    done('filled');
+  } catch { copy(); }
 }
-// 兼容旧引用的别名(原实现返回 void;新签名由调用方 done 回调消费)
 function CheckList({ items, checked, onToggle, max }: {
   items: { id: string; label: string; note?: string }[];
   checked: Set<string>;
@@ -95,7 +95,7 @@ function CheckList({ items, checked, onToggle, max }: {
             key={it.id}
             style={{
               display: 'flex', alignItems: 'center', gap: 7, padding: '4px 10px', cursor: disabled ? 'default' : 'pointer',
-              opacity: disabled ? 0.45 : 1, fontSize: 11.5, color: 'var(--dsh-alias-label-primary)',
+              opacity: disabled ? 0.45 : 1, fontSize: 11.5, color: 'var(--dsw-alias-label-primary)',
             }}
             onClick={(e) => {
               if (disabled) { e.preventDefault(); return; }
@@ -131,7 +131,7 @@ function Segment<K extends string>({ value, options, onChange }: {
             fontSize: 11, padding: '3px 11px', borderRadius: 7, cursor: 'pointer',
             border: `1px solid ${value === o.key ? 'var(--dsw-alias-border-l1, var(--dsw-alias-border-l2))' : 'var(--dsw-alias-border-l2)'}`,
             background: value === o.key ? 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.12))' : 'transparent',
-            color: value === o.key ? 'var(--dsh-alias-label-primary)' : T.secondary,
+            color: value === o.key ? 'var(--dsw-alias-label-primary)' : T.secondary,
             fontWeight: value === o.key ? 600 : 400,
           }}
         >{o.label}</button>

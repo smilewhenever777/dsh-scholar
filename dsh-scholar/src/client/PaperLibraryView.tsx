@@ -1,3 +1,4 @@
+import { queueMutation } from './mutationQueue';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { IdeaCard, Paper, PaperCollection, ReadStatus } from '../shared/types';
 import { READ_STATUSES } from '../shared/types';
@@ -191,7 +192,7 @@ function PaperReports({ paperId, notify, t }: { paperId: string; notify?: (msg: 
               className="sch-press"
               onClick={() => setPreview(r.file)}
               style={{
-                display: 'inline-flex', alignItems: 'baseline', gap: 6, color: 'var(--dsh-alias-label-primary)',
+                display: 'inline-flex', alignItems: 'baseline', gap: 6, color: 'var(--dsw-alias-label-primary)',
                 background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, minWidth: 0, flex: 1,
               }}
               title={t('paper.reportPreview')}
@@ -405,8 +406,6 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
   const [actionError, setActionError] = useState('');
   /** E03:关联卡片独立加载错误(与主详情错误分离) */
   const [cardsError, setCardsError] = useState('');
-  /** E02:按论文的快捷写请求序号(乱序旧响应丢弃) */
-  const ratingSeq = useRef(new Map<string, number>());
   /** 非致命降级(collections/config 加载失败)的提示条 */
   const [degraded, setDegraded] = useState('');
   const shownError = actionError || loadError;
@@ -544,37 +543,38 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nav.paperId]);
 
-  // E01:详情导航 token——只有最后一次用户选择才能改变页面;迟到的旧响应丢弃。
   const detailSeq = useRef(0);
-  const openPaper = useCallback(async (id: string) => {
+  const detailTarget = useRef<string | null>(null);
+  const cardsSeq = useRef(0);
+  const leavePaper = () => { ++detailSeq.current; ++cardsSeq.current; detailTarget.current = null; setSelected(null); };
+  useEffect(() => () => { ++detailSeq.current; ++cardsSeq.current; detailTarget.current = null; }, []);
+  const loadCards = useCallback(async (id: string) => {
+    const token = ++cardsSeq.current;
+    try {
+      const cards = await api<{ cards: IdeaCard[] }>(`/scholar/cards${qs({ paperId: id })}`);
+      if (token !== cardsSeq.current || detailTarget.current !== id) return;
+      setRelated(cards.cards ?? []); setCardsError('');
+    } catch {
+      if (token === cardsSeq.current && detailTarget.current === id) setCardsError(t('paper.cardsLoadFailed'));
+    }
+  }, [t]);
+  const openPaper = useCallback(async (id: string, refresh = false) => {
     const token = ++detailSeq.current;
-    setSelected(null);
-    setRelated([]);
-    setCardsError('');
+    const same = detailTarget.current === id;
+    if (refresh && !same) return;
+    detailTarget.current = id;
+    if (!same) { setSelected(null); setRelated([]); setCardsError(''); }
     try {
       const detail = await api<{ paper: Paper }>(`/scholar/papers/${encodeURIComponent(id)}`);
-      if (detailSeq.current !== token) return; // 已导航到别处
-      setSelected(detail.paper);
-      setActionError('');
-      pushRecent(id);
+      if (detailSeq.current !== token || detailTarget.current !== id) return;
+      setSelected(detail.paper); setActionError(''); pushRecent(id);
     } catch (e) {
       if (detailSeq.current !== token) return;
-      setSelected(null);
       setActionError(e instanceof Error ? e.message : String(e));
       return;
     }
-    // E03:关联卡片独立加载——失败不阻断论文阅读(此前 503 连详情都打不开)
-    try {
-      const cards = await api<{ cards: IdeaCard[] }>(`/scholar/cards${qs({ paperId: id })}`);
-      if (detailSeq.current !== token) return;
-      setRelated(cards.cards ?? []);
-      setCardsError('');
-    } catch {
-      if (detailSeq.current !== token) return;
-      setRelated([]);
-      setCardsError(t('paper.cardsLoadFailed'));
-    }
-  }, [pushRecent, t]);
+    await loadCards(id);
+  }, [pushRecent, loadCards]);
 
   // 切换论文时重置详情弹层（必须在 selected/各 state 声明之后）
   useEffect(() => { setPdfOpen(false); setAbsOpen(false); setLaunchOpen(false); }, [selected?.id]);
@@ -584,7 +584,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
     const h = () => {
       void load();
       void loadAll();
-      if (selected) void openPaper(selected.id);
+      if (selected) void openPaper(selected.id, true);
     };
     window.addEventListener('scholar:read-done', h);
     return () => window.removeEventListener('scholar:read-done', h);
@@ -619,7 +619,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
           method: 'PUT',
           body: JSON.stringify(body),
         });
-        setSelected(res.paper);
+        setSelected(cur => cur?.id === paper.id ? res.paper : cur);
       }
       setForm(null);
       setFormDirty(false);
@@ -633,48 +633,26 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
     if (!window.confirm(t('common.confirmDelete'))) return;
     try {
       await api(`/scholar/papers/${encodeURIComponent(id)}`, { method: 'DELETE' });
-      setSelected(null);
+      if (detailTarget.current === id) leavePaper();
       await Promise.all([load(), loadAll()]);
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  const quickImportance = async (paper: Paper, importance: number) => {
-    // E02:快捷星级只提交 {importance}——旧实现整包提交会把后台/他页刚更新的
-    // summary/notes/tags 用本地旧快照覆盖掉;后端 PUT 本就是部分更新语义。
-    // 序号防乱序:同一论文连点 2→5,迟到的 2 不得覆盖 5。
-    const seq = (ratingSeq.current.get(paper.id) ?? 0) + 1;
-    ratingSeq.current.set(paper.id, seq);
-    try {
-      const res = await api<{ paper: Paper }>(`/scholar/papers/${encodeURIComponent(paper.id)}`, {
-        method: 'PUT',
-        body: JSON.stringify({ importance }),
-      });
-      if (ratingSeq.current.get(paper.id) !== seq) return; // 迟到响应丢弃
-      setPapers((cur) => cur.map((p) => (p.id === paper.id ? res.paper : p)));
-      setSelected((cur) => (cur && cur.id === paper.id ? res.paper : cur)); // 已切走不拉回
-    } catch (e) {
-      if (ratingSeq.current.get(paper.id) !== seq) return;
-      setActionError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  /** 阅读状态一键流转（部分更新：只提交 readStatus，不动其他字段） */
-  const quickReadStatus = async (paper: Paper, readStatus: ReadStatus) => {
-    try {
-      const res = await api<{ paper: Paper }>(`/scholar/papers/${encodeURIComponent(paper.id)}`, {
-        method: 'PUT',
-        body: JSON.stringify({ readStatus }),
-      });
-      setSelected(res.paper);
-      // 列表里的徽章同步刷新（不整页重载）
-      setPapers((cur) => cur.map((p) => (p.id === res.paper.id ? { ...p, readStatus } : p)));
-      setAllPapers((cur) => cur.map((p) => (p.id === res.paper.id ? { ...p, readStatus } : p)));
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e));
-    }
-  };
+  const quickPatch = (paper: Paper, patch: Partial<Pick<Paper, 'importance' | 'readStatus'>>) =>
+    queueMutation('paper:' + paper.id, async () => {
+      try {
+        const res = await api<{ paper: Paper }>(`/scholar/papers/${encodeURIComponent(paper.id)}`, { method: 'PUT', body: JSON.stringify(patch) });
+        // A response may contain other fields from an earlier server snapshot.
+        const fields = Object.fromEntries(Object.keys(patch).map(key => [key, res.paper[key as keyof Paper]]));
+        const update = (p: Paper) => p.id === paper.id ? { ...p, ...fields } : p;
+        setPapers(cur => cur.map(update)); setAllPapers(cur => cur.map(update));
+        setSelected(cur => cur ? update(cur) : cur);
+      } catch (e) { setActionError(e instanceof Error ? e.message : String(e)); }
+    });
+  const quickImportance = (paper: Paper, importance: number) => quickPatch(paper, { importance });
+  const quickReadStatus = (paper: Paper, readStatus: ReadStatus) => quickPatch(paper, { readStatus });
 
   /** 复制单篇 BibTeX 到剪贴板 */
   const copyBibtex = async (paper: Paper) => {
@@ -781,7 +759,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target as HTMLElement | null)?.isContentEditable) return;
       if (e.key === 'Escape') {
-        if (selected) setSelected(null);
+        if (selected || detailTarget.current) leavePaper();
         else setCursorIdx(null);
         return;
       }
@@ -862,12 +840,12 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
       <div className="sch-scroll sch-fade" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '10px 12px 14px', fontSize: 12 }} key={selected.id}>
         <SchStyles />
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-          <Btn onClick={() => setSelected(null)}><Icon d={Icons.back} size={12} /> {t('common.back')}</Btn>
+          <Btn onClick={leavePaper}><Icon d={Icons.back} size={12} /> {t('common.back')}</Btn>
           <span style={{ flex: 1 }} />
           {rightbarAvailable() && (
             <IconButton label={t('rightbar.open')} onClick={() => openPaperInRightbar(selected.id)} icon={<Icon d={Icons.sidebarRight} size={14} />} />
           )}
-          <IconButton label={t('common.edit')} onClick={() => setForm({ mode: 'edit', paper: { ...selected } })} icon={<Icon d={Icons.edit} size={14} />} />
+          <IconButton label={t('common.edit')} onClick={() => { ++detailSeq.current; ++cardsSeq.current; setForm({ mode: 'edit', paper: { ...selected } }); }} icon={<Icon d={Icons.edit} size={14} />} />
           <IconButton label={t('common.delete')} color={T.danger} onClick={() => void removePaper(selected.id)} icon={<Icon d={Icons.trash} size={14} />} />
           <Chip label={selected.source === 'agent' ? t('paper.sourceAgent') : t('paper.sourceManual')} />
         </div>
@@ -894,7 +872,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
                 display: 'inline-flex', alignItems: 'center', gap: 5,
               }}>
                 {name || (selected.arxivId ? 'arXiv' : '')}
-                {tier && <span style={{ fontWeight: 700, color: 'var(--dsh-alias-label-primary)' }}>{tier}</span>}
+                {tier && <span style={{ fontWeight: 700, color: 'var(--dsw-alias-label-primary)' }}>{tier}</span>}
               </span>
             );
           })()}
@@ -1111,7 +1089,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
           {cardsError && (
             <div style={{ color: 'var(--dsw-alias-state-danger-primary)', fontSize: 11, lineHeight: 1.6, display: 'flex', gap: 8, alignItems: 'center' }}>
               <span>{cardsError}</span>
-              <Btn onClick={() => { if (selected) void openPaper(selected.id); }}>
+              <Btn onClick={() => { if (selected) void loadCards(selected.id); }}>
                 <Icon d={Icons.refresh} size={10} /> {t('paper.retry')}
               </Btn>
             </div>
@@ -1221,7 +1199,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
           border: '1px solid var(--dsw-alias-border-l2)',
           background: 'var(--dsw-alias-bg-layer-1, rgba(127,127,127,.05))',
           borderRadius: 12, padding: '12px 13px 11px', marginBottom: 10, cursor: 'pointer',
-          color: 'var(--dsh-alias-label-primary)',
+          color: 'var(--dsw-alias-label-primary)',
           boxShadow: accentBar ? `inset 3px 0 0 ${accentBar}` : undefined,
           outline: isCursor ? '2px solid var(--dsw-alias-state-business-primary, #4d6bfe)' : undefined,
           outlineOffset: -2,
@@ -1277,16 +1255,16 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
 
   /* ---------- list ---------- */
   return (
-    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+    <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       <SchStyles />
-      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+      <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'row' }}>
         {/* collection rail（Zotero 式分区导航 + 保存的筛选） */}
         {railOpen && (
           <div
             data-dsh-plugin="dsh-scholar"
             data-dsh-part="collection-rail"
             className="sch-scroll"
-            style={{ width: 148, flex: 'none', borderRight: '1px solid var(--dsw-alias-border-l2)', padding: '8px 6px 10px', overflowY: 'auto' }}
+            style={{ width: 148, minHeight: 0, boxSizing: 'border-box', flex: 'none', borderRight: '1px solid var(--dsw-alias-border-l2)', padding: '8px 6px 10px', overflowY: 'auto' }}
           >
             <div style={{ display: 'flex', alignItems: 'center', padding: '0 4px 5px' }}>
               <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.05em', color: T.caption }}>{t('col.manage')}</span>
@@ -1432,9 +1410,10 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
           </div>
         )}
 
-        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        {/* Keep the list constrained to the panel so papers scroll independently of the collection rail. */}
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           {/* toolbar */}
-          <div style={{ padding: '8px 10px 6px', display: 'flex', gap: 6, alignItems: 'center' }}>
+          <div style={{ padding: '8px 10px 6px', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
             <IconButton
               label={t('paper.rail')}
               active={railOpen}
@@ -1458,7 +1437,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
               onClick={exportBibtex}
               icon={<Icon d={Icons.download} size={13} />}
             />
-            <Btn tone="primary" onClick={() => { setSelected(null); setFormDirty(false); setForm({ mode: 'new', paper: emptyPaper() }); }}>
+            <Btn tone="primary" onClick={() => { leavePaper(); setFormDirty(false); setForm({ mode: 'new', paper: emptyPaper() }); }}>
               <Icon d={Icons.plus} size={12} /> {t('paper.add')}
             </Btn>
           </div>
@@ -1509,7 +1488,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
                   icon={<Icon d={Icons.book} size={38} />}
                   title={t('common.empty')}
                   hint={t('paper.aiHint')}
-                  action={<Btn tone="primary" onClick={() => { setSelected(null); setFormDirty(false); setForm({ mode: 'new', paper: emptyPaper() }); }}><Icon d={Icons.plus} size={12} /> {t('paper.add')}</Btn>}
+                  action={<Btn tone="primary" onClick={() => { leavePaper(); setFormDirty(false); setForm({ mode: 'new', paper: emptyPaper() }); }}><Icon d={Icons.plus} size={12} /> {t('paper.add')}</Btn>}
                 />
               )
             )}
@@ -1576,7 +1555,7 @@ function RailItem({ label, count, color, active, dim, onClick }: {
         padding: '5px 7px', borderRadius: 8, marginBottom: 1,
         background: active ? 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14))' : 'transparent',
         border: 'none', cursor: 'pointer',
-        color: dim ? T.secondary : 'var(--dsh-alias-label-primary)',
+        color: dim ? T.secondary : 'var(--dsw-alias-label-primary)',
         fontSize: 11.5, fontWeight: active ? 600 : 400,
       }}
     >

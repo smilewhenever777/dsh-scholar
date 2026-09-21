@@ -1457,32 +1457,21 @@ interface PinHostRow {
   archived?: boolean;
 }
 
-/** flip one host's archived flag through the config route (read → flip → PUT) */
-async function toggleArchivedHost(hostId: string): Promise<void> {
+/** Only mutate the requested flag, using the config version read for this action. */
+async function toggleHostFlag(hostId: string, flag: 'pinned' | 'archived'): Promise<void> {
   const res = await fetch('/dash/config', { headers: { accept: 'application/json' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const cfg = (await res.json()).config as { hosts: PinHostRow[]; refreshIntervalS: number; staleMinutes: number; alertIdleMin: number };
-  const hosts = cfg.hosts.map((h) => (h.id === hostId ? { ...h, archived: !h.archived } : h));
+  const { config, revision } = await res.json() as { config: { hosts: PinHostRow[] }; revision: string };
+  const host = config.hosts.find(h => h.id === hostId);
+  if (!host) return;
   const put = await fetch('/dash/config', {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ hosts, refreshIntervalS: cfg.refreshIntervalS, staleMinutes: cfg.staleMinutes, alertIdleMin: cfg.alertIdleMin }),
+    method: 'PATCH', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ revision, updateHost: { id: hostId, changes: { [flag]: !host[flag] } } }),
   });
-  if (!put.ok) throw new Error(`HTTP ${put.status}`);
+  if (!put.ok) throw new Error((await put.json()).error ?? `HTTP ${put.status}`);
 }
-
-async function togglePinnedHost(hostId: string): Promise<void> {
-  const res = await fetch('/dash/config', { headers: { accept: 'application/json' } });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const cfg = (await res.json()).config as { hosts: PinHostRow[]; refreshIntervalS: number; staleMinutes: number };
-  const hosts = cfg.hosts.map((h) => (h.id === hostId ? { ...h, pinned: !h.pinned } : h));
-  const put = await fetch('/dash/config', {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ hosts, refreshIntervalS: cfg.refreshIntervalS, staleMinutes: cfg.staleMinutes }),
-  });
-  if (!put.ok) throw new Error(`HTTP ${put.status}`);
-}
+const toggleArchivedHost = (id: string) => toggleHostFlag(id, 'archived');
+const togglePinnedHost = (id: string) => toggleHostFlag(id, 'pinned');
 
 export interface DashboardPanelProps {
   /** host list snapshot (id, name, pinned) — lightweight, from the snapshot endpoint */

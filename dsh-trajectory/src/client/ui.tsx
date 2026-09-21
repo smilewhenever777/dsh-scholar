@@ -1,3 +1,4 @@
+import { useModalFocus } from './modalFocus';
 import React from 'react';
 import { createPortal } from 'react-dom';
 import type { TrajEdgeKind, TrajNodeKind, TrajStatus } from '../shared/types';
@@ -24,10 +25,10 @@ export const T = {
 
 /**
  * z-index 约定(与 dsh-web-ui 社区惯例对齐,插件家族必须使用同一张表):
- * 抽屉 70(让位于 shell 自身弹层);居中弹窗 200;
+ * 抽屉 70(让位于 shell 自身弹层);居中弹窗 2147483100（高于插件浮窗）;
  * 悬浮层(toast / HUD)一律 2147483000 —— 略低于 int32 上限,留调试余量。
  */
-export const Z = { drawer: 70, modal: 200, float: 2147483000 } as const;
+export const Z = { drawer: 70, modal: 2147483100, float: 2147483000 } as const;
 
 /**
  * One-shot global stylesheet: everything inline styles cannot express
@@ -254,7 +255,7 @@ export function Btn(props: {
       className="traj-press"
       style={{
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-        height: 26, padding: '0 10px',
+        minHeight: 26, padding: '3px 10px', lineHeight: 1.4,
         border: `1px solid ${tone === 'primary' || tone === 'soft' ? 'transparent' : 'var(--dsw-alias-border-l2)'}`,
         background,
         borderRadius: 7, cursor: disabled ? 'default' : 'pointer',
@@ -275,8 +276,8 @@ export function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
       {...rest}
       className={`traj-input ${rest.className ?? ''}`}
       style={{
-        height: 26, display: 'block', width: '100%', boxSizing: 'border-box',
-        padding: '0 8px', borderRadius: 7, border: '1px solid var(--dsw-alias-border-l2)',
+        minHeight: 26, lineHeight: 1.4, display: 'block', width: '100%', boxSizing: 'border-box',
+        padding: '3px 8px', borderRadius: 7, border: '1px solid var(--dsw-alias-border-l2)',
         background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'var(--dsw-alias-label-primary)',
         fontSize: 12, transition: 'border-color .12s ease, box-shadow .12s ease', ...style,
       }}
@@ -309,7 +310,7 @@ export function Select({ children, style, ...rest }: React.SelectHTMLAttributes<
         {...rest}
         className={`traj-input ${rest.className ?? ''}`}
         style={{
-          height: 26, appearance: 'none', WebkitAppearance: 'none', paddingRight: 20,
+          minHeight: 26, lineHeight: 1.4, paddingTop: 3, paddingBottom: 3, appearance: 'none', WebkitAppearance: 'none', paddingRight: 20,
           borderRadius: 7, border: '1px solid var(--dsw-alias-border-l2)',
           background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'var(--dsw-alias-label-primary)',
           fontSize: 11.5, cursor: 'pointer', boxSizing: 'border-box', width: '100%',
@@ -518,15 +519,19 @@ export function Modal({ title, onClose, children, width = 480 }: {
   children: React.ReactNode;
   width?: number;
 }) {
+  const { boxRef, layer } = useModalFocus(onClose);
   return createPortal(
     <div
+      data-dsh-plugin="dsh-trajectory"
       style={{
-        position: 'fixed', inset: 0, zIndex: Z.modal, background: 'rgba(0,0,0,.45)',
+        position: 'fixed', inset: 0, zIndex: Z.modal + layer, background: 'rgba(0,0,0,.45)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
       }}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div
+        ref={boxRef}
+        role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}
         className="traj-fade"
         style={{
           position: 'relative',
@@ -542,7 +547,7 @@ export function Modal({ title, onClose, children, width = 480 }: {
         <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', maxHeight: '82vh' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: '1px solid var(--dsw-alias-border-l2)', flex: 'none' }}>
             <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>{title}</span>
-            <IconButton label="close" onClick={onClose} icon={<Icon d={Icons.close} size={14} />} />
+            <IconButton label={document.documentElement.lang.startsWith('en') ? 'Close' : '关闭'} onClick={onClose} icon={<Icon d={Icons.close} size={14} />} />
           </div>
           <div className="traj-scroll" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '12px 14px' }}>{children}</div>
         </div>
