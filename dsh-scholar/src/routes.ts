@@ -681,11 +681,12 @@ export function registerScholarRoutes(
             : Array.isArray(body.collectionNames)
               ? await store.ensureCollectionNames(body.collectionNames as string[])
               : undefined;
-          const paper = applyPaperPatch(existing, {
+          // F07:事务化部分更新——持锁内基于最新记录 patch,并发编辑不再互相覆盖
+          const paper = await store.updatePaperTx(id, (cur) => applyPaperPatch(cur, {
             ...input,
             ...(colIds !== undefined ? { collectionIds: colIds } : {}),
-          });
-          await store.upsertPaper(paper);
+          }));
+          if (!paper) return sendJson(res, 404, { error: '论文不存在' });
           sendJson(res, 200, { paper });
           return;
         }

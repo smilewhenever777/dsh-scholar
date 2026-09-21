@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { TrajNode, TrajNodeKind, TrajProjectFile, TrajStatus } from '../shared/types';
 import { TRAJ_NODE_KINDS, TRAJ_STATUSES } from '../shared/types';
 import { api } from './api';
@@ -52,8 +52,13 @@ export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
     }
   };
 
+  // F19:只在切换编辑目标(不同节点/新建)时初始化表单——父组件每 ~10s 轮询
+  // 会产生新的 file 对象,旧实现对每次刷新都重置表单,未保存草稿被静默清空
+  const lastTargetRef = useRef<string>('');
   useEffect(() => {
-    // reset when switching between create/edit without unmount
+    const targetKey = editing ? 'edit:' + editing.id : 'create';
+    if (lastTargetRef.current === targetKey) return;
+    lastTargetRef.current = targetKey;
     setTitle(editing?.title ?? '');
     setKind(editing?.kind ?? 'other');
     setStatus(editing?.status ?? 'todo');

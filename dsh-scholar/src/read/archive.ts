@@ -58,9 +58,10 @@ export async function archiveReadResult(
   const assembled = outcome.meta.synth === 'assembled';
   let updated = false;
   if (opts.updateSummary !== false && !assembled && summary !== '') {
-    const patched = applyPaperPatch(paper, { summary });
-    await store.upsertPaper(patched);
-    updated = true;
+    // F07:基于最新记录的事务化局部更新——并发编辑不被旧快照覆盖;
+    // 记录已被删除时返回 null,迟到的归档不再经 upsert 复活论文
+    const patched = await store.updatePaperTx(paper.id, (cur) => applyPaperPatch(cur, { summary }));
+    updated = patched !== null;
   }
   // 交互式精读的原料：保存章节块（保留历史问答）
   if ((outcome.meta.chunksText ?? []).length > 0) {

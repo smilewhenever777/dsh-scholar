@@ -477,6 +477,22 @@ export class PaperStore {
     return join(this.dir, 'papers', `${safeName(id)}.json`);
   }
 
+  /** F07 事务化更新:持锁内读最新记录 → 应用变换 → 写回。返回 null 表示
+   *  记录已不存在(删除后迟到的后台归档因此自然失效,不再经 upsert 隐式复活)。 */
+  async updatePaperTx(id: string, apply: (cur: Paper) => Paper | null): Promise<Paper | null> {
+    this.assertLive();
+    return this.withLock(async () => {
+      const cur = this.papers.get(id);
+      if (!cur) return null;
+      const next = apply(cur);
+      if (!next) return null;
+      this.papers.set(next.id, next);
+      await this.atomicWrite(this.paperPath(next.id), next);
+      await this.ensurePaperNode(next);
+      return next;
+    });
+  }
+
   async upsertPaper(paper: Paper): Promise<Paper> {
     this.assertLive();
     return this.withLock(async () => {

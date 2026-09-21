@@ -2,7 +2,7 @@
  * 交互式追问区（详情页）：输入框直连 /scholar/read/ask（一次检索+一次模型调用），
  * 问答记录持久化在 reads/<id>.json（重读保留），带页码引用与置信度标签。
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import type { TFunc } from './nav';
 import { Btn, Icon, Icons, Input, Section, T } from './ui';
@@ -39,8 +39,13 @@ export function PaperAsk({ paperId, t }: { paperId: string; t: TFunc }) {
     return () => { alive = false; };
   }, [paperId]);
 
+  // F28:提问发出的论文 id——响应回来时若已切到别的论文,丢弃结果
+  const askPaperRef = useRef(paperId);
+  useEffect(() => { askPaperRef.current = paperId; }, [paperId]);
+
   const ask = async () => {
     const q = question.trim();
+    const askedFor = paperId;
     if (q === '' || busy) return;
     try {
       setBusy(true);
@@ -49,6 +54,7 @@ export function PaperAsk({ paperId, t }: { paperId: string; t: TFunc }) {
         method: 'POST',
         body: JSON.stringify({ paperId, question: q }),
       });
+      if (askPaperRef.current !== askedFor) return; // 已切换论文:迟到响应丢弃
       setQa((cur) => [...(cur ?? []), { q, a: r.answer, pages: r.pages ?? [], confidence: r.confidence ?? '', sufficient: r.sufficient !== false, at: Date.now() }]);
       setQuestion('');
       setExists(true);

@@ -809,8 +809,10 @@ function extractPdfText(latin1: string, onPage?: (progress: PdfProgress) => void
   const pageCb = typeof onPage === 'function' ? onPage : null
   if (pageCb !== null) pageCb({ total: state.pageNums.length, done: 0 })
   const pageTexts = extractPageTexts(state.pageNums, state.getObject, state.resolveRef, state.resolveMultiRef, pageCb)
-  const pages = pageTexts.filter((t) => t.trim() !== '')
-  return pages.map((t, i) => '【第' + (i + 1) + '页】\n' + t).join('\n\n')
+  // F13:过滤空页前先记住物理页索引——按过滤后下标重编号会把扫描/图片页
+  // 之后的页码全部前移(引用页号错误)。页码 = PDF 物理页序号。
+  const pages = pageTexts.map((t, i) => ({ t, page: i + 1 })).filter((x) => x.t.trim() !== '')
+  return pages.map((x) => '【第' + x.page + '页】\n' + x.t).join('\n\n')
 }
 
 // 采样快速预检：只解析结构与前 2 页文本，避免大 PDF 全量提取。
