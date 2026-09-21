@@ -23,7 +23,7 @@ export interface LiveProgressItem {
 
 interface SnapGpu {
   index?: number;
-  log?: { path?: string; lines?: string[]; mtimeMs?: number };
+  log?: { path?: string; lines?: string[]; mtimeMs?: number; fresh?: boolean };
   series?: { name: string; points: { t: number; v: number }[] }[];
   processes?: { cmd?: string }[];
 }
@@ -64,7 +64,8 @@ function gpuMatches(gpu: SnapGpu, node: TrajNode): boolean {
 
 function progressOfGpu(gpu: SnapGpu, staleMs: number): LiveProgressItem | null {
   const log = gpu.log;
-  const stale = !!log?.mtimeMs && Date.now() - (log.mtimeMs ?? 0) >= staleMs;
+  // F23:宿主盖章的增量新鲜度优先;未盖章(fresh 缺失,如合成数据/旧缓存)回退旧启发式
+  const stale = !!log?.mtimeMs && (log.fresh === false || (log.fresh === undefined && Date.now() - (log.mtimeMs ?? 0) >= staleMs));
   const tqdm = tqdmFromLines(log?.lines);
   if (tqdm) return { nodeId: '', title: '', pct: tqdm.pct, label: tqdm.label, stale };
   const series = gpu.series ?? [];

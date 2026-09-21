@@ -183,6 +183,7 @@ export function registerTrajRoutes(
             const file = await store.resolveProject({
               ws: typeof body.ws === 'string' ? body.ws : undefined,
               projectId: typeof body.projectId === 'string' && body.projectId ? body.projectId : undefined,
+              mutating: true,
             });
             const r = await store.setGoal(file.project.id, String(body.text ?? ''), typeof body.reason === 'string' ? body.reason : undefined);
             sendJson(res, 200, { goal: r.goal, revised: r.revised });
@@ -218,6 +219,7 @@ export function registerTrajRoutes(
             const file = await store.resolveProject({
               ws: typeof body.ws === 'string' ? body.ws : undefined,
               projectId: typeof body.projectId === 'string' && body.projectId ? body.projectId : undefined,
+              mutating: true,
             });
             const hyp = await store.addHypothesis(file.project.id, {
               text: String(body.text ?? ''),
@@ -236,6 +238,7 @@ export function registerTrajRoutes(
           const file = await store.resolveProject({
             ws: typeof body.ws === 'string' ? body.ws : undefined,
             projectId: typeof body.projectId === 'string' && body.projectId ? body.projectId : undefined,
+            mutating: true,
           });
           const hyp = await store.updateHypothesis(file.project.id, id, {
             text: typeof body.text === 'string' ? body.text : undefined,
@@ -462,6 +465,7 @@ export function registerTrajRoutes(
               refs: refsFromBody(body),
               parentIds: Array.isArray(body.parentIds) ? body.parentIds as string[] : undefined,
               mainline: body.mainline === true,
+              hypothesisId: typeof body.hypothesisId === 'string' && body.hypothesisId ? body.hypothesisId : undefined,
             });
             sendJson(res, 201, { node, ...cmdPatternWarning(body) });
             return;
@@ -503,7 +507,9 @@ export function registerTrajRoutes(
           if (typeof body.kind === 'string' && TRAJ_NODE_KINDS.includes(body.kind as TrajNodeKind)) patch.kind = body.kind;
           if (typeof body.status === 'string' && TRAJ_STATUSES.includes(body.status as TrajStatus)) patch.status = body.status;
           if (typeof body.detail === 'string') patch.detail = body.detail;
-          if (typeof body.hypothesisId === 'string') patch.hypothesisId = body.hypothesisId || undefined;
+          // F18:null = 显式解除归属(空串落 patch 即清);string = 设置;缺省 = 不动
+          if (body.hypothesisId === null) patch.hypothesisId = '';
+          else if (typeof body.hypothesisId === 'string') patch.hypothesisId = body.hypothesisId;
           if (Array.isArray(body.tags)) patch.tags = body.tags;
           // explicit refs object wins; flat ref fields (cardId=… etc.) merge into a replace-block
           if (body.refs !== undefined && typeof body.refs === 'object' && !Array.isArray(body.refs)) {

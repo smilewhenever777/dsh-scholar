@@ -25,7 +25,7 @@ function useDebounced<T>(value: T, ms: number): T {
  * repulsion between all pairs + springs along edges + column gravity
  * (papers left, concepts right). Bounded iterations; fine for ≤ 500 nodes.
  */
-function simulate(graph: KnowledgeGraph, width: number, height: number): Map<string, Pos> {
+function simulate(graph: KnowledgeGraph, width: number, height: number, warm?: Map<string, Pos>): Map<string, Pos> {
   const pos = new Map<string, Pos>();
   const vel = new Map<string, { vx: number; vy: number }>();
   const n = graph.nodes.length;
@@ -35,16 +35,27 @@ function simulate(graph: KnowledgeGraph, width: number, height: number): Map<str
   const h = Math.max(200, height - pad * 2);
   const colPaper = pad + w * 0.24;
   const colConcept = pad + w * 0.76;
+  let reused = 0;
   for (const node of graph.nodes) {
     const col = node.kind === 'paper' ? colPaper : colConcept;
-    pos.set(node.id, {
-      x: col + (Math.random() - 0.5) * w * 0.35,
-      y: pad + (Math.random() - 0.5) * h * 0.8 + h / 2,
-    });
+    // F16:暖启动——已有坐标的节点沿用(仅新节点随机落位),增量图不再全量重排
+    const prev = warm?.get(node.id);
+    if (prev) {
+      pos.set(node.id, { x: prev.x, y: prev.y });
+      reused++;
+    } else {
+      pos.set(node.id, {
+        x: col + (Math.random() - 0.5) * w * 0.35,
+        y: pad + (Math.random() - 0.5) * h * 0.8 + h / 2,
+      });
+    }
     vel.set(node.id, { vx: 0, vy: 0 });
   }
   const k = Math.sqrt((w * h) / n) * 0.85;
-  const iterations = n > 350 ? 120 : 260;
+  // F16:自适应轮数——暖启动(大多节点已有稳定位)或大图时大幅减少轮数,
+  // 把 O(轮数×N²) 的主线程同步计算压下来(2000 节点实测 3.4s→可交互)
+  const reuseRatio = reused / n;
+  const iterations = reuseRatio > 0.8 ? 30 : n > 1200 ? 40 : n > 350 ? 120 : 260;
 
   for (let iter = 0; iter < iterations; iter++) {
     const t = 1 - iter / iterations;
@@ -317,11 +328,17 @@ export function GraphView({ t }: { t: TFunc }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [display, depth, debouncedFilter]);
 
+  // F16:上一帧布局缓存(暖启动源)
+  const positionsRef = React.useRef(new Map<string, Pos>());
   const positions = useMemo(() => {
     const sz = layoutSizeRef.current;
     // 未测量前返回空布局(不模拟);测量后以提交尺寸计算
     if (!display || !sz) return new Map<string, Pos>();
-    return simulate(display, sz.w, sz.h);
+    // F16:沿用上一帧坐标做暖启动(节点 id 稳定;尺寸变化时也复用相对布局)
+    const warm = positionsRef.current.size > 0 ? positionsRef.current : undefined;
+    const next = simulate(display, sz.w, sz.h, warm);
+    positionsRef.current = next;
+    return next;
     // 重排触发器:display 变化(数据/防抖后的过滤/深度)或显式 layoutKey bump
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [display, layoutKey]);

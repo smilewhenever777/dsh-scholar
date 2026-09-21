@@ -200,6 +200,8 @@ export function ServerDashboardSettings({ t }: { t: T }) {
           host: row.host, port: row.port, username: row.username,
           authKind: row.authKind, credentialRef: row.credentialRef,
           password: secrets[row.id]?.password, privateKey: secrets[row.id]?.privateKey,
+          // F24:与「测试连接」同链——SSH config 导入的非默认 IdentityFile 不能漏
+          identityFile: row.identityFile || undefined,
         }),
       });
       setDiscovered((m) => ({ ...m, [row.id]: res.candidates ?? [] }));

@@ -51,6 +51,11 @@ export interface LogTail {
   size: number;
   /** mtime (ms epoch) at snapshot time */
   mtimeMs: number;
+  /** F23:宿主侧增量新鲜度判定(本机时钟观测 mtime/size 变化),消费方不得
+   * 再用本地 Date.now() 减远程 mtime(远程时钟偏移会误报) */
+  fresh?: boolean;
+  /** F23:本机时钟上最后一次观测到变化的时间(ms epoch);显示"停滞 N 分钟"用 */
+  changeAt?: number;
 }
 
 export interface ServerSnapshot {

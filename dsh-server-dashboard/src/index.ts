@@ -671,6 +671,19 @@ export function apply(ctx: Context) {
       const forceHost = query.get('host') ?? undefined;
       try {
         const snapshots = await pollAll(config, force, forceHost);
+        // F23:把增量新鲜度盖章进每条 log(host 级与每 GPU 级)——消费方
+        // (面板/trajectory/morning/statusbar)统一读 fresh/changeAt,不再跨时钟计算
+        const staleMs = Math.max(1, config.staleMinutes) * 60_000;
+        for (const id of Object.keys(snapshots)) {
+          const rec = logActivity.get(id);
+          const snap = snapshots[id];
+          if (!snap || !snap.ok) continue;
+          const mark = (lt: import('./client/types.js').LogTail | undefined) =>
+            lt && lt.mtimeMs > 0 ? { ...lt, fresh: activityFresh(rec, lt.path, Date.now(), staleMs), changeAt: rec?.[lt.path]?.changeAt } : lt;
+          const nextLog = mark(snap.log);
+          const nextGpus = snap.gpus?.map((g) => ({ ...g, log: mark(g.log) }));
+          if (nextLog !== snap.log || nextGpus !== snap.gpus) snapshots[id] = { ...snap, log: nextLog, gpus: nextGpus } as typeof snap;
+        }
         // attach unexpired stall notices so late-connecting clients still toast
         for (const [id, notice] of [...pendingNotices.entries()]) {
           if (Date.now() - notice.at > 120_000 || !config.hosts.some((h) => h.id === id)) {

@@ -724,9 +724,9 @@ function GpuBlock({ gpu, staleMinutes, t, focusIndex }: { gpu: GpuInfo; staleMin
   const expandable = procs.length > 0 || hasLog;
   const hot = gpu.tempC >= TEMP_HOT || gpu.utilPercent >= UTIL_SATURATED;
   const tempTone = gpu.tempC >= TEMP_HOT ? 'hot' : gpu.tempC >= TEMP_WARM ? 'warm' : undefined;
-  // experiment stall: this GPU's log mtime unchanged for >= staleMinutes
-  const idleMin = gpu.log && gpu.log.mtimeMs > 0 ? Math.floor((Date.now() - gpu.log.mtimeMs) / 60_000) : 0;
-  const stalled = staleMinutes !== undefined && idleMin >= staleMinutes;
+  // F23:停滞判定用宿主盖章的增量新鲜度(远程时钟偏移免疫);分钟数取本机观测的 changeAt
+  const idleMin = gpu.log && gpu.log.mtimeMs > 0 ? Math.floor((Date.now() - (gpu.log.changeAt ?? Date.now())) / 60_000) : 0;
+  const stalled = gpu.log?.fresh === false;
   const toggleTab = (x: string) => setTab((cur) => (cur === x ? null : x));
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -923,10 +923,10 @@ function hostAnomalies(snap: ServerSnapshot | undefined, staleMinutes?: number):
   let stalled = 0;
   for (const g of snap.gpus ?? []) {
     if (g.tempC >= TEMP_HOT || g.utilPercent >= UTIL_SATURATED) hot++;
-    if (g.log && g.log.mtimeMs > 0 && staleMinutes !== undefined && Date.now() - g.log.mtimeMs >= staleMinutes * 60_000) stalled++;
+    if (g.log?.fresh === false) stalled++;
   }
   const diskFull = (snap.base?.disks ?? []).filter((d) => d.usedPercent > DISK_WARN).length;
-  const logStalled = !!snap.log && snap.log.mtimeMs > 0 && staleMinutes !== undefined && Date.now() - snap.log.mtimeMs >= staleMinutes * 60_000;
+  const logStalled = snap.log?.fresh === false;
   return { any: hot + stalled + diskFull > 0 || logStalled, offline: false, hot, stalled, diskFull, logStalled };
 }
 

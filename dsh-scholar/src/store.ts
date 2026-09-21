@@ -666,11 +666,41 @@ export class PaperStore {
     return join(this.dir, 'cards', `${safeName(id)}.json`);
   }
 
+  /** F11:按卡片当前字段重算其自动边差集——移除不再成立的 derives_from/uses/related。
+   * 只动以该卡为端点的边(kg_extract 抽取的论文↔概念边不受影响);related 在
+   * sync 里就是排序端点,此处同口径判存。必须在写锁内调用。 */
+  private async pruneCardEdgesUnlocked(card: IdeaCard): Promise<void> {
+    const valid = new Set<string>();
+    if (card.paperId) valid.add(`${card.id}|derives_from|${card.paperId}`);
+    for (const tag of card.tags) {
+      if (!isConceptWorthyTag(tag)) continue;
+      valid.add(`${card.id}|uses|${conceptId(tag)}`);
+    }
+    for (const rid of card.relatedCardIds ?? []) {
+      const [a, b] = [card.id, rid].sort();
+      valid.add(`${a}|related|${b}`);
+    }
+    const before = this.graph.edges.length;
+    const kept = this.graph.edges.filter((e) => {
+      const touches = e.source === card.id || e.target === card.id;
+      if (!touches || (e.kind !== 'derives_from' && e.kind !== 'uses' && e.kind !== 'related')) return true;
+      const key = e.kind === 'related'
+        ? `${[e.source, e.target].sort()[0]}|related|${[e.source, e.target].sort()[1]}`
+        : `${e.source}|${e.kind}|${e.target}`;
+      return valid.has(key);
+    });
+    if (kept.length !== before) {
+      await this.saveGraphUnlocked({ nodes: this.graph.nodes, edges: kept });
+    }
+  }
+
   async upsertCard(card: IdeaCard): Promise<IdeaCard> {
     this.assertLive();
     return this.withLock(async () => {
       this.cards.set(card.id, card);
       await this.atomicWrite(this.cardPath(card.id), card);
+      // F11:先清该卡不再成立的自动边(改来源/改标签/改关联后旧边残留会污染图谱)
+      await this.pruneCardEdgesUnlocked(card);
       // 卡片自动进图谱（想法节点 + derives_from/uses/related 边，幂等）
       const patch = this.cardSyncPatch([card], [...this.papers.values()]);
       if (patch.nodes.length || patch.edges.length) {

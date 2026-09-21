@@ -61,6 +61,9 @@ export function ReadProgressBanner({ t }: { t: TFunc }) {
 
   if (!run || dismissed === run.id) return null;
   const done = run.finishedAt !== null;
+  // F29:三态结果(供勾/叉图标与容器底色使用)
+  const allFailed = done && run.fail > 0 && run.ok === 0;
+  const someFailed = done && run.fail > 0 && run.ok > 0;
   const doneCount = run.ok + run.fail;
   const runningIdx = run.papers.findIndex((p) => p.state === 'running');
   const current = runningIdx >= 0 ? run.papers[runningIdx] : null;
@@ -115,7 +118,12 @@ export function ReadProgressBanner({ t }: { t: TFunc }) {
         <div style={{
           width: `${pct}%`, height: '100%', borderRadius: 999,
           background: done
-            ? 'var(--dsw-alias-state-success-primary, #34a853)'
+            // F29:全部失败=危险色;部分失败=警告色;仅全部成功才绿
+            ? (run.fail > 0 && run.ok === 0
+                ? 'var(--dsw-alias-state-danger-primary, #e5484d)'
+                : run.fail > 0
+                  ? 'var(--dsw-alias-state-warn-primary, #f5a524)'
+                  : 'var(--dsw-alias-state-success-primary, #34a853)')
             : 'linear-gradient(90deg, var(--dsw-alias-state-business-primary, #4d6bfe), color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 55%, #fff))',
           transition: 'width .45s var(--sch-ease, ease-out)',
         }} />

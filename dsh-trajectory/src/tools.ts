@@ -193,7 +193,7 @@ export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStor
         name: 'traj_goal_set',
         description:
           '设置或修订研究项目的**总目标**(研究主线图插件 v0.3)。首次调用确立 Goal v1;'
-          + '再次调用(文本不同)会修订:旧目标标 superseded(留痕),新目标版本+1,旧假设自动标 superseded。'
+          + '再次调用(文本不同)会修订:旧目标标 superseded(留痕),新目标版本+1,旧目标下的活跃假设自动继承到新目标(不自动作废)。'
           + '用户说「研究问题改为 X」「目标调整为 Y」「我们发现…方向变了」时调用。'
           + 'reason 填变化原因(如「F330C 在 DVTOD 上失败,转向层级融合适应」)。',
         parameters: {
@@ -217,7 +217,7 @@ export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStor
         },
         async execute(args: any, exec: any) {
           const store = await getStore();
-          const file = await resolveTarget(store, args, exec);
+          const file = await resolveTarget(store, args, exec, { mutating: true });
           const r = await store.setGoal(file.project.id, args.text, args.reason);
           return { ok: true, revised: r.revised, goal: toJson(r.goal) };
         },
@@ -254,7 +254,7 @@ export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStor
         },
         async execute(args: any, exec: any) {
           const store = await getStore();
-          const file = await resolveTarget(store, args, exec);
+          const file = await resolveTarget(store, args, exec, { mutating: true });
           const hyp = await store.addHypothesis(file.project.id, { text: args.text, track: args.track });
           return { ok: true, hypothesis: toJson(hyp) };
         },
@@ -298,7 +298,7 @@ export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStor
         },
         async execute(args: any, exec: any) {
           const store = await getStore();
-          const file = await resolveTarget(store, args, exec);
+          const file = await resolveTarget(store, args, exec, { mutating: true });
           const hyp = await store.updateHypothesis(file.project.id, args.id, {
             status: args.status, track: args.track, outcomeReason: args.outcomeReason, text: args.text,
           });
@@ -510,6 +510,7 @@ export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStor
           },
           conclusion: { type: 'string', description: '结论/判定(如「partial:数据集敏感;决策:停止 DVTOD 门控」)' },
           date: { type: 'string', description: '发生日期 YYYY-MM-DD(省略 = 今天)' },
+          hypothesisId: { type: 'string', description: '归属假设 id(F18:把节点挂到某假设下;传空串 "" 解除归属;省略 = 不改动)' },
         },
         output: {
           schema: {
@@ -714,6 +715,8 @@ export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStor
             status: args.status as TrajStatus | undefined,
             detail: args.detail,
             tags: Array.isArray(args.tags) ? args.tags : undefined,
+            // F18:hypothesisId 空串 = 解除归属,缺省 = 不动
+            ...(args.hypothesisId !== undefined ? { hypothesisId: String(args.hypothesisId) } : {}),
             ...(refsTouched ? { refs: mergeRefFields(existing.refs, updates) } : {}),
           });
           return { ok: true, node: toJson(node), ...cmdPatternWarning(args.cmdPattern) };
