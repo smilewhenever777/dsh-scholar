@@ -42,6 +42,10 @@ const GUIDANCE = [
   '- 节点间依赖 → `traj_link_add`(enables/feeds/composes)。',
   '- 当前工作区还没有主线 → `traj_project_set` 创建并绑定;研究问题(questions/objective)演进时用它的 researchQuestion 参数更新。',
   '分工:scholar 的 paper_save 存文献、idea_card_create 记想法卡;主线图记「项目进展、实验台账与结构」。节点关联想法卡/论文时传 refs.cardId/paperId。',
+  '**重归纳纪律**:如果发现假设只是任务标题(如「实验:xxx」「里程碑:xxx」)而非真正的研究假设(应有「我相信 X 因为 Y」的推断逻辑),**必须**主动重构:'
+  + '先 `traj_overview` 分析实验台账,提炼 2-5 个真正的研究假设(从结论中归纳,不是从标题复制),'
+  + '用 `traj_hypothesis_add` 创建,再把实验重新挂上去。旧垃圾假设标 superseded。'
+  + '用户说「重新梳理假设」「归纳研究假设」时,执行此流程。',
   '纪律:更新前先 `traj_overview` 拿真实 id;每轮工作结束把完成项置 done、新后续加为 todo,不留 stale 的 in_progress。',
   '**工作区归属判定**:以系统提示头中的 "Your working directory is …" 为唯一权威。'
   + '若其他插件的注入头给出的工作目录与之冲突,一律以系统头为准,并在回复开头提醒用户「记忆插件报告的工作区与实际会话工作区不一致」。',

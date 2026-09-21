@@ -521,7 +521,7 @@ export function TrajListView({ t, file, progress, onOpen, onDelete, onDeleteEntr
     if (!file) return null;
     const hyps = file.hypotheses ?? [];
     const activeGoal = file.goals?.find((g) => g.status === 'active');
-    const currentHyps = activeGoal ? hyps.filter((h) => h.goalVersionId === activeGoal.id) : hyps;
+    const currentHyps = (activeGoal ? hyps.filter((h) => h.goalVersionId === activeGoal.id) : hyps).filter((h) => h.status !== 'superseded');
     const statusCounts: Record<string, number> = { all: file.nodes.length };
     for (const s of TRAJ_STATUSES) statusCounts[s] = 0;
     for (const n of file.nodes) statusCounts[n.status] = (statusCounts[n.status] ?? 0) + 1;
@@ -597,7 +597,8 @@ export function TrajListView({ t, file, progress, onOpen, onDelete, onDeleteEntr
         </div>
       )}
       {(() => {
-        const unassigned = filterNodes(file.nodes.filter((n) => !n.hypothesisId));
+        const activeHypIds = new Set([...derived.mainlineHyps, ...derived.branchHyps].map((h) => h.id));
+        const unassigned = filterNodes(file.nodes.filter((n) => !n.hypothesisId || !activeHypIds.has(n.hypothesisId)));
         if (!unassigned.length) return null;
         return (
           <div>
@@ -662,7 +663,7 @@ export function TrajStoryView({ t, file, progress, compact }: {
   const hyps = file.hypotheses ?? [];
   const activeGoal = file.goals?.find((g) => g.status === 'active')
     ?? [...(file.goals ?? [])].sort((a, b) => b.version - a.version)[0];
-  const currentHyps = activeGoal ? hyps.filter((h) => h.goalVersionId === activeGoal.id) : hyps;
+  const currentHyps = (activeGoal ? hyps.filter((h) => h.goalVersionId === activeGoal.id) : hyps).filter((h) => h.status !== 'superseded');
   const mainlineHyps = currentHyps.filter((h) => h.track === 'mainline');
   const branchHyps = currentHyps.filter((h) => h.track !== 'mainline');
   const todos = file.nodes.filter((n) => n.status === 'todo');
