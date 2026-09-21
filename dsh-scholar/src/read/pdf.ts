@@ -165,6 +165,10 @@ function inflateRaw(data: Uint8Array): Uint8Array {
   return new Uint8Array(out)
 }
 
+/** F05:单流解压输出上限——压缩炸弹(高压缩比流)不能把内存/时间打穿;
+ * 超限 inflateSync 抛错,调用方按单流失败容错,不影响其他流。 */
+const STREAM_MAX_OUTPUT = 64 * 1024 * 1024;
+
 function inflateZlib(data: Uint8Array): Uint8Array {
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
   if (bytes.length < 2) throw new Error('zlib: too short')

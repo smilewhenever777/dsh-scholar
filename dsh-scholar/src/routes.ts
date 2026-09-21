@@ -58,6 +58,13 @@ export interface ReadRunState {
 }
 let readRun: ReadRunState | null = null;
 let readRunSeq = 0;
+/** F12:活动 run 的取消信号——新 run 启动前必须先确认旧 run 已结束或被取消,
+ * 防止后台任务重叠消耗模型额度且 UI 只见最后一个;/scholar/read/cancel 可中止。 */
+let activeSignal: { aborted: boolean } | null = null;
+function readRunBusy(): ReadRunState | null {
+  if (readRun && readRun.finishedAt === null) return readRun;
+  return null;
+}
 
 const PaperInputSchema = z.object({
   title: z.string().required(),
@@ -953,8 +960,14 @@ export function registerScholarRoutes(
           phase: '',
           error: '',
         };
-        readRun = run;
+                // F12:上一 run 未结束/未取消时拒绝重叠启动(旧任务会在后台默默烧额度)
+        const busy = readRunBusy();
+        if (busy) {
+          return sendJson(res, 409, { error: "已有精读任务进行中(#" + busy.id + ")", run: busy });
+        }
+readRun = run;
         const signal = { aborted: false };
+        activeSignal = signal;
         type PaperOutcomeLike = PaperOutcome;
         void (async () => {
           const paperOutcomes: Array<{ paper: typeof papers[number]; outcome: PaperOutcomeLike }> = [];
@@ -1003,6 +1016,7 @@ export function registerScholarRoutes(
             }
           } finally {
             run.finishedAt = Date.now();
+            if (activeSignal) activeSignal = null;
             console.log(`[dsh-scholar] 批量精读结束：成功 ${run.ok} / 失败 ${run.fail}`);
           }
         })();
@@ -1042,8 +1056,14 @@ export function registerScholarRoutes(
           papers: [{ title: `直接对比 ${papers.length} 篇（已有成果）`, state: 'running' }],
           phase: '组装对比原料…', error: '',
         };
-        readRun = run;
+                // F12:上一 run 未结束/未取消时拒绝重叠启动(旧任务会在后台默默烧额度)
+        const busy = readRunBusy();
+        if (busy) {
+          return sendJson(res, 409, { error: "已有精读任务进行中(#" + busy.id + ")", run: busy });
+        }
+readRun = run;
         const signal = { aborted: false };
+        activeSignal = signal;
         void (async () => {
           try {
             const reportsDir = join(store.dir, 'reports');
@@ -1092,6 +1112,7 @@ export function registerScholarRoutes(
             console.error('[dsh-scholar] 直接对比失败:', err instanceof Error ? err.message : err);
           } finally {
             run.finishedAt = Date.now();
+            if (activeSignal) activeSignal = null;
           }
         })();
         sendJson(res, 200, { ok: true, detached: true, started: papers.length, label: `直接对比 ${papers.length} 篇` });
@@ -1112,6 +1133,31 @@ export function registerScholarRoutes(
         return;
       }
       sendJson(res, 200, { run: readRun });
+    },
+  } satisfies WebRoute));
+
+  /* ---------- F12:精读任务取消(下一论文边界生效,进行中的模型流按段检查) ---------- */
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/scholar/read/cancel',
+    handler: async (req, res) => {
+      if (!guardRoute(req, res)) return;
+      try {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'method not allowed' });
+          return;
+        }
+        const busy = readRunBusy();
+        if (!busy) {
+          sendJson(res, 200, { cancelled: false, reason: '当前没有进行中的精读任务' });
+          return;
+        }
+        if (activeSignal) activeSignal.aborted = true;
+        busy.phase = '正在取消…（当前论文完成后停止）';
+        sendJson(res, 200, { cancelled: true, run: busy });
+      } catch (err) {
+        sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
     },
   } satisfies WebRoute));
 

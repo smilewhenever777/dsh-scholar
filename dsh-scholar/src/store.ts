@@ -625,6 +625,18 @@ export class PaperStore {
           if (f.startsWith(prefix)) await unlink(join(this.dir, 'reports', f)).catch(() => {});
         }
       } catch { /* reports 目录不存在或不可读 */ }
+      // F09:精读正文/问答(reads/<safeId>.json)与对比报告(cmp-*.html,文件名含
+      // 参与方 id)同属"删除论文"的隐私预期——残留即数据泄漏面。cmp 采用包含
+      // 匹配(多论文共享的对比报告删除任一参与方时一并清掉,宁可多删不残留)。
+      try {
+        const sid = safeName(id);
+        await unlink(join(this.dir, 'reads', `${sid}.json`)).catch(() => {});
+        for (const f of await readdir(join(this.dir, 'reports'))) {
+          if (f.startsWith('cmp-') && (f.includes(`_${sid}.`) || f.includes(`_${sid}-`) || f.includes(`${sid}_.`) || f.endsWith(`_${sid}.html`))) {
+            await unlink(join(this.dir, 'reports', f)).catch(() => {});
+          }
+        }
+      } catch { /* 目录缺失静默跳过 */ }
       return true;
     });
   }

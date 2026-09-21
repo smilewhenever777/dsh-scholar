@@ -76,9 +76,13 @@ function proxyAuthHeader(pu: URL): Record<string, string> {
 /** 经代理建立 CONNECT 隧道（带超时，无响应即销毁而不是永久挂起）。 */
 function connectViaProxy(pu: URL, targetHost: string, timeoutMs: number): Promise<Socket> {
   return new Promise((resolve, reject) => {
-    const setup = http.request({
+    // F15:代理按自身协议连接——https:// 代理走 TLS(否则 CONNECT 与 Basic
+    // 凭据明文发向 TLS 端口会被拒);http:// 无显式端口默认 80 而非 443
+    const isTlsProxy = pu.protocol === 'https:';
+    const defaultProxyPort = isTlsProxy ? 443 : 80;
+    const setup = (isTlsProxy ? https : http).request({
       host: pu.hostname,
-      port: Number(pu.port || 443),
+      port: Number(pu.port || defaultProxyPort),
       method: 'CONNECT',
       path: `${targetHost}:443`,
       headers: {

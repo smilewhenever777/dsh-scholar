@@ -118,8 +118,11 @@ function latin1ToBytes(s: string): Uint8Array {
   return out
 }
 
+/** F05:图像流解压输出上限(64MiB/流)——异常 PDF 不能靠压缩展开耗尽内存 */
+const FIG_STREAM_MAX_OUTPUT = 64 * 1024 * 1024;
+
 function inflateZlibRaw(data: Uint8Array): Uint8Array {
-  return new Uint8Array(inflateSync(Buffer.from(data)))
+  return new Uint8Array(inflateSync(Buffer.from(data), { maxOutputLength: FIG_STREAM_MAX_OUTPUT }))
 }
 
 /** latin1 全文 → 图像列表（文档顺序）+ 统计。失败容错：单图错误不影响其他。 */

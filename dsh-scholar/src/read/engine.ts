@@ -316,7 +316,9 @@ async function loadFileText(ctx: HostContext, path: string, onProgress: ((line: 
     if (!isBinaryFileService(ctx.fs)) throw new Error('文件服务不可用，无法读取 PDF')
     const { bytesToLatin1, extractPdfText } = createPdfTools(() => 0)
     const target = await ctx.fs.resolve(path) as never
-    const bytes = await ctx.fs.readBytes(target, undefined, 30 * 1024 * 1024)
+    // F14:与上传上限(routes PDF_MAX_BYTES=50MiB)一致——30-50MiB 的合法 PDF
+    // 此前可入库但精读必败
+    const bytes = await ctx.fs.readBytes(target, undefined, 50 * 1024 * 1024)
     const latin = bytesToLatin1(bytes)
     let extracted = ''
     try {
