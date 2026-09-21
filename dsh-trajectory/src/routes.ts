@@ -30,25 +30,60 @@ const ProjectInputSchema = z.object({
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
+    // F02:严格媒体类型——分号前主类型必须精确等于 application/json;
+    // includes 匹配可被 "text/plain;application/json" 绕过(浏览器简单请求不需预检)
     const ct = String(req.headers['content-type'] ?? '');
-    if (!ct.includes('application/json')) {
+    if (ct.split(';')[0].trim().toLowerCase() !== 'application/json') {
       reject(new Error('请求必须是 application/json'));
       return;
     }
-    let data = '';
-    req.on('data', (chunk) => {
-      data += chunk;
-      // 超限即断流 + 同步 return,防止继续灌 body 造成内存增长(字节口径而非 UTF-16 码元)
-      if (Buffer.byteLength(data) > 1_000_000) {
+    // F02:Host 必须是回环域——DNS rebinning 把外域解析到 127.0.0.1 时 Host 是外域名
+    const hostRaw = String(req.headers.host ?? '').toLowerCase();
+    let hostName = hostRaw;
+    if (hostName.startsWith('[')) hostName = hostName.slice(1, hostName.includes(']') ? hostName.indexOf(']') : undefined);
+    else if (hostName.includes(':')) hostName = hostName.split(':')[0];
+    if (hostName && !['localhost', '127.0.0.1', '::1'].includes(hostName)) {
+      reject(new Error('非法 Host'));
+      return;
+    }
+    // F02:浏览器跨源请求的 Origin 必须与 Host 同源(同域同端口)——
+    // 本机其他端口的恶意页面发起的简单 CSRF 因此被拒;无 Origin 的非浏览器
+    // 客户端放行,由 loopback 对端校验兜底
+    const origin = String(req.headers.origin ?? '');
+    if (origin) {
+      try {
+        const o = new URL(origin);
+        const oHost = (o.hostname || '').toLowerCase();
+        const loopback = oHost === 'localhost' || oHost === '127.0.0.1' || oHost === '::1';
+        const sameOrigin = o.host === hostRaw || (oHost === hostName && !o.port && !hostRaw.includes(':'));
+        if (!loopback || !sameOrigin) {
+          reject(new Error('跨源请求被拒绝'));
+          return;
+        }
+      } catch {
+        reject(new Error('非法 Origin'));
+        return;
+      }
+    }
+    // F10:按字节缓冲、超限即断流、结束时一次性 UTF-8 解码——
+    // 逐 chunk 字符串拼接会把多字节汉字从中间拆开损坏
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    let over = false;
+    req.on('data', (chunk: Buffer) => {
+      if (over) return;
+      chunks.push(chunk);
+      bytes += chunk.length;
+      if (bytes > 1_000_000) {
+        over = true;
         req.destroy();
         reject(new Error('请求体过大'));
       }
     });
-    req.on('end', () => resolve(data));
+    req.on('end', () => { if (!over) resolve(Buffer.concat(chunks).toString('utf8')); });
     req.on('error', reject);
   });
 }
-
 function sendJson(res: ServerResponse, code: number, payload: unknown): void {
   res.statusCode = code;
   res.setHeader('content-type', 'application/json; charset=utf-8');
@@ -58,6 +93,32 @@ function sendJson(res: ServerResponse, code: number, payload: unknown): void {
 /** 403 unless loopback(与 dsh-server-dashboard 同款):0.1.5 的 Web 认证门不覆盖
  * 插件命名路由,/traj/* 需要自己的本机围栏 */
 function guardRoute(req: import('node:http').IncomingMessage, res: ServerResponse): boolean {
+  // F02:Host 必须是回环域——DNS rebinding 把外域解析到 127.0.0.1 时 Host 是外域名
+  const hostRaw = String(req.headers.host ?? '').toLowerCase();
+  let hostName = hostRaw;
+  if (hostName.startsWith('[')) hostName = hostName.slice(1, hostName.includes(']') ? hostName.indexOf(']') : undefined);
+  else if (hostName.includes(':')) hostName = hostName.split(':')[0];
+  if (hostName && !['localhost', '127.0.0.1', '::1'].includes(hostName)) {
+    sendJson(res, 403, { error: '非法 Host' });
+    return false;
+  }
+  // F02:浏览器跨源请求的 Origin 必须与 Host 同源——本机其他端口的页面发起的简单 CSRF 因此被拒
+  const origin = String(req.headers.origin ?? '');
+  if (origin) {
+    try {
+      const o = new URL(origin);
+      const oHost = (o.hostname || '').toLowerCase();
+      const loopback = oHost === 'localhost' || oHost === '127.0.0.1' || oHost === '::1';
+      const sameOrigin = o.host === hostRaw || (oHost === hostName && !o.port && !hostRaw.includes(':'));
+      if (!loopback || !sameOrigin) {
+        sendJson(res, 403, { error: '跨源请求被拒绝' });
+        return false;
+      }
+    } catch {
+      sendJson(res, 403, { error: '非法 Origin' });
+      return false;
+    }
+  }
   const addr = req.socket.remoteAddress ?? '';
   if (addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1') return true;
   sendJson(res, 403, { error: '仅允许本机(loopback)访问' });
@@ -107,6 +168,7 @@ export function registerTrajRoutes(
     path: '/traj/goals',
     handler: async (req, res) => {
       try {
+        if (!guardRoute(req, res)) return;
         const store = await getStore();
         const { rest } = pathInfo(req, '/traj/goals');
 
@@ -141,6 +203,7 @@ export function registerTrajRoutes(
     path: '/traj/hypotheses',
     handler: async (req, res) => {
       try {
+        if (!guardRoute(req, res)) return;
         const store = await getStore();
         const { rest } = pathInfo(req, '/traj/hypotheses');
 

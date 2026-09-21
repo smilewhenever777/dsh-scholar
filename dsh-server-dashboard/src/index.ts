@@ -41,6 +41,8 @@ export interface DashboardHostConfig {
   credentialRef: string;
   /** local path of an SSH identity file (imported from ~/.ssh/config); used when credentialRef is empty */
   identityFile: string;
+  /** F04:已确认的 SSH 主机密钥指纹(SHA256:base64) */
+  hostKeyFingerprint?: string;
   /** absolute path of the training log on the remote host */
   logPath: string;
   pinned: boolean;
@@ -68,6 +70,8 @@ const HostSchema = z.object({
   logPath: z.string().default(''),
   pinned: z.boolean().default(false),
   archived: z.boolean().default(false),
+  /** F04:已确认的 SSH 主机密钥指纹(SHA256:base64),TOFU 首连写入,变化即拒连 */
+  hostKeyFingerprint: z.string().default(''),
 });
 
 const DashboardConfigSchema = z.object({
@@ -95,7 +99,10 @@ async function readIdentityFile(path: string): Promise<string> {
  *  never used to address the vault (prevents overwriting arbitrary existing
  *  credentials via PUT /dash/config). */
 function derivedCredName(hostId: string): string {
-  return `SD_${hostId.replace(/[^A-Za-z0-9_]/g, '_')}`;
+  // F21:无碰撞编码——非字母数字(含下划线本身)统一转 '_<hex>',十六进制字符
+  // 属于字母数字集不会被再次编码,因此映射是单射;旧实现把 'audit-a' 与
+  // 'audit_a' 都折叠成 SD_audit_a。纯字母数字 id(如 A5000)编码不变。
+  return `SD_${hostId.replace(/[^A-Za-z0-9]/g, (c) => '_' + c.codePointAt(0)!.toString(16))}`;
 }
 
 /** Cached resolveAuth result per host; invalidated by PUT /dash/config or by an
@@ -121,6 +128,7 @@ async function resolveAuth(ctx: Context, cfg: DashboardHostConfig, cache?: Map<s
   const hit = cache?.get(cfg.id);
   if (hit && hit.credentialRef === ref && hit.sig === sig && hit.identityMtimeMs === identityMtimeMs) return hit.auth;
   const auth: SshAuth = { host: cfg.host, port: cfg.port, username: cfg.username };
+  if (cfg.hostKeyFingerprint) auth.hostKeyFingerprint = cfg.hostKeyFingerprint;
   // 1) credential vault (explicitly stored private key / password) — always
   //    addressed by the SERVER-DERIVED name, never by a client-supplied ref
   if (cfg.authKind !== 'none') {
@@ -177,15 +185,18 @@ async function resolveAuthFromBody(ctx: Context, body: {
 }): Promise<SshAuth> {
   const auth: SshAuth = { host: body.host as string, port: body.port ?? 22, username: body.username ?? 'root' };
   const kind = body.authKind ?? 'none';
+  // F03:临时测试流程解析的凭据引用必须属于看板(SD_*)命名空间——凭据 seam
+  // 可解析环境变量等其他引用,不限定就会把无关 secret 当密码发给任意目标
+  const refOk = (r: string | undefined): r is string => !!r && CRED_NAME.test(r) && r.startsWith('SD_');
   if (kind === 'password') {
     if (body.password) auth.password = body.password;
-    else if (body.credentialRef && CRED_NAME.test(body.credentialRef)) {
+    else if (refOk(body.credentialRef)) {
       const hit = await ctx.credentials.resolve(credentialRef(body.credentialRef));
       if (hit?.value) auth.password = String(hit.value);
     }
   } else if (kind === 'key') {
     if (body.privateKey) auth.privateKey = body.privateKey;
-    else if (body.credentialRef && CRED_NAME.test(body.credentialRef)) {
+    else if (refOk(body.credentialRef)) {
       const hit = await ctx.credentials.resolve(credentialRef(body.credentialRef));
       if (hit?.value) auth.privateKey = String(hit.value);
     } else if (body.identityFile) auth.privateKey = await readIdentityFile(body.identityFile);
@@ -424,9 +435,20 @@ export function apply(ctx: Context) {
           hostState.set(hostCfg.id, state);
         }
         try {
+          const auth = await resolveAuth(ctx, hostCfg, authCache);
+          // F04:TOFU 首连观测到主机密钥指纹时持久化到配置(供下次连接校验)
+          if (!auth.hostKeyFingerprint) {
+            auth.onFingerprint = (fp) => {
+              try {
+                const cur = scope.get() as DashboardConfig;
+                const hosts = cur.hosts.map((h) => (h.id === hostCfg.id ? { ...h, hostKeyFingerprint: fp } : h));
+                void scope.update({ hosts });
+              } catch { /* 持久化失败不阻断连接 */ }
+            };
+          }
           const runtime: HostRuntimeConfig = {
             id: hostCfg.id,
-            auth: await resolveAuth(ctx, hostCfg, authCache),
+            auth,
             logPath: hostCfg.logPath || undefined,
           };
           const snap = await collectSnapshot(runtime, state);
@@ -541,6 +563,33 @@ export function apply(ctx: Context) {
 
   /** 403 unless loopback; returns false when the response is already sent */
   const guard = (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse): boolean => {
+  // F02:Host 必须是回环域——DNS rebinding 把外域解析到 127.0.0.1 时 Host 是外域名
+  const hostRaw = String(req.headers.host ?? '').toLowerCase();
+  let hostName = hostRaw;
+  if (hostName.startsWith('[')) hostName = hostName.slice(1, hostName.includes(']') ? hostName.indexOf(']') : undefined);
+  else if (hostName.includes(':')) hostName = hostName.split(':')[0];
+  if (hostName && !['localhost', '127.0.0.1', '::1'].includes(hostName)) {
+    sendJson(res, 403, { error: '非法 Host' });
+    return false;
+  }
+  // F02:浏览器跨源请求的 Origin 必须与 Host 同源——本机其他端口的页面发起的
+  // 简单 CSRF 因此被拒;无 Origin 的非浏览器客户端放行(loopback 对端已校验)
+  const origin = String(req.headers.origin ?? '');
+  if (origin) {
+    try {
+      const o = new URL(origin);
+      const oHost = (o.hostname || '').toLowerCase();
+      const loopback = oHost === 'localhost' || oHost === '127.0.0.1' || oHost === '::1';
+      const sameOrigin = o.host === hostRaw || (oHost === hostName && !o.port && !hostRaw.includes(':'));
+      if (!loopback || !sameOrigin) {
+        sendJson(res, 403, { error: '跨源请求被拒绝' });;
+        return false;
+      }
+    } catch {
+      sendJson(res, 403, { error: '跨源请求被拒绝' });;
+      return false;
+    }
+  }
     if (!isLoopback(req)) {
       sendJson(res, 403, { error: '仅允许本机(loopback)访问' });
       return false;
@@ -549,29 +598,55 @@ export function apply(ctx: Context) {
   };
 
   const readBody = (req: import('node:http').IncomingMessage): Promise<string> => new Promise((resolve, reject) => {
-    // CSRF hardening: cross-origin simple requests cannot send JSON content-type
-    // without a CORS preflight, which this server never grants.
+    // F02:严格媒体类型——分号前主类型必须精确等于 application/json;includes 匹配
+    // 可被 "text/plain;application/json" 绕过(浏览器简单请求不需预检即可携带)
     const ct = String(req.headers['content-type'] ?? '');
-    if (!ct.includes('application/json')) {
+    if (ct.split(';')[0].trim().toLowerCase() !== 'application/json') {
       reject(new Error('请求必须是 application/json'));
       return;
     }
-    let data = '';
+    // F02:Host 必须是回环域——DNS rebinding 把外域解析到 127.0.0.1 时 Host 是外域名
+    const hostRaw = String(req.headers.host ?? '').toLowerCase();
+    let hostName = hostRaw;
+    if (hostName.startsWith('[')) hostName = hostName.slice(1, hostName.includes(']') ? hostName.indexOf(']') : undefined);
+    else if (hostName.includes(':')) hostName = hostName.split(':')[0];
+    if (hostName && !['localhost', '127.0.0.1', '::1'].includes(hostName)) {
+      reject(new Error('非法 Host'));
+      return;
+    }
+    // F02:浏览器跨源请求的 Origin 必须与 Host 同源——本机其他端口的页面发起的
+    // 简单 CSRF 因此被拒;无 Origin 的非浏览器客户端放行(loopback 对端已校验)
+    const origin = String(req.headers.origin ?? '');
+    if (origin) {
+      try {
+        const o = new URL(origin);
+        const oHost = (o.hostname || '').toLowerCase();
+        const loopback = oHost === 'localhost' || oHost === '127.0.0.1' || oHost === '::1';
+        const sameOrigin = o.host === hostRaw || (oHost === hostName && !o.port && !hostRaw.includes(':'));
+        if (!loopback || !sameOrigin) {
+          reject(new Error('跨源请求被拒绝'));
+          return;
+        }
+      } catch {
+        reject(new Error('非法 Origin'));
+        return;
+      }
+    }
+    // F10:字节缓冲 + 一次性解码——逐 chunk 字符串拼接会把多字节汉字拆开损坏
+    const chunks: Buffer[] = [];
     let bytes = 0;
     let over = false;
     req.on('data', (chunk: Buffer) => {
       if (over) return;
-      data += chunk;
-      bytes += chunk.length; // count BYTES, not UTF-16 code units
+      chunks.push(chunk);
+      bytes += chunk.length;
       if (bytes > 1_000_000) {
-        // destroy the stream the moment the cap is exceeded — otherwise a
-        // hostile client can keep feeding the body while we keep buffering it
         over = true;
         req.destroy();
         reject(new Error('请求体过大'));
       }
     });
-    req.on('end', () => { if (!over) resolve(data); });
+    req.on('end', () => { if (!over) resolve(Buffer.concat(chunks).toString('utf8')); });
     req.on('error', reject);
   });
 

@@ -11,6 +11,11 @@ export interface SshAuth {
   /** mutually exclusive */
   privateKey?: string;
   password?: string;
+  /** F04:已持久化的服务器主机密钥指纹(SHA256:base64)。提供时强制校验,
+   *  不匹配即拒绝连接;未提供时 TOFU——首次记录并经 onFingerprint 回传持久化 */
+  hostKeyFingerprint?: string;
+  /** F04:TOFU 首连观测到的指纹回传(宿主侧写入配置) */
+  onFingerprint?: (fingerprint: string) => void;
 }
 
 export interface HostRuntimeConfig {
@@ -66,6 +71,14 @@ function connect(auth: SshAuth, keepalive = false): Promise<import('ssh2').Clien
       password: auth.password,
       readyTimeout: CONNECT_TIMEOUT_MS,
       keepaliveInterval: keepalive ? KEEPALIVE_INTERVAL_MS : 0,
+      // F04:主机密钥验证——有已存指纹必须匹配(变化即拒绝,可能被中间人替换);
+      // 无指纹时 TOFU 记录并回传持久化。ssh2 默认接受任意主机密钥,加密≠认证。
+      hostVerifier: (key: Buffer) => {
+        const fp = 'SHA256:' + createHash('sha256').update(key).digest('base64');
+        if (auth.hostKeyFingerprint) return auth.hostKeyFingerprint === fp;
+        try { auth.onFingerprint?.(fp); } catch { /* 持久化失败不阻断连接 */ }
+        return true;
+      },
     });
   });
 }
@@ -146,7 +159,17 @@ export function disposeState(state: CollectState): void {
 
 function exec(conn: import('ssh2').Client, cmd: string): Promise<string> {
   return new Promise((resolve, reject) => {
+    // F22:通道打开截止时间在 conn.exec 之前启动——服务器 ready 但不回应
+    // channel-open 时原实现的回调内注册计时器永远不会启动,轮询 inflight 永久挂起
+    let opened = false;
+    const openTimer = setTimeout(() => {
+      if (opened) return;
+      reject(new Error(`远程命令通道超时: ${cmd.slice(0, 60)}`));
+    }, COMMAND_TIMEOUT_MS);
     conn.exec(cmd, (err, stream) => {
+      if (opened) { try { stream?.close(); } catch { /* 迟到回调,弃置 */ } return; }
+      opened = true;
+      clearTimeout(openTimer);
       if (err) return reject(err);
       let out = '';
       let errOut = '';
