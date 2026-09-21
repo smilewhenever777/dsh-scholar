@@ -96,7 +96,8 @@ interface PooledSsh {
 function authKeyOf(auth: SshAuth): string {
   // 凭据部分只入 sha1 摘要不入池键 —— 池键不得携带明文密码/私钥
   const cred = createHash('sha1').update(`${auth.password ?? ''}|${auth.privateKey ?? ''}`).digest('hex').slice(0, 16);
-  return `${auth.username}@${auth.host}:${auth.port}|${cred}`;
+  // R02:指纹入池键——pin 变化(重绑/首次确认)必须重建连接,旧连接的 verifier 是旧的
+  return `${auth.username}@${auth.host}:${auth.port}|${cred}|${auth.hostKeyFingerprint ?? ""}`;
 }
 
 async function acquireConn(runtime: HostRuntimeConfig, state: CollectState): Promise<import('ssh2').Client> {
@@ -161,15 +162,22 @@ function exec(conn: import('ssh2').Client, cmd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     // F22:通道打开截止时间在 conn.exec 之前启动——服务器 ready 但不回应
     // channel-open 时原实现的回调内注册计时器永远不会启动,轮询 inflight 永久挂起
-    let opened = false;
+    // R11:settled 与 opened 分离——超时 reject 后迟到回调仍会到达,必须
+    // close+destroy 迟到流,而不是只"弃置"(监听器与命令计时器仍被装上)
+    let settled = false;
+    const settle = () => { settled = true; clearTimeout(openTimer); };
     const openTimer = setTimeout(() => {
-      if (opened) return;
+      if (settled) return;
+      settled = true;
       reject(new Error(`远程命令通道超时: ${cmd.slice(0, 60)}`));
     }, COMMAND_TIMEOUT_MS);
     conn.exec(cmd, (err, stream) => {
-      if (opened) { try { stream?.close(); } catch { /* 迟到回调,弃置 */ } return; }
-      opened = true;
-      clearTimeout(openTimer);
+      if (settled) {
+        try { stream?.close(); } catch { /* 已关闭 */ }
+        try { stream?.destroy(); } catch { /* 已销毁 */ }
+        return;
+      }
+      settle();
       if (err) return reject(err);
       let out = '';
       let errOut = '';

@@ -32,14 +32,19 @@ export function PaperAsk({ paperId, t }: { paperId: string; t: TFunc }) {
 
   useEffect(() => {
     let alive = true;
+    // R06:切换论文进入显式隔离态——清空上一论文的历史/问题/错误/忙碌,
+    // 加载期间不再显示别的论文内容;父组件同时以 key 隔离挂载实例
     setErr('');
+    setQa(null);
+    setExists(false);
+    setBusy(false);
     api<{ exists: boolean; qa: QAEntry[] }>(`/scholar/read/session/${encodeURIComponent(paperId)}`)
       .then((r) => { if (alive) { setExists(r.exists); setQa(r.qa ?? []); } })
       .catch(() => { if (alive) setQa([]); });
     return () => { alive = false; };
   }, [paperId]);
 
-  // F28:提问发出的论文 id——响应回来时若已切到别的论文,丢弃结果
+  // F28/R06:会话归属——任何异步回写(成功/失败/finally)前校验论文未切换
   const askPaperRef = useRef(paperId);
   useEffect(() => { askPaperRef.current = paperId; }, [paperId]);
 
@@ -59,9 +64,10 @@ export function PaperAsk({ paperId, t }: { paperId: string; t: TFunc }) {
       setQuestion('');
       setExists(true);
     } catch (e) {
+      if (askPaperRef.current !== askedFor) return; // R06:迟到错误不落到别的论文
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      if (askPaperRef.current === askedFor) setBusy(false); // R06:忙碌态不跨论文
     }
   };
 

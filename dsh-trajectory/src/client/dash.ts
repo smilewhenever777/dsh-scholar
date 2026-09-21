@@ -27,7 +27,7 @@ const DEFAULT_STALE_MINUTES = 10;
 interface SnapGpu {
   index?: number;
   utilPercent?: number;
-  log?: { path: string; lines: string[]; mtimeMs: number };
+  log?: { path: string; lines: string[]; mtimeMs: number; fresh?: boolean };
   series?: { name: string; points: { t: number; v: number }[] }[];
   processes?: { cmd?: string }[];
 }
@@ -69,7 +69,8 @@ function gpuMatches(gpu: SnapGpu, node: TrajNode): boolean {
 
 function progressOfGpu(gpu: SnapGpu, staleMs: number): DashProgress | null {
   const log = gpu.log;
-  const stale = !!log && Date.now() - log.mtimeMs >= staleMs;
+  // F23/R13:优先宿主盖章的增量新鲜度;未盖章回退旧启发式
+  const stale = !!log && (log.fresh === false || (log.fresh === undefined && Date.now() - log.mtimeMs >= staleMs));
   const tqdm = tqdmFromLines(log?.lines);
   if (tqdm) {
     return { pct: tqdm.pct, label: tqdm.label, running: !stale, stale };

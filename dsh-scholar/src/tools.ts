@@ -313,7 +313,7 @@ export function registerScholarTools(
             type: 'object', additionalProperties: false,
             properties: {
               ok: { type: 'boolean' },
-              file: { type: 'string' },
+              file: { type: 'string', description: '归档报告文件名(论文已删除的迟到归档为 null)' },
               title: { type: 'string' },
               error: { type: 'string' },
               candidates: { type: 'json' },
@@ -407,12 +407,12 @@ export function registerScholarTools(
         },
         async execute(args: any) {
           const store = await getStore();
-          const existing = store.papers.get(args.id);
-          if (!existing) throw new Error(`论文不存在: ${args.id}`);
+          // R03:走事务(持锁读最新→patch→写回)——事务外取快照再整体 upsert
+          // 会丢失并发的其他字段修改(与 REST PATCH 同一修法)
           const colIds = Array.isArray(args.collections)
             ? await store.ensureCollectionNames(args.collections as string[])
             : undefined;
-          const paper = applyPaperPatch(existing, {
+          const paper = await store.updatePaperTx(args.id, (cur) => applyPaperPatch(cur, {
             title: args.title,
             authors: args.authors,
             year: int(args.year, 1900, 2100),
@@ -423,8 +423,8 @@ export function registerScholarTools(
             readStatus: args.readStatus,
             notes: args.notes,
             ...(colIds !== undefined ? { collectionIds: colIds } : {}),
-          });
-          await store.upsertPaper(paper);
+          }));
+          if (!paper) throw new Error(`论文不存在: ${args.id}`);
           return { ok: true, paper: toJson(paper) };
         },
       })),
@@ -1105,7 +1105,7 @@ export function registerScholarTools(
             return { ok: true, mode, title: (outcome.result as PaperOutcome | QuickOutcome).title, summary: ((outcome.result as PaperOutcome | QuickOutcome).kind === 'paper' ? (outcome.result as PaperOutcome).summary : (outcome.result as QuickOutcome).summary), summaryUpdated: false };
           }
           const info = await archiveReadResult(store, paper, outcome.result as PaperOutcome | QuickOutcome);
-          return { ok: true, file: info.file, mode: info.mode, title: paper.title, summary: info.summary, summaryUpdated: info.summaryUpdated };
+          return { ok: true, file: info.file ?? undefined, mode: info.mode, title: paper.title, summary: info.summary, summaryUpdated: info.summaryUpdated };
         },
       })),
 

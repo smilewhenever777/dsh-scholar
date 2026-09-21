@@ -42,7 +42,9 @@ function readBody(req: IncomingMessage): Promise<string> {
     let hostName = hostRaw;
     if (hostName.startsWith('[')) hostName = hostName.slice(1, hostName.includes(']') ? hostName.indexOf(']') : undefined);
     else if (hostName.includes(':')) hostName = hostName.split(':')[0];
-    if (hostName && !['localhost', '127.0.0.1', '::1'].includes(hostName)) {
+    // R17:IPv6 loopback 统一去方括号比较(WHATWG hostname 对 IPv6 带 [::1])
+    const normHost = hostName.replace(/^\[/, '').replace(/\]$/, '');
+    if (hostName && !['localhost', '127.0.0.1', '::1'].includes(normHost)) {
       reject(new Error('非法 Host'));
       return;
     }
@@ -53,7 +55,7 @@ function readBody(req: IncomingMessage): Promise<string> {
     if (origin) {
       try {
         const o = new URL(origin);
-        const oHost = (o.hostname || '').toLowerCase();
+        const oHost = (o.hostname || '').toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
         const loopback = oHost === 'localhost' || oHost === '127.0.0.1' || oHost === '::1';
         const sameOrigin = o.host === hostRaw || (oHost === hostName && !o.port && !hostRaw.includes(':'));
         if (!loopback || !sameOrigin) {
@@ -107,7 +109,7 @@ function guardRoute(req: import('node:http').IncomingMessage, res: ServerRespons
   if (origin) {
     try {
       const o = new URL(origin);
-      const oHost = (o.hostname || '').toLowerCase();
+      const oHost = (o.hostname || '').toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
       const loopback = oHost === 'localhost' || oHost === '127.0.0.1' || oHost === '::1';
       const sameOrigin = o.host === hostRaw || (oHost === hostName && !o.port && !hostRaw.includes(':'));
       if (!loopback || !sameOrigin) {

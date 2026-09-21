@@ -535,6 +535,10 @@ export class TrajStore {
       const file = input.projectId ? this.files.get(input.projectId) : this.peekActive();
       if (!file) throw new Error('没有可用项目，请先创建项目');
       if (file.nodes.length >= MAX_NODES) throw new Error(`节点数已达上限（${MAX_NODES}）`);
+      // F18/R09:归属校验——假设必须存在于本项目(空串/undefined 已在上游归一)
+      if (input.hypothesisId && !file.hypotheses.some((h) => h.id === input.hypothesisId)) {
+        throw new Error('假设不存在或不属于该项目: ' + String(input.hypothesisId));
+      }
       const node = createNode({ ...input, projectId: file.project.id });
       file.nodes.push(node);
       const byId = new Set(file.nodes.map((n) => n.id));
@@ -556,6 +560,10 @@ export class TrajStore {
     return this.mutate(async () => {
       const file = this.resolveFileForNode(id, projectId);
       if (!file) throw new Error(`节点不存在: ${id}`);
+      // F18/R09:更新侧同样校验归属(空串清除已归一为 undefined)
+      if (patch.hypothesisId && !file.hypotheses.some((h) => h.id === patch.hypothesisId)) {
+        throw new Error('假设不存在或不属于该项目: ' + String(patch.hypothesisId));
+      }
       const idx = file.nodes.findIndex((n) => n.id === id);
       const next = applyNodePatch(file.nodes[idx], patch);
       file.nodes.splice(idx, 1, next);

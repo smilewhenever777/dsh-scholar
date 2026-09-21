@@ -90,6 +90,9 @@ export interface GraphEdge {
   source: string;
   target: string;
   kind: GraphEdgeKind;
+  /** R04:自动同步所有者(卡片 id)——仅 cardSync 生成的边携带;prune 差集
+   * 只动自己拥有的 auto 边,kg_extract/手工边(无 auto)永不删除 */
+  auto?: string;
 }
 
 export interface KnowledgeGraph {

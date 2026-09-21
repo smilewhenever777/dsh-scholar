@@ -28,12 +28,19 @@ function latin1ToBytes(s: string): Uint8Array {
   return bytes
 }
 
+// R07:文本流解压输出上限(提前于 inflateRaw:其被 hoisting 使用)
+const STREAM_MAX_OUTPUT = 64 * 1024 * 1024;
+
 function inflateRaw(data: Uint8Array): Uint8Array {
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
   let pos = 0
   let bitBuf = 0
   let bitCnt = 0
   const out: number[] = []
+  // R07:三条输出路径共用的预算检查——压缩炸弹在此被截断
+  const budget = () => {
+    if (out.length > STREAM_MAX_OUTPUT) throw new Error('inflate: output exceeds stream budget')
+  }
   function readBits(n: number): number {
     while (bitCnt < n) {
       if (pos >= bytes.length) throw new Error('inflate: unexpected EOF')
@@ -101,6 +108,7 @@ function inflateRaw(data: Uint8Array): Uint8Array {
       const sym = decodeSym(litTable, 15)
       if (sym < 256) {
         out.push(sym)
+        budget()
       } else if (sym === 256) {
         return
       } else {
@@ -112,7 +120,7 @@ function inflateRaw(data: Uint8Array): Uint8Array {
         const dist = DIST_BASE[distSym]! + readBits(DIST_EXTRA[distSym]!)
         const start = out.length - dist
         if (start < 0) throw new Error('inflate: distance too far back')
-        for (let i = 0; i < length; i++) out.push(out[start + i]!)
+        for (let i = 0; i < length; i++) { out.push(out[start + i]!); if ((i & 0x3fff) === 0) budget() }
       }
     }
   }
@@ -167,8 +175,6 @@ function inflateRaw(data: Uint8Array): Uint8Array {
 
 /** F05:单流解压输出上限——压缩炸弹(高压缩比流)不能把内存/时间打穿;
  * 超限 inflateSync 抛错,调用方按单流失败容错,不影响其他流。 */
-const STREAM_MAX_OUTPUT = 64 * 1024 * 1024;
-
 function inflateZlib(data: Uint8Array): Uint8Array {
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
   if (bytes.length < 2) throw new Error('zlib: too short')

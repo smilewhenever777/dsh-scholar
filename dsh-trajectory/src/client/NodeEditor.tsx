@@ -24,6 +24,8 @@ export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
   const [status, setStatus] = useState<TrajStatus>(editing?.status ?? 'todo');
   const [detail, setDetail] = useState(editing?.detail ?? '');
   const [tags, setTags] = useState((editing?.tags ?? []).join(', '));
+  // F18/R09:归属假设选择(空串 = 无归属;编辑器保存时总是显式提交)
+  const [hypoId, setHypoId] = useState<string>(editing?.hypothesisId ?? '');
   const [mainline, setMainline] = useState(!!editing && file.project.mainline.includes(editing.id));
   const [parents, setParents] = useState<string[]>([]);
   const [cardId, setCardId] = useState(editing?.refs?.cardId ?? '');
@@ -64,6 +66,7 @@ export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
     setStatus(editing?.status ?? 'todo');
     setDetail(editing?.detail ?? '');
     setTags((editing?.tags ?? []).join(', '));
+    setHypoId(editing?.hypothesisId ?? '');
     setMainline(!!editing && file.project.mainline.includes(editing.id));
     setParents([]);
     setCardId(editing?.refs?.cardId ?? '');
@@ -91,6 +94,7 @@ export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
           body: JSON.stringify({
             title, kind, status, detail, tags: tags.split(/[,，]/).map((x) => x.trim()).filter(Boolean),
             refs: refBody,
+            hypothesisId: hypoId, // F18:显式归属(空串 = 解除)
           }),
         });
         const wasMainline = file.project.mainline.includes(editing.id);
@@ -156,6 +160,21 @@ export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
       </Field>
       <Field label={t('node.tags')}>
         <Input value={tags} onChange={(e) => setTags(e.target.value)} />
+      </Field>
+
+      {/* F18/R09:归属假设选择(读本项目假设;空 = 无归属) */}
+      <Field label={t('node.hypothesis')}>
+        <select
+          value={hypoId}
+          onChange={(e) => setHypoId(e.target.value)}
+          className="traj-input"
+          style={{ padding: '6px 8px', borderRadius: 7, border: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'var(--dsw-alias-label-primary)', fontSize: 11.5 }}
+        >
+          <option value="">{t('node.hypothesisNone')}</option>
+          {(file.hypotheses ?? []).filter((h) => h.status !== 'superseded' && h.status !== 'falsified').map((h) => (
+            <option key={h.id} value={h.id}>{h.text.slice(0, 60)}</option>
+          ))}
+        </select>
       </Field>
 
       {!editing && file.nodes.length > 0 && (

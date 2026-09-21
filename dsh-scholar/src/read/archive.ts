@@ -13,7 +13,7 @@ import { saveSessionAfterRead } from './session.js';
 import type { PaperOutcome, QuickOutcome } from './engine.js';
 
 export interface ArchiveInfo {
-  file: string
+  file: string | null
   summary: string
   mode: 'paper' | 'quick'
   summaryUpdated: boolean
@@ -41,6 +41,10 @@ export async function archiveReadResult(
     sub: headerSub(paper, outcome.meta.mode, opts.focusNote ?? ''),
   });
   const dir = join(store.dir, 'reports');
+  // R05:删除检查前置——论文已删除时迟到归档不再写报告/会话(隐私残留)
+  if (!store.papers.has(paper.id)) {
+    return { file: null, summary: '', mode: outcome.meta.mode, summaryUpdated: false };
+  }
   await mkdir(dir, { recursive: true });
   const ts = Date.now();
   const file = `${safeName(paper.id)}-${ts}.html`;

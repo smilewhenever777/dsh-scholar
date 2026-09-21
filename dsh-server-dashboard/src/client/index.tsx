@@ -291,11 +291,13 @@ function useDashboard(t: TFunc) {
       const now = Date.now();
       const nextToasts: DashToast[] = [];
       const liveKeys = new Set<string>();
-      const checkStale = (key: string, hostId2: string, hostName: string, gpuIndex: number | undefined, log: { mtimeMs: number; size: number }) => {
+      const checkStale = (key: string, hostId2: string, hostName: string, gpuIndex: number | undefined, log: { mtimeMs: number; size: number; fresh?: boolean }) => {
         liveKeys.add(key);
         const prev = staleLedger.get(key);
         if (prev && log.mtimeMs === prev.mtimeMs && log.size === prev.size) {
-          if (!prev.notified && now - log.mtimeMs >= staleMs) {
+          // F23/R13:宿主盖章 fresh 优先;未盖章回退旧启发式
+          const toastStale = log.fresh === false || (log.fresh === undefined && now - log.mtimeMs >= staleMs);
+          if (!prev.notified && toastStale) {
             prev.notified = true;
             // toast 里的"已 N 分钟"用实际 now−mtime,而非配置阈值本身
             nextToasts.push({ id: ++toastSeq.current, hostId: hostId2, hostName, minutes: Math.max(1, Math.round((now - log.mtimeMs) / 60_000)), gpuIndex });
@@ -337,7 +339,7 @@ function useDashboard(t: TFunc) {
         }
         for (const g of s.gpus ?? []) {
           if (g.tempC >= TEMP_HOT || g.utilPercent >= UTIL_SATURATED) status.hot++;
-          if (g.log && g.log.mtimeMs > 0 && now - g.log.mtimeMs >= staleMs) status.stalled++;
+          if (g.log && g.log.mtimeMs > 0 && (g.log.fresh === false || (g.log.fresh === undefined && now - g.log.mtimeMs >= staleMs))) status.stalled++;
         }
       }
       statusBus.set(status);

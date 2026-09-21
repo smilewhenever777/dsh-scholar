@@ -59,7 +59,47 @@ function simulate(graph: KnowledgeGraph, width: number, height: number, warm?: M
 
   for (let iter = 0; iter < iterations; iter++) {
     const t = 1 - iter / iterations;
-    // repulsion
+    // repulsion——F16/R12:大图用空间网格桶近似(O(N·邻居) 代替 O(N²)):
+    // 每节点只与 3×3 邻桶内的节点互斥,远距斥力本就被 min 钳制,近似无视觉差;
+    // 小图保留精确两两互斥(≤350 节点时全对 ≈ 6 万次比较,同步可忽略)
+    if (n > 350) {
+      const cell = Math.max(24, k);
+      const buckets = new Map<number, string[]>();
+      const cellOf = (p: Pos) => (Math.floor(p.x / cell) * 46341) ^ Math.floor(p.y / cell);
+      for (const node of graph.nodes) {
+        const p = pos.get(node.id) as Pos;
+        const key = cellOf(p);
+        const arr = buckets.get(key);
+        if (arr) arr.push(node.id); else buckets.set(key, [node.id]);
+      }
+      for (const node of graph.nodes) {
+        const pa = pos.get(node.id) as Pos;
+        const va = vel.get(node.id) as { vx: number; vy: number };
+        const cx = Math.floor(pa.x / cell);
+        const cy = Math.floor(pa.y / cell);
+        for (let ox = -1; ox <= 1; ox++) {
+          for (let oy = -1; oy <= 1; oy++) {
+            const arr = buckets.get(((cx + ox) * 46341) ^ (cy + oy));
+            if (!arr) continue;
+            for (const bid of arr) {
+              if (bid === node.id) continue;
+              const pb = pos.get(bid) as Pos;
+              const dx = pa.x - pb.x;
+              const dy = pa.y - pb.y;
+              let d2 = dx * dx + dy * dy;
+              if (d2 < 1) d2 = 1;
+              const d = Math.sqrt(d2);
+              const f = Math.min((k * k) / d2, k * 0.35);
+              const fx = (dx / d) * f;
+              const fy = (dy / d) * f;
+              va.vx += fx; va.vy += fy;
+              const vb = vel.get(bid) as { vx: number; vy: number };
+              vb.vx -= fx; vb.vy -= fy;
+            }
+          }
+        }
+      }
+    } else {
     for (let i = 0; i < n; i++) {
       const a = graph.nodes[i];
       const pa = pos.get(a.id) as Pos;
@@ -79,6 +119,7 @@ function simulate(graph: KnowledgeGraph, width: number, height: number, warm?: M
         const vb = vel.get(b.id) as { vx: number; vy: number };
         vb.vx -= fx; vb.vy -= fy;
       }
+    }
     }
     // springs
     for (const e of graph.edges) {

@@ -61,9 +61,16 @@ export function ReadProgressBanner({ t }: { t: TFunc }) {
 
   if (!run || dismissed === run.id) return null;
   const done = run.finishedAt !== null;
-  // F29:三态结果(供勾/叉图标与容器底色使用)
+  // F29/R16:三态结果——容器/图标/进度条共同消费同一口径
   const allFailed = done && run.fail > 0 && run.ok === 0;
   const someFailed = done && run.fail > 0 && run.ok > 0;
+  const toneColor = allFailed
+    ? 'var(--dsw-alias-state-danger-primary, #e5484d)'
+    : someFailed
+      ? 'var(--dsw-alias-state-warn-primary, #f5a524)'
+      : done
+        ? 'var(--dsw-alias-state-success-primary, #34a853)'
+        : 'var(--dsw-alias-state-business-primary, #4d6bfe)';
   const doneCount = run.ok + run.fail;
   const runningIdx = run.papers.findIndex((p) => p.state === 'running');
   const current = runningIdx >= 0 ? run.papers[runningIdx] : null;
@@ -78,26 +85,32 @@ export function ReadProgressBanner({ t }: { t: TFunc }) {
       style={{
         flex: 'none', margin: '0 12px 6px', padding: '7px 10px 8px',
         borderRadius: 9, fontSize: 11.5, lineHeight: 1.5,
-        border: `1px solid color-mix(in srgb, ${done
-          ? 'var(--dsw-alias-state-success-primary, #34a853) 38%, transparent)'
-          : 'var(--dsw-alias-state-business-primary, #4d6bfe) 40%, transparent)'}`,
-        background: done
-          ? 'color-mix(in srgb, var(--dsw-alias-state-success-primary, #34a853) 8%, transparent)'
-          : 'color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 8%, transparent)',
+        border: `1px solid color-mix(in srgb, ${toneColor} 38%, transparent)`,
+        background: `color-mix(in srgb, ${toneColor} 8%, transparent)`,
         animation: 'schFadeUp .19s var(--sch-ease, ease-out)',
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
         <Icon
-          d={done ? Icons.check : Icons.book}
+          d={allFailed ? Icons.close : done ? Icons.check : Icons.book}
           size={12}
-          color={done ? 'var(--dsw-alias-state-success-primary, #34a853)' : 'var(--dsw-alias-state-business-primary, #4d6bfe)'}
+          color={toneColor}
         />
         <span style={{ fontWeight: 650 }}>
           {done
             ? t('deepread.progressDone', { ok: String(run.ok), fail: String(run.fail) })
             : t('deepread.progressRunning', { mode: modeLabel, done: String(doneCount), total: String(run.total) })}
         </span>
+        {!done && (
+          <button
+            type="button"
+            onClick={() => { void fetch('/scholar/read/cancel', { method: 'POST', headers: { 'content-type': 'application/json' } }).catch(() => {}); }}
+            style={{ background: 'none', cursor: 'pointer', fontSize: 10.5, padding: '1px 6px', borderRadius: 6, color: toneColor,
+              border: `1px solid color-mix(in srgb, ${toneColor} 40%, transparent)` }}
+          >
+            {t('deepread.progressCancel')}
+          </button>
+        )}
         {skipNote && <span style={{ color: T.caption, fontSize: 10.5 }}>{skipNote}</span>}
         <span style={{ flex: 1 }} />
         {!done && <span style={{ fontSize: 10.5, color: T.caption }}>{run.phase || '…'}</span>}

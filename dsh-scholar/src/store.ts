@@ -574,7 +574,7 @@ export class PaperStore {
         const key = `${c.id}|derives_from|${c.paperId}`;
         if (!edgeSeen.has(key)) {
           edgeSeen.add(key);
-          outEdges.push({ source: c.id, target: c.paperId, kind: 'derives_from' });
+          outEdges.push({ source: c.id, target: c.paperId, kind: 'derives_from', auto: c.id });
         }
       }
       for (const tag of c.tags) {
@@ -584,7 +584,7 @@ export class PaperStore {
         const key = `${c.id}|uses|${cid}`;
         if (!edgeSeen.has(key)) {
           edgeSeen.add(key);
-          outEdges.push({ source: c.id, target: cid, kind: 'uses' });
+          outEdges.push({ source: c.id, target: cid, kind: 'uses', auto: c.id });
         }
       }
       for (const rid of c.relatedCardIds ?? []) {
@@ -593,7 +593,7 @@ export class PaperStore {
         const key = `${a}|related|${b}`;
         if (!edgeSeen.has(key)) {
           edgeSeen.add(key);
-          outEdges.push({ source: a, target: b, kind: 'related' });
+          outEdges.push({ source: a, target: b, kind: 'related', auto: c.id });
         }
       }
     }
@@ -625,16 +625,18 @@ export class PaperStore {
           if (f.startsWith(prefix)) await unlink(join(this.dir, 'reports', f)).catch(() => {});
         }
       } catch { /* reports 目录不存在或不可读 */ }
-      // F09:精读正文/问答(reads/<safeId>.json)与对比报告(cmp-*.html,文件名含
-      // 参与方 id)同属"删除论文"的隐私预期——残留即数据泄漏面。cmp 采用包含
-      // 匹配(多论文共享的对比报告删除任一参与方时一并清掉,宁可多删不残留)。
+      // F09/R05:精读正文/问答(reads/<safeId>.json)与对比报告一并清理。
+      // R05:cmp 真实文件名是 cmp-<safeId1>--<safeId2>-<ts>.html(双横线分隔
+      // 参与方)——按格式解析参与方列表判断归属,不再用子串猜。
       try {
         const sid = safeName(id);
         await unlink(join(this.dir, 'reads', `${sid}.json`)).catch(() => {});
         for (const f of await readdir(join(this.dir, 'reports'))) {
-          if (f.startsWith('cmp-') && (f.includes(`_${sid}.`) || f.includes(`_${sid}-`) || f.includes(`${sid}_.`) || f.endsWith(`_${sid}.html`))) {
-            await unlink(join(this.dir, 'reports', f)).catch(() => {});
-          }
+          if (!f.startsWith('cmp-') || !f.endsWith('.html')) continue;
+          const m = /^cmp-(.+)-\d{9,15}\.html$/.exec(f);
+          if (!m) continue;
+          const parts = m[1]!.split('--');
+          if (parts.includes(sid)) await unlink(join(this.dir, 'reports', f)).catch(() => {});
         }
       } catch { /* 目录缺失静默跳过 */ }
       return true;
@@ -682,8 +684,10 @@ export class PaperStore {
     }
     const before = this.graph.edges.length;
     const kept = this.graph.edges.filter((e) => {
-      const touches = e.source === card.id || e.target === card.id;
-      if (!touches || (e.kind !== 'derives_from' && e.kind !== 'uses' && e.kind !== 'related')) return true;
+      // R04 回归修复:只删 auto===card.id(本卡自动生成)且不再成立的边——
+      // 相接但归属别的卡(A 引用 B,只改 B)或手工/kg_extract 边(无 auto)永不删除;
+      // 历史无 auto 的旧自动边保守保留(宁可留痕不可误删研究关系)
+      if (e.auto !== card.id) return true;
       const key = e.kind === 'related'
         ? `${[e.source, e.target].sort()[0]}|related|${[e.source, e.target].sort()[1]}`
         : `${e.source}|${e.kind}|${e.target}`;

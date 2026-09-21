@@ -510,7 +510,6 @@ export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStor
           },
           conclusion: { type: 'string', description: '结论/判定(如「partial:数据集敏感;决策:停止 DVTOD 门控」)' },
           date: { type: 'string', description: '发生日期 YYYY-MM-DD(省略 = 今天)' },
-          hypothesisId: { type: 'string', description: '归属假设 id(F18:把节点挂到某假设下;传空串 "" 解除归属;省略 = 不改动)' },
         },
         output: {
           schema: {
@@ -677,6 +676,7 @@ export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStor
           hostId: { type: 'string', description: '实验绑定:主机 id(空字符串清除)' },
           logPath: { type: 'string', description: '实验绑定:日志路径(空字符串清除)' },
           cmdPattern: { type: 'string', description: '实验绑定:命令特征(空字符串清除)' },
+          hypothesisId: { type: 'string', description: '归属假设 id(把节点挂到某假设下;空字符串 "" 解除归属;省略 = 不改动)' },
         },
         output: {
           schema: {

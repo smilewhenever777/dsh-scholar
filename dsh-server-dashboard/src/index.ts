@@ -99,10 +99,16 @@ async function readIdentityFile(path: string): Promise<string> {
  *  never used to address the vault (prevents overwriting arbitrary existing
  *  credentials via PUT /dash/config). */
 function derivedCredName(hostId: string): string {
-  // F21:无碰撞编码——非字母数字(含下划线本身)统一转 '_<hex>',十六进制字符
-  // 属于字母数字集不会被再次编码,因此映射是单射;旧实现把 'audit-a' 与
-  // 'audit_a' 都折叠成 SD_audit_a。纯字母数字 id(如 A5000)编码不变。
-  return `SD_${hostId.replace(/[^A-Za-z0-9]/g, (c) => '_' + c.codePointAt(0)!.toString(16))}`;
+  // F21/R10:定界单射编码——每个非字母数字码点转 '_<hex>_'(两侧下划线定界),
+  // 消除变长 hex 与后继字母数字的边界歧义('audit-a'→audit_2d_a,
+  // 'audit\u02DA'→audit_2da_,不再同为 audit_2da)。hex 字符属字母数字集
+  // 永不被编码,映射可逆且单射。纯字母数字 id(如 A5000)编码不变。
+  let out = 'SD_';
+  for (const ch of hostId) {
+    if (/[A-Za-z0-9]/.test(ch)) out += ch;
+    else out += '_' + ch.codePointAt(0)!.toString(16) + '_';
+  }
+  return out;
 }
 
 /** Cached resolveAuth result per host; invalidated by PUT /dash/config or by an
@@ -117,7 +123,8 @@ interface AuthCacheEntry {
 
 async function resolveAuth(ctx: Context, cfg: DashboardHostConfig, cache?: Map<string, AuthCacheEntry>): Promise<SshAuth> {
   const ref = derivedCredName(cfg.id);
-  const sig = `${cfg.authKind}|${cfg.username}@${cfg.host}:${cfg.port}`;
+  // R02:指纹必须进缓存签名——TOFU 写入 pin 后旧的无 pin 缓存条目立即失效
+  const sig = `${cfg.authKind}|${cfg.username}@${cfg.host}:${cfg.port}|${cfg.hostKeyFingerprint ?? ""}`;
   let identityMtimeMs = -1;
   if (cfg.authKind === 'key' && cfg.identityFile) {
     try {
@@ -137,7 +144,9 @@ async function resolveAuth(ctx: Context, cfg: DashboardHostConfig, cache?: Map<s
     // client-supplied ref (SD_<hostId> style). If the derived name is empty but
     // the legacy ref holds a value, copy it across once — self-heals existing
     // installs without weakening the derived-name model.
-    if (!cred?.value && cfg.credentialRef && CRED_NAME.test(cfg.credentialRef) && cfg.credentialRef !== ref) {
+    // R01:legacy 迁移只信看板自有命名空间(SD_*)——凭据 seam 可解析环境变量等
+    // 任意引用,不带前缀检查就会把无关 secret 拷贝进派生引用并用作 SSH 密码
+    if (!cred?.value && cfg.credentialRef && cfg.credentialRef.startsWith('SD_') && CRED_NAME.test(cfg.credentialRef) && cfg.credentialRef !== ref) {
       const legacy = await ctx.credentials.resolve(credentialRef(cfg.credentialRef)).catch(() => undefined);
       if (legacy?.value) {
         await ctx.credentials.set(credentialRef(ref), legacy.value).catch(() => undefined);
@@ -182,22 +191,28 @@ async function resolveAuthFromBody(ctx: Context, body: {
   host?: string; port?: number; username?: string;
   authKind?: DashboardHostConfig['authKind']; credentialRef?: string;
   identityFile?: string; password?: string; privateKey?: string;
-}): Promise<SshAuth> {
+}, savedHosts?: DashboardHostConfig[]): Promise<SshAuth> {
   const auth: SshAuth = { host: body.host as string, port: body.port ?? 22, username: body.username ?? 'root' };
   const kind = body.authKind ?? 'none';
-  // F03:临时测试流程解析的凭据引用必须属于看板(SD_*)命名空间——凭据 seam
-  // 可解析环境变量等其他引用,不限定就会把无关 secret 当密码发给任意目标
-  const refOk = (r: string | undefined): r is string => !!r && CRED_NAME.test(r) && r.startsWith('SD_');
+  // F03/R01:临时测试流程解析的凭据引用必须属于看板(SD_*)命名空间,且仅当
+  // 请求坐标(host/port/username)与某个已保存主机一致时才允许——SD_ 凭据
+  // 绑定的是那台主机,不可送往请求方任意指定的目标
+  const refOk = async (r: string | undefined): Promise<boolean> => {
+    if (!r || !CRED_NAME.test(r) || !r.startsWith('SD_')) return false;
+    if (!savedHosts) return false;
+    const hit = savedHosts.find((h) => h.host === body.host && (h.port ?? 22) === (body.port ?? 22) && h.username === (body.username ?? 'root'));
+    return !!hit && derivedCredName(hit.id) === r;
+  };
   if (kind === 'password') {
     if (body.password) auth.password = body.password;
-    else if (refOk(body.credentialRef)) {
-      const hit = await ctx.credentials.resolve(credentialRef(body.credentialRef));
+    else if (await refOk(body.credentialRef)) {
+      const hit = await ctx.credentials.resolve(credentialRef(body.credentialRef as string));
       if (hit?.value) auth.password = String(hit.value);
     }
   } else if (kind === 'key') {
     if (body.privateKey) auth.privateKey = body.privateKey;
-    else if (refOk(body.credentialRef)) {
-      const hit = await ctx.credentials.resolve(credentialRef(body.credentialRef));
+    else if (await refOk(body.credentialRef)) {
+      const hit = await ctx.credentials.resolve(credentialRef(body.credentialRef as string));
       if (hit?.value) auth.privateKey = String(hit.value);
     } else if (body.identityFile) auth.privateKey = await readIdentityFile(body.identityFile);
   } else {
@@ -442,8 +457,14 @@ export function apply(ctx: Context) {
               try {
                 const cur = scope.get() as DashboardConfig;
                 const hosts = cur.hosts.map((h) => (h.id === hostCfg.id ? { ...h, hostKeyFingerprint: fp } : h));
-                void scope.update({ hosts });
-              } catch { /* 持久化失败不阻断连接 */ }
+                void scope.update({ hosts }).then(() => {
+                  // R02:回写后立即失效缓存——旧 auth 对象的 verifier 还在自动接受分支,
+                  // 不失效则下轮轮询继续无 pin 连接(另一把主机密钥仍会被接受)
+                  authCache.delete(hostCfg.id);
+                }, (e: unknown) => {
+                  console.warn('[dsh-server-dashboard] 主机密钥指纹持久化失败(下次连接重新 TOFU):', e instanceof Error ? e.message : e);
+                });
+              } catch (e) { console.warn('[dsh-server-dashboard] 主机密钥指纹持久化异常:', e); }
             };
           }
           const runtime: HostRuntimeConfig = {
@@ -578,7 +599,7 @@ export function apply(ctx: Context) {
   if (origin) {
     try {
       const o = new URL(origin);
-      const oHost = (o.hostname || '').toLowerCase();
+      const oHost = (o.hostname || '').toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
       const loopback = oHost === 'localhost' || oHost === '127.0.0.1' || oHost === '::1';
       const sameOrigin = o.host === hostRaw || (oHost === hostName && !o.port && !hostRaw.includes(':'));
       if (!loopback || !sameOrigin) {
@@ -610,7 +631,9 @@ export function apply(ctx: Context) {
     let hostName = hostRaw;
     if (hostName.startsWith('[')) hostName = hostName.slice(1, hostName.includes(']') ? hostName.indexOf(']') : undefined);
     else if (hostName.includes(':')) hostName = hostName.split(':')[0];
-    if (hostName && !['localhost', '127.0.0.1', '::1'].includes(hostName)) {
+    // R17:IPv6 loopback 统一去方括号(WHATWG hostname 对 IPv6 是 [::1])
+    const normHost = hostName.replace(/^\[/, '').replace(/\]$/, '');
+    if (hostName && !['localhost', '127.0.0.1', '::1'].includes(normHost)) {
       reject(new Error('非法 Host'));
       return;
     }
@@ -620,7 +643,7 @@ export function apply(ctx: Context) {
     if (origin) {
       try {
         const o = new URL(origin);
-        const oHost = (o.hostname || '').toLowerCase();
+        const oHost = (o.hostname || '').toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
         const loopback = oHost === 'localhost' || oHost === '127.0.0.1' || oHost === '::1';
         const sameOrigin = o.host === hostRaw || (oHost === hostName && !o.port && !hostRaw.includes(':'));
         if (!loopback || !sameOrigin) {
@@ -830,7 +853,14 @@ export function apply(ctx: Context) {
           password?: string; privateKey?: string;
         };
         if (!body.host) return sendJson(res, 400, { error: 'host 必填' });
-        const result = await testConnection(await resolveAuthFromBody(ctx, body));
+        const auth = await resolveAuthFromBody(ctx, body, (scope.get() as DashboardConfig).hosts);
+        // R02/F04:临时测试的主机身份验证——请求显式提供指纹,或坐标匹配的
+        // 已保存主机已有已确认指纹,二者皆用(显式优先)
+        const savedPin = (scope.get() as DashboardConfig).hosts.find((h) => h.host === body.host && (h.port ?? 22) === (body.port ?? 22) && h.username === (body.username ?? 'root'))?.hostKeyFingerprint;
+        const bodyPin = typeof (body as { hostKeyFingerprint?: string }).hostKeyFingerprint === 'string' && (body as { hostKeyFingerprint?: string }).hostKeyFingerprint ? (body as { hostKeyFingerprint?: string }).hostKeyFingerprint : undefined;
+        const pin = bodyPin ?? savedPin;
+        if (pin) auth.hostKeyFingerprint = pin;
+        const result = await testConnection(auth);
         sendJson(res, 200, result);
       } catch (err) {
         sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
@@ -852,7 +882,12 @@ export function apply(ctx: Context) {
           password?: string; privateKey?: string;
         };
         if (!body.host) return sendJson(res, 400, { error: 'host 必填' });
-        const candidates = await discoverLogs(await resolveAuthFromBody(ctx, body));
+        const auth = await resolveAuthFromBody(ctx, body, (scope.get() as DashboardConfig).hosts);
+        const savedPin2 = (scope.get() as DashboardConfig).hosts.find((h) => h.host === body.host && (h.port ?? 22) === (body.port ?? 22) && h.username === (body.username ?? 'root'))?.hostKeyFingerprint;
+        const bodyPin2 = typeof (body as { hostKeyFingerprint?: string }).hostKeyFingerprint === 'string' && (body as { hostKeyFingerprint?: string }).hostKeyFingerprint ? (body as { hostKeyFingerprint?: string }).hostKeyFingerprint : undefined;
+        const pin2 = bodyPin2 ?? savedPin2;
+        if (pin2) auth.hostKeyFingerprint = pin2;
+        const candidates = await discoverLogs(auth);
         sendJson(res, 200, { candidates });
       } catch (err) {
         sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
