@@ -466,11 +466,11 @@ export function registerScholarRoutes(
             if (dup) {
               // 更新走部分更新语义：只合并实际提交的字段，未提交字段保持不变
               const patch = pickSubmitted(PaperPatchInputSchema, body);
-              const paper = applyPaperPatch(dup, {
+              const paper = await store.updatePaperTx(dup.id, cur => applyPaperPatch(cur, {
                 ...patch,
                 ...(wantCol ? { collectionIds: colIds ?? [] } : {}),
-              });
-              await store.upsertPaper(paper);
+              }));
+              if (!paper) return sendJson(res, 404, { error: '论文已删除，请重新保存' });
               sendJson(res, 200, { created: false, duplicate: true, updated: true, paper });
               return;
             }
@@ -620,15 +620,16 @@ export function registerScholarRoutes(
               if (buf.subarray(0, 4).toString('latin1') !== '%PDF') {
                 return sendJson(res, 400, { error: '文件内容不是有效的 PDF（缺少 %PDF 魔数）' });
               }
-              await mkdir(join(store.dir, 'attachments'), { recursive: true });
-              const tmp = `${file}.${randomUUID().slice(0, 8)}.tmp`;
-              await writeFile(tmp, buf);
-              await rename(tmp, file).catch(async (err: unknown) => {
-                await unlink(tmp).catch(() => {});
-                throw err;
-              });
-              // R03:事务化(基于最新记录,只动 pdfPath/updatedAt)
-              const saved = await store.updatePaperTx(pid, (cur) => ({ ...cur, pdfPath: `attachments/${safeName(pid)}.pdf`, updatedAt: Date.now() }));
+              const saved = await store.commitPaperArtifacts([paper], async () => {
+                await mkdir(join(store.dir, 'attachments'), { recursive: true });
+                const tmp = `${file}.${randomUUID().slice(0, 8)}.tmp`;
+                await writeFile(tmp, buf);
+                await rename(tmp, file).catch(async (err: unknown) => {
+                  await unlink(tmp).catch(() => {});
+                  throw err;
+                });
+                return { pdfPath: `attachments/${safeName(pid)}.pdf` };
+              }, { id: pid, apply: cur => ({ ...cur, pdfPath: `attachments/${safeName(pid)}.pdf`, updatedAt: Date.now() }) });
               if (!saved) return sendJson(res, 404, { error: '论文不存在' });
               return sendJson(res, 200, { ok: true, pdfPath: saved.pdfPath });
             } catch (err) {
@@ -985,7 +986,9 @@ readRun = run;
                   (line) => { run.phase = line; },
                   signal,
                 );
-                await archiveReadResult(store, p, outcome, { focusNote: focus ? '带关注重点' : '' });
+                if (signal.aborted) throw new Error('任务已取消');
+                const archived = await archiveReadResult(store, p, outcome, { focusNote: focus ? '带关注重点' : '' });
+                if (!archived.file) throw new Error('论文已删除，精读结果未保存');
                 if (outcome.kind === 'paper') paperOutcomes.push({ paper: p, outcome });
                 run.ok++;
                 run.papers[i]!.state = 'ok';
@@ -1004,11 +1007,16 @@ readRun = run;
                 run.phase = '生成横向对比报告…';
                 const cmp = await runCompare(ctx, paperOutcomes.map((x) => x.outcome), focus, signal);
                 const cmpFile = `cmp-${paperOutcomes.map((x) => safeName(x.paper.id)).join('--')}-${Date.now()}.html`;
-                await writeFile(join(store.dir, 'reports', cmpFile),
-                  renderCompareHtml(cmp, {
-                    title: `横向对比：${paperOutcomes.map((x) => x.paper.title.slice(0, 24)).join(' × ')}`,
-                    sub: `${paperOutcomes.length} 篇 · ${mode === 'quick' ? '速读' : '学术深读'}产物 · ${new Date().toISOString().slice(0, 10)}`,
-                  }), 'utf8');
+                const committed = await store.commitPaperArtifacts(paperOutcomes.map(x => x.paper), async () => {
+                  await mkdir(join(store.dir, 'reports'), { recursive: true });
+                  await writeFile(join(store.dir, 'reports', cmpFile),
+                    renderCompareHtml(cmp, {
+                      title: `横向对比：${paperOutcomes.map((x) => x.paper.title.slice(0, 24)).join(' × ')}`,
+                      sub: `${paperOutcomes.length} 篇 · ${mode === 'quick' ? '速读' : '学术深读'}产物 · ${new Date().toISOString().slice(0, 10)}`,
+                    }), 'utf8');
+                  return true;
+                });
+                if (!committed) throw new Error('参与对比的论文已删除');
                 run.phase = '';
                 console.log(`[dsh-scholar] 对比报告归档: ${cmpFile.slice(0, 80)}`);
               } catch (err) {
@@ -1098,10 +1106,15 @@ readRun = run;
             run.phase = '生成横向对比报告…';
             const cmp = await runCompareEntries(ctx, entries, focus, signal);
             const cmpFile = `cmp-${papers.map((p) => safeName(p.id)).join('--')}-${Date.now()}.html`;
-            await writeFile(join(reportsDir, cmpFile), renderCompareHtml(cmp, {
-              title: `横向对比：${papers.map((p) => p.title.slice(0, 24)).join(' × ')}`,
-              sub: `${papers.length} 篇 · 已有精读成果（${usedSidecar.filter(Boolean).length}/${papers.length} 篇有结构化原料，其余用摘要回退） · ${new Date().toISOString().slice(0, 10)}`,
-            }), 'utf8');
+            const committed = await store.commitPaperArtifacts(papers, async () => {
+              await mkdir(reportsDir, { recursive: true });
+              await writeFile(join(reportsDir, cmpFile), renderCompareHtml(cmp, {
+                title: `横向对比：${papers.map((p) => p.title.slice(0, 24)).join(' × ')}`,
+                sub: `${papers.length} 篇 · 已有精读成果（${usedSidecar.filter(Boolean).length}/${papers.length} 篇有结构化原料，其余用摘要回退） · ${new Date().toISOString().slice(0, 10)}`,
+              }), 'utf8');
+              return true;
+            });
+            if (!committed) throw new Error('参与对比的论文已删除');
             run.ok = 1;
             run.papers[0]!.state = 'ok';
             run.phase = '';
@@ -1176,13 +1189,18 @@ readRun = run;
         const body = JSON.parse(await readBody(req)) as { paperId?: unknown; question?: unknown };
         const paperId = String(body.paperId ?? '');
         const question = String(body.question ?? '').trim().slice(0, 500);
-        if (!store.papers.has(paperId)) return sendJson(res, 404, { error: '论文不存在' });
+        const paper = store.papers.get(paperId);
+        if (!paper) return sendJson(res, 404, { error: '论文不存在' });
         if (question === '') return sendJson(res, 400, { error: '问题不能为空' });
         const session = await loadSession(store.dir, paperId);
         if (!session) return sendJson(res, 400, { error: '该论文还没有精读会话（先精读一次才能追问）' });
         const history = session.qa.slice(-3).map((e) => ({ q: e.q, a: e.a }));
         const ans = await asker(session.chunks, question, history);
-        await appendQA(store.dir, paperId, { q: question, a: ans.answer, pages: ans.pages, confidence: ans.confidence, sufficient: ans.sufficient, at: Date.now() });
+        const committed = await store.commitPaperArtifacts([paper], async () => {
+          await appendQA(store.dir, paperId, { q: question, a: ans.answer, pages: ans.pages, confidence: ans.confidence, sufficient: ans.sufficient, at: Date.now() });
+          return true;
+        });
+        if (!committed) return sendJson(res, 404, { error: '论文已删除' });
         sendJson(res, 200, { ok: true, ...ans });
       } catch (err) {
         sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });

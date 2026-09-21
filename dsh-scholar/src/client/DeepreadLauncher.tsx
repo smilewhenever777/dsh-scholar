@@ -13,7 +13,7 @@ import { ACADEMIC_LENS } from '../shared/lens';
 import type { TFunc } from './nav';
 import { Btn, Icon, Icons, Modal, SchStyles, SearchInput, T, Textarea, truncate } from './ui';
 
-type ComposerDelivery = 'sent' | 'filled' | 'clipboard';
+type ComposerDelivery = 'sent' | 'filled' | 'clipboard' | 'failed';
 
 /**
  * 把短触发语注入宿主对话输入框并发送（同页 DOM 注入）。
@@ -23,13 +23,22 @@ type ComposerDelivery = 'sent' | 'filled' | 'clipboard';
  * （包 try/catch：受控组件对合成事件的重入可能抛错，不阻断收尾）。
  * 发送按钮按 aria-label/title 定位，260ms 等 React 解锁。
  */
+// E07:非破坏交付——宿主输入框为空且唯一可识别才填入(不自动点发送);
+// 已有草稿/附件/多编辑器时降级为剪贴板复制,绝不覆盖用户未发送的内容。
 export function deliverToComposer(text: string, done: (r: ComposerDelivery) => void): void {
   const visible = (el: Element): boolean => (el as HTMLElement).offsetParent !== null;
   const inPlugin = (el: Element): boolean => !!el.closest('[data-dsh-plugin]');
-  const ce = [...document.querySelectorAll('[contenteditable="true"]')]
-    .find((el) => visible(el) && !inPlugin(el)) as HTMLElement | undefined;
-  const ta = ce ? undefined
-    : ([...document.querySelectorAll('textarea')] as HTMLTextAreaElement[]).find((el) => visible(el) && !inPlugin(el));
+  const ces = [...document.querySelectorAll('[contenteditable="true"]')].filter((el) => visible(el) && !inPlugin(el));
+  const tas = [...document.querySelectorAll('textarea')].filter((el) => visible(el) && !inPlugin(el));
+  const ce = ces.length === 1 ? ces[0] as HTMLElement : undefined;
+  const ta = !ce && tas.length === 1 ? tas[0] as HTMLTextAreaElement : undefined;
+  const ceEmpty = ce ? (ce.textContent ?? '').trim() === '' : false;
+  const taEmpty = ta ? ta.value.trim() === '' : false;
+  // 目标不存在/不唯一/草稿非空 → 只复制(用户自行粘贴,原草稿不动)
+  if ((!ce && !ta) || (ce && !ceEmpty) || (ta && !taEmpty)) {
+    navigator.clipboard?.writeText(text).then(() => done('clipboard'), () => done('failed'));
+    return;
+  }
   let injected = false;
   if (ce) {
     ce.focus();
@@ -52,26 +61,14 @@ export function deliverToComposer(text: string, done: (r: ComposerDelivery) => v
     }
   }
   if (!injected) {
-    navigator.clipboard?.writeText(text).catch(() => {});
-    done('clipboard');
+    navigator.clipboard?.writeText(text).then(() => done('clipboard'), () => done('failed'));
     return;
   }
-  window.setTimeout(() => {
-    const send = ([...document.querySelectorAll('button')] as HTMLButtonElement[])
-      .filter((b) => visible(b) && !inPlugin(b))
-      .find((b) => !b.disabled
-        && ((b.getAttribute('aria-label') ?? '').includes('发送') || (b.title ?? '').includes('发送')
-          || /^send/i.test(b.getAttribute('aria-label') ?? '')));
-    if (send) {
-      send.click();
-      done('sent');
-    } else {
-      done('filled');
-    }
-  }, 260);
+  // E07:填入即止——不自动点发送(全页找'发送'按钮会误触别的会话/编辑器);
+  // 通知用户检查后手动发送
+  done('filled');
 }
-
-/** 复选列表行（标题 + 可选徽标），超长滚动 */
+// 兼容旧引用的别名(原实现返回 void;新签名由调用方 done 回调消费)
 function CheckList({ items, checked, onToggle, max }: {
   items: { id: string; label: string; note?: string }[];
   checked: Set<string>;
@@ -305,9 +302,11 @@ export function DeepreadLauncher({ open, current, allPapers: allPapersProp, onCl
         }));
         focusParts.push('库内相关论文（对比定位，透镜第⑤点引用）：' + briefs.join('；'));
       }
-      // 直接对比：不重读，用已有精读成果（sidecar/摘要回退）1-3 分钟出对比
-      const endpoint = directCompare ? '/scholar/read/compare' : '/scholar/read/run';
-      const payload = directCompare
+      // E12:effectiveCompare 派生——单篇范围时隐藏的直接对比选项不得控制请求;
+      // 此前 multi+勾选→切回 single 仍发 compare 接口并报数量错误
+      const effectiveCompare = scope === 'multi' && directCompare;
+      const endpoint = effectiveCompare ? '/scholar/read/compare' : '/scholar/read/run';
+      const payload = effectiveCompare
         ? { paperIds: targetIds, focus: focusParts.join('\n') }
         : { paperIds: targetIds, mode: mode === 'quick' ? 'quick' : 'paper', light: mode === 'light', focus: focusParts.join('\n') };
       const r = await api<{ ok: boolean; jobId?: string; detached?: boolean; label?: string; started?: number; skipped?: number }>(endpoint, {
@@ -338,7 +337,8 @@ export function DeepreadLauncher({ open, current, allPapers: allPapersProp, onCl
       <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
         <div>
           <span style={labelStyle}>{t('deepread.scope')}</span>
-          <Segment value={scope} onChange={setScope} options={current ? [
+          <Segment value={scope} onChange={(v) => { setScope(v); if (v !== 'multi') setDirectCompare(false); // E12:切回单篇清除隐藏的直接对比模式
+          }} options={current ? [
             { key: 'single', label: `${t('deepread.single')}：${truncate(current.title, 26)}` },
             { key: 'multi', label: t('deepread.multi') },
           ] : [

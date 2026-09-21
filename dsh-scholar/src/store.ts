@@ -22,6 +22,11 @@ export const EMPTY_GRAPH: KnowledgeGraph = { nodes: [], edges: [] };
 const MAX_GRAPH_NODES = 2000;
 const MAX_GRAPH_EDGES = 5000;
 
+function edgeOwners(edge: GraphEdge): string[] {
+  return typeof edge.auto === 'string' ? [edge.auto]
+    : Array.isArray(edge.auto) ? edge.auto.filter(x => typeof x === 'string' && x.length > 0) : [];
+}
+
 /** Filesystem-safe id derived from a paper title (stable across runs). */
 export function slugifyTitle(title: string): string {
   const base = title.toLowerCase()
@@ -194,12 +199,14 @@ export function mergeGraph(
   }
 
   const seen = new Set<string>();
+  const edgeIndex = new Map<string, number>();
   const edges: GraphEdge[] = [];
   let truncatedEdges = false;
   // append 必须保留旧边：先把 base.edges 灌入结果与去重集合（rebuild 的 base 为空，行为不变）
   for (const e of base.edges) {
     if (edges.length >= MAX_GRAPH_EDGES) { truncatedEdges = true; break; }
     seen.add(`${e.source}|${e.kind}|${e.target}`);
+    edgeIndex.set(`${e.source}|${e.kind}|${e.target}`, edges.length);
     edges.push(e);
   }
   for (const raw of incoming.edges) {
@@ -211,10 +218,22 @@ export function mergeGraph(
     const rt = resolveEndpoint(nodes, target);
     if (!rs || !rt || rs === rt) continue; // unknown endpoint or self-loop after resolution
     const key = `${rs}|${raw.kind}|${rt}`;
-    if (seen.has(key)) continue;
+    if (seen.has(key)) {
+      const index = edgeIndex.get(key)!;
+      const previous = edges[index];
+      if (previous) {
+        const before = edgeOwners(previous), added = edgeOwners(raw);
+        // A manual/legacy edge remains manual even if also declared by a card.
+        const auto = before.length && added.length ? [...new Set([...before, ...added])] : undefined;
+        edges[index] = { ...previous, auto };
+      }
+      continue;
+    }
     seen.add(key);
     if (edges.length >= MAX_GRAPH_EDGES) { truncatedEdges = true; break; }
-    edges.push({ source: rs, target: rt, kind: raw.kind as GraphEdgeKind });
+    edgeIndex.set(key, edges.length);
+    const owners = edgeOwners(raw);
+    edges.push({ source: rs, target: rt, kind: raw.kind as GraphEdgeKind, ...(owners.length ? { auto: owners } : {}) });
   }
 
   if (truncatedNodes || truncatedEdges) {
@@ -281,6 +300,13 @@ export class PaperStore {
   private disposed = false;
   /** 实例级写互斥（promise 链）：串行化所有读-改-写，防止并发覆盖/撕裂文件。 */
   private lock: Promise<unknown> = Promise.resolve();
+  private paperGenerations = new Map<string, number>();
+  private paperVersions = new WeakMap<Paper, number>();
+
+  private rememberPaper(paper: Paper): void {
+    this.paperVersions.set(paper, this.paperGenerations.get(paper.id) ?? 0);
+    this.papers.set(paper.id, paper);
+  }
 
   constructor(dir: string) {
     this.dir = dir;
@@ -312,7 +338,7 @@ export class PaperStore {
       try {
         const p = JSON.parse(await readFile(join(this.dir, 'papers', f), 'utf8')) as Paper;
         if (p && typeof p.id === 'string' && typeof p.title === 'string' && p.title) {
-          this.papers.set(p.id, p);
+          this.rememberPaper(p);
         }
       } catch (err) {
         this.corruptFiles.push(`papers/${f}`);
@@ -428,7 +454,7 @@ export class PaperStore {
         if (!(p.collectionIds ?? []).includes(id)) continue;
         const next: Paper = { ...p, collectionIds: (p.collectionIds ?? []).filter((x) => x !== id), updatedAt: Date.now() };
         if ((next.collectionIds ?? []).length === 0) delete next.collectionIds;
-        this.papers.set(p.id, next);
+        this.rememberPaper(next);
         await this.atomicWrite(this.paperPath(p.id), next);
       }
       return true;
@@ -482,21 +508,44 @@ export class PaperStore {
   async updatePaperTx(id: string, apply: (cur: Paper) => Paper | null): Promise<Paper | null> {
     this.assertLive();
     return this.withLock(async () => {
+      this.assertLive();
       const cur = this.papers.get(id);
       if (!cur) return null;
       const next = apply(cur);
       if (!next) return null;
-      this.papers.set(next.id, next);
+      this.rememberPaper(next);
       await this.atomicWrite(this.paperPath(next.id), next);
       await this.ensurePaperNode(next);
       return next;
     });
   }
 
+  /** Commit derived files and optional metadata under the deletion lock. The
+   * callback does I/O only: it must not re-enter a public store write method.
+   * Paper snapshots also prevent an old task from writing into a re-created id. */
+  async commitPaperArtifacts<T>(papers: readonly Paper[], write: () => Promise<T>,
+    patch?: { id: string; apply: (current: Paper) => Paper }): Promise<T | null> {
+    return this.withLock(async () => {
+      this.assertLive();
+      if (!papers.every(p => this.papers.has(p.id)
+        && this.paperVersions.get(p) === (this.paperGenerations.get(p.id) ?? 0))) return null;
+      const result = await write();
+      if (patch) {
+        const cur = this.papers.get(patch.id);
+        if (!cur || !papers.some(p => p.id === patch.id)) throw new Error('派生文件更新缺少论文');
+        const next = patch.apply(cur);
+        await this.atomicWrite(this.paperPath(next.id), next);
+        this.rememberPaper(next);
+        await this.ensurePaperNode(next);
+      }
+      return result;
+    });
+  }
+
   async upsertPaper(paper: Paper): Promise<Paper> {
     this.assertLive();
     return this.withLock(async () => {
-      this.papers.set(paper.id, paper);
+      this.rememberPaper(paper);
       await this.atomicWrite(this.paperPath(paper.id), paper);
       await this.ensurePaperNode(paper);
       return paper;
@@ -551,12 +600,19 @@ export class PaperStore {
    */
   cardSyncPatch(cards: IdeaCard[], papers: Paper[]): { nodes: GraphNode[]; edges: GraphEdge[] } {
     const nodes = new Map(this.graph.nodes.map((n) => [n.id, n]));
-    const edgeSeen = new Set(this.graph.edges.map((e) => `${e.source}|${e.kind}|${e.target}`));
+    const edgeSeen = new Map(this.graph.edges.map(e => [`${e.source}|${e.kind}|${e.target}`, edgeOwners(e)]));
     const paperTitle = new Map(papers.map((p) => [p.id, p.title]));
     // related 对端校验用"参数 ∪ 库内"：单卡 upsert 时对端往往只在库里
     const cardIds = new Set<string>([...cards.map((c) => c.id), ...this.cards.keys()]);
     const outNodes: GraphNode[] = [];
     const outEdges: GraphEdge[] = [];
+    const addEdge = (edge: GraphEdge) => {
+      const key = `${edge.source}|${edge.kind}|${edge.target}`;
+      const owners = edgeOwners(edge), existing = edgeSeen.get(key);
+      if (existing && (!existing.length || owners.every(id => existing.includes(id)))) return;
+      edgeSeen.set(key, [...new Set([...(existing ?? []), ...owners])]);
+      outEdges.push(edge);
+    };
     const addNode = (n: GraphNode) => {
       if (nodes.size >= MAX_GRAPH_NODES) return;
       nodes.set(n.id, n);
@@ -571,30 +627,18 @@ export class PaperStore {
       }
       if (c.paperId && paperTitle.has(c.paperId)) {
         if (!nodes.has(c.paperId)) addNode({ id: c.paperId, kind: 'paper', label: paperTitle.get(c.paperId)! });
-        const key = `${c.id}|derives_from|${c.paperId}`;
-        if (!edgeSeen.has(key)) {
-          edgeSeen.add(key);
-          outEdges.push({ source: c.id, target: c.paperId, kind: 'derives_from', auto: c.id });
-        }
+        addEdge({ source: c.id, target: c.paperId, kind: 'derives_from', auto: c.id });
       }
       for (const tag of c.tags) {
         if (!isConceptWorthyTag(tag)) continue;
         const cid = conceptId(tag);
         if (!nodes.has(cid)) addNode({ id: cid, kind: 'concept', label: tag });
-        const key = `${c.id}|uses|${cid}`;
-        if (!edgeSeen.has(key)) {
-          edgeSeen.add(key);
-          outEdges.push({ source: c.id, target: cid, kind: 'uses', auto: c.id });
-        }
+        addEdge({ source: c.id, target: cid, kind: 'uses', auto: c.id });
       }
       for (const rid of c.relatedCardIds ?? []) {
         if (rid === c.id || !cardIds.has(rid)) continue;
         const [a, b] = [c.id, rid].sort();
-        const key = `${a}|related|${b}`;
-        if (!edgeSeen.has(key)) {
-          edgeSeen.add(key);
-          outEdges.push({ source: a, target: b, kind: 'related', auto: c.id });
-        }
+        addEdge({ source: a, target: b, kind: 'related', auto: c.id });
       }
     }
     return { nodes: outNodes, edges: outEdges };
@@ -613,6 +657,7 @@ export class PaperStore {
     this.assertLive();
     return this.withLock(async () => {
       if (!this.papers.delete(id)) return false;
+      this.paperGenerations.set(id, (this.paperGenerations.get(id) ?? 0) + 1);
       await unlink(this.paperPath(id)).catch(() => {});
       await this.removePaperFromGraph(id);
       await this.detachCardsFromPaper(id);
@@ -683,17 +728,19 @@ export class PaperStore {
       valid.add(`${a}|related|${b}`);
     }
     const before = this.graph.edges.length;
-    const kept = this.graph.edges.filter((e) => {
-      // R04 回归修复:只删 auto===card.id(本卡自动生成)且不再成立的边——
-      // 相接但归属别的卡(A 引用 B,只改 B)或手工/kg_extract 边(无 auto)永不删除;
-      // 历史无 auto 的旧自动边保守保留(宁可留痕不可误删研究关系)
-      if (e.auto !== card.id) return true;
+    const kept = this.graph.edges.flatMap((e): GraphEdge[] => {
+      // Remove this card's declaration only; other owners and manual/legacy
+      // relations survive. Legacy unowned edges are never guessed or deleted.
+      const owners = edgeOwners(e);
+      if (!owners.includes(card.id)) return [e];
       const key = e.kind === 'related'
         ? `${[e.source, e.target].sort()[0]}|related|${[e.source, e.target].sort()[1]}`
         : `${e.source}|${e.kind}|${e.target}`;
-      return valid.has(key);
+      if (valid.has(key)) return [e];
+      const remaining = owners.filter(id => id !== card.id);
+      return remaining.length ? [{ ...e, auto: remaining }] : [];
     });
-    if (kept.length !== before) {
+    if (kept.length !== before || kept.some((e, i) => e !== this.graph.edges[i])) {
       await this.saveGraphUnlocked({ nodes: this.graph.nodes, edges: kept });
     }
   }

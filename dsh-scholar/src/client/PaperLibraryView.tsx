@@ -140,7 +140,7 @@ function PaperReports({ paperId, notify, t }: { paperId: string; notify?: (msg: 
         `请基于这篇论文（id: ${paperId}）的精读报告提取创新点建卡：用 paper_read 工具速读报告文件（path 参数） ${path}（quick 模式），`
         + `focus=从报告结论中提取 1-3 条对我研究方向可迁移的创新点（结合上下文注入的研究方向），`
         + `然后 idea_card_create 建卡（关联论文 ${paperId}，evidence 引用报告中的具体数据与表号）。`,
-        (r) => notify?.(t(r === 'sent' ? 'paper.deepreadSent' : r === 'filled' ? 'paper.deepreadFilled' : 'paper.deepreadCopied')),
+        (r) => notify?.(t(r === 'sent' ? 'paper.deepreadSent' : r === 'filled' ? 'paper.deepreadFilled' : r === 'failed' ? 'paper.deepreadFailed' : 'paper.deepreadCopied')),
       );
     } catch (e) {
       notify?.(e instanceof Error ? e.message : String(e));
@@ -403,6 +403,10 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
   const [loadError, setLoadError] = useState('');
   /** per-action failures (open/edit/delete/jump) — NOT cleared by background loads */
   const [actionError, setActionError] = useState('');
+  /** E03:关联卡片独立加载错误(与主详情错误分离) */
+  const [cardsError, setCardsError] = useState('');
+  /** E02:按论文的快捷写请求序号(乱序旧响应丢弃) */
+  const ratingSeq = useRef(new Map<string, number>());
   /** 非致命降级(collections/config 加载失败)的提示条 */
   const [degraded, setDegraded] = useState('');
   const shownError = actionError || loadError;
@@ -540,19 +544,37 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nav.paperId]);
 
+  // E01:详情导航 token——只有最后一次用户选择才能改变页面;迟到的旧响应丢弃。
+  const detailSeq = useRef(0);
   const openPaper = useCallback(async (id: string) => {
+    const token = ++detailSeq.current;
+    setSelected(null);
+    setRelated([]);
+    setCardsError('');
     try {
       const detail = await api<{ paper: Paper }>(`/scholar/papers/${encodeURIComponent(id)}`);
-      const cards = await api<{ cards: IdeaCard[] }>(`/scholar/cards${qs({ paperId: id })}`);
+      if (detailSeq.current !== token) return; // 已导航到别处
       setSelected(detail.paper);
-      setRelated(cards.cards);
       setActionError('');
       pushRecent(id);
     } catch (e) {
+      if (detailSeq.current !== token) return;
       setSelected(null);
       setActionError(e instanceof Error ? e.message : String(e));
+      return;
     }
-  }, [pushRecent]);
+    // E03:关联卡片独立加载——失败不阻断论文阅读(此前 503 连详情都打不开)
+    try {
+      const cards = await api<{ cards: IdeaCard[] }>(`/scholar/cards${qs({ paperId: id })}`);
+      if (detailSeq.current !== token) return;
+      setRelated(cards.cards ?? []);
+      setCardsError('');
+    } catch {
+      if (detailSeq.current !== token) return;
+      setRelated([]);
+      setCardsError(t('paper.cardsLoadFailed'));
+    }
+  }, [pushRecent, t]);
 
   // 切换论文时重置详情弹层（必须在 selected/各 state 声明之后）
   useEffect(() => { setPdfOpen(false); setAbsOpen(false); setLaunchOpen(false); }, [selected?.id]);
@@ -619,19 +641,21 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
   };
 
   const quickImportance = async (paper: Paper, importance: number) => {
-    const next = { ...paper, importance };
+    // E02:快捷星级只提交 {importance}——旧实现整包提交会把后台/他页刚更新的
+    // summary/notes/tags 用本地旧快照覆盖掉;后端 PUT 本就是部分更新语义。
+    // 序号防乱序:同一论文连点 2→5,迟到的 2 不得覆盖 5。
+    const seq = (ratingSeq.current.get(paper.id) ?? 0) + 1;
+    ratingSeq.current.set(paper.id, seq);
     try {
       const res = await api<{ paper: Paper }>(`/scholar/papers/${encodeURIComponent(paper.id)}`, {
         method: 'PUT',
-        body: JSON.stringify({
-          title: next.title, authors: next.authors, year: next.year, venue: next.venue,
-          arxivId: next.arxivId, doi: next.doi, url: next.url, abstract: next.abstract,
-          summary: next.summary, tags: next.tags, importance, notes: next.notes,
-        }),
+        body: JSON.stringify({ importance }),
       });
-      setSelected(res.paper);
+      if (ratingSeq.current.get(paper.id) !== seq) return; // 迟到响应丢弃
+      setPapers((cur) => cur.map((p) => (p.id === paper.id ? res.paper : p)));
+      setSelected((cur) => (cur && cur.id === paper.id ? res.paper : cur)); // 已切走不拉回
     } catch (e) {
-      // keep the old value, but surface why
+      if (ratingSeq.current.get(paper.id) !== seq) return;
       setActionError(e instanceof Error ? e.message : String(e));
     }
   };
@@ -1067,7 +1091,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
         <PaperReports paperId={selected.id} t={t} notify={showNotice} />
 
         {/* 交互式追问：基于精读章节块，带页码出处 */}
-        <PaperAsk paperId={selected.id} t={t} />
+        <PaperAsk key={selected.id} paperId={selected.id} t={t} />
 
         <PaperRelated
           paperId={selected.id}
@@ -1084,7 +1108,15 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
               <Icon d={Icons.plus} size={11} /> {t('paper.addCard')}
             </Btn>
           </div>
-          {related.length === 0 && <div style={{ color: T.caption, fontSize: 11, lineHeight: 1.6 }}>{t('paper.noRelatedCards')}</div>}
+          {cardsError && (
+            <div style={{ color: 'var(--dsw-alias-state-danger-primary)', fontSize: 11, lineHeight: 1.6, display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span>{cardsError}</span>
+              <Btn onClick={() => { if (selected) void openPaper(selected.id); }}>
+                <Icon d={Icons.refresh} size={10} /> {t('paper.retry')}
+              </Btn>
+            </div>
+          )}
+          {related.length === 0 && !cardsError && <div style={{ color: T.caption, fontSize: 11, lineHeight: 1.6 }}>{t('paper.noRelatedCards')}</div>}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {related.map((c) => (
               <button

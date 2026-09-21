@@ -1,5 +1,9 @@
 /** zh/en dictionaries for the serverDashboard namespace (zh is the key source of truth). */
 export const zh = {
+  'f.credAuto': '保存凭据后自动生成',
+  'f.fingerprint': 'SSH 主机指纹',
+  'f.fingerprintHint': '首次连接可自动记录；更换指纹前请通过可信渠道核对。',
+  'settings.confirmFingerprint': '将改变或清除已信任的 SSH 主机指纹。请先通过可信渠道核对服务器身份，确认继续？',
   'nav.label': '服务器',
   'nav.title': '服务器看板',
   // 侧栏触发器悬浮摘要(聚合异常状态)
@@ -159,6 +163,10 @@ export const zh = {
 } as const;
 
 export const en: Record<keyof typeof zh, string> = {
+  'f.credAuto': 'Generated when credentials are saved',
+  'f.fingerprint': 'SSH host fingerprint',
+  'f.fingerprintHint': 'Recorded on first connection; verify through a trusted channel before changing it.',
+  'settings.confirmFingerprint': 'This changes or clears a trusted SSH host fingerprint. Verify the server identity through a trusted channel before continuing. Continue?',
   'nav.label': 'Servers',
   'nav.title': 'Server Dashboard',
   'nav.sumOffline': '{count} offline',

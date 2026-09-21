@@ -81,6 +81,7 @@ export const zh = {
   'paper.deepreadSent': '精读指令已发送，AI 开始精读',
   'paper.deepreadFilled': '指令已填入输入框，检查后手动发送',
   'paper.deepreadCopied': '无法自动填入，指令已复制到剪贴板',
+  'paper.deepreadFailed': '填入与复制均失败，请手动操作',
   'paper.fulltext': '论文全文',
   'paper.fulltitleModal': '论文全文',
   'paper.fulltextWin': '在新窗口打开',
@@ -158,6 +159,7 @@ export const zh = {
   'paper.yearUnknown': '未知年份',
   'paper.groupCount': '{count} 篇',
 
+  'paper.cardsLoadFailed': '关联卡片加载失败(不影响阅读),可点击重试',
   'paper.related': '相关论文',
   'paper.relatedSub': '来自 OpenAlex · 被引数实时',
   'paper.relatedSimilar': '相似',
@@ -253,6 +255,8 @@ export const zh = {
   'card.relatedMissing': '已删除',
   'card.form.related': '关联卡片（点击切换）',
   'card.sortImportance': '重要度',
+  'card.opFailed': '卡片操作失败',
+  'card.stateUnchanged': '状态未改变,可重试',
   'card.confirmStatus': '确定将状态改为「{status}」吗？',
 
   'graph.empty': '还没有图谱。在对话中让 AI 执行 kg_extract 抽取（或说「给论文库建知识图谱」）。',
@@ -405,6 +409,7 @@ export const en: typeof zh = {
   'paper.deepreadSent': 'Deep-read instruction sent, AI started reading',
   'paper.deepreadFilled': 'Instruction filled into the composer; review and send',
   'paper.deepreadCopied': 'Auto-fill unavailable; instruction copied to clipboard',
+  'paper.deepreadFailed': 'Both fill and clipboard failed — please act manually',
   'paper.fulltext': 'Full text',
   'paper.fulltitleModal': 'Full text',
   'paper.fulltextWin': 'Open in new window',
@@ -482,6 +487,7 @@ export const en: typeof zh = {
   'paper.yearUnknown': 'Unknown year',
   'paper.groupCount': '{count} papers',
 
+  'paper.cardsLoadFailed': 'Related cards failed to load (reading unaffected), click to retry',
   'paper.related': 'Related papers',
   'paper.relatedSub': 'From OpenAlex · live citation counts',
   'paper.relatedSimilar': 'Similar',
@@ -577,6 +583,8 @@ export const en: typeof zh = {
   'card.relatedMissing': 'Deleted',
   'card.form.related': 'Related cards (click to toggle)',
   'card.sortImportance': 'Importance',
+  'card.opFailed': 'Card operation failed',
+  'card.stateUnchanged': 'State unchanged, you can retry',
   'card.confirmStatus': 'Change status to “{status}”?',
 
   'graph.empty': 'No graph yet. Ask the AI in chat to run kg_extract (e.g. “build a knowledge graph of my library”).',

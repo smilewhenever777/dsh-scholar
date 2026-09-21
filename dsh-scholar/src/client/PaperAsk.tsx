@@ -35,6 +35,7 @@ export function PaperAsk({ paperId, t }: { paperId: string; t: TFunc }) {
     // R06:切换论文进入显式隔离态——清空上一论文的历史/问题/错误/忙碌,
     // 加载期间不再显示别的论文内容;父组件同时以 key 隔离挂载实例
     setErr('');
+    setQuestion('');
     setQa(null);
     setExists(false);
     setBusy(false);

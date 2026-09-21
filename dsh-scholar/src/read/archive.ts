@@ -41,35 +41,27 @@ export async function archiveReadResult(
     sub: headerSub(paper, outcome.meta.mode, opts.focusNote ?? ''),
   });
   const dir = join(store.dir, 'reports');
-  // R05:删除检查前置——论文已删除时迟到归档不再写报告/会话(隐私残留)
-  if (!store.papers.has(paper.id)) {
-    return { file: null, summary: '', mode: outcome.meta.mode, summaryUpdated: false };
-  }
-  await mkdir(dir, { recursive: true });
-  const ts = Date.now();
-  const file = `${safeName(paper.id)}-${ts}.html`;
-  await writeFile(join(dir, file), html, 'utf8');
-  // sidecar：对比原料（"直接对比已有成果"路径的数据源，免去重读）
-  if (outcome.kind === 'paper') {
-    try {
-      const { sidecarOf } = await import('./compare.js');
-      await writeFile(join(dir, `${safeName(paper.id)}-${ts}.json`), JSON.stringify(sidecarOf(outcome, paper.title), null, 1), 'utf8');
-    } catch { /* sidecar 失败不影响归档 */ }
-  }
   const summary = extractSummary(outcome);
-  // 拼装档（综合彻底失败的兜底）的 summary 是分段摘要机械拼接——不覆盖
-  // 论文已有 summary：读失败不该污染原有数据，页脚 ⚠ 标记已提示重读
-  const assembled = outcome.meta.synth === 'assembled';
-  let updated = false;
-  if (opts.updateSummary !== false && !assembled && summary !== '') {
-    // F07:基于最新记录的事务化局部更新——并发编辑不被旧快照覆盖;
-    // 记录已被删除时返回 null,迟到的归档不再经 upsert 复活论文
-    const patched = await store.updatePaperTx(paper.id, (cur) => applyPaperPatch(cur, { summary }));
-    updated = patched !== null;
-  }
-  // 交互式精读的原料：保存章节块（保留历史问答）
-  if ((outcome.meta.chunksText ?? []).length > 0) {
-    await saveSessionAfterRead(store.dir, paper.id, outcome.meta.chunksText ?? [])
-  }
-  return { file, summary, mode: outcome.meta.mode, summaryUpdated: updated };
+  const update = opts.updateSummary !== false && outcome.meta.synth !== 'assembled' && summary !== '';
+  const archived = await store.commitPaperArtifacts([paper], async () => {
+    await mkdir(dir, { recursive: true });
+    const ts = Date.now();
+    const file = `${safeName(paper.id)}-${ts}.html`;
+    await writeFile(join(dir, file), html, 'utf8');
+    // sidecar：对比原料（"直接对比已有成果"路径的数据源，免去重读）
+    if (outcome.kind === 'paper') {
+      try {
+        const { sidecarOf } = await import('./compare.js');
+        await writeFile(join(dir, `${safeName(paper.id)}-${ts}.json`), JSON.stringify(sidecarOf(outcome, paper.title), null, 1), 'utf8');
+      } catch { /* sidecar 失败不影响归档 */ }
+    }
+    // 拼装档（综合彻底失败的兜底）的 summary 是分段摘要机械拼接——不覆盖
+    // 论文已有 summary：读失败不该污染原有数据，页脚 ⚠ 标记已提示重读
+    // 交互式精读的原料：保存章节块（保留历史问答）
+    if ((outcome.meta.chunksText ?? []).length > 0) {
+      await saveSessionAfterRead(store.dir, paper.id, outcome.meta.chunksText ?? [])
+    }
+    return { file, summary, mode: outcome.meta.mode, summaryUpdated: update };
+  }, update ? { id: paper.id, apply: cur => applyPaperPatch(cur, { summary }) } : undefined);
+  return archived ?? { file: null, summary: '', mode: outcome.meta.mode, summaryUpdated: false };
 }

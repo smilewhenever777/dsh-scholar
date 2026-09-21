@@ -9,6 +9,7 @@ interface HostRow {
   authKind: 'password' | 'key' | 'none';
   credentialRef: string;
   identityFile: string;
+  hostKeyFingerprint?: string;
   logPath: string;
   pinned: boolean;
   archived?: boolean;
@@ -66,13 +67,17 @@ export function ServerDashboardSettings({ t }: { t: T }) {
   const [staleMinutes, setStaleMinutes] = useState(10);
   const [alertIdleMin, setAlertIdleMin] = useState(5);
   const [loading, setLoading] = useState(true);
+  /** E04:加载成功才算 ready——失败/未完成时不把 [] 当可提交配置(保存会清空后端) */
+  const [configReady, setConfigReady] = useState(false);
+  /** E11:本页共享写锁——主机保存与阈值保存互斥,后完成者不再携带旧快照覆盖前者 */
+  const [mutationBusy, setMutationBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [editing, setEditing] = useState<HostRow | null>(null);
   const [secrets, setSecrets] = useState<Record<string, { password?: string; privateKey?: string }>>({});
   const [testResult, setTestResult] = useState<Record<string, string>>({});
-  /** 正在测试连接的主机 id(每次真实 SSH 握手,期间按钮置灰防连点) */
-  const [testing, setTesting] = useState('');
+  /** 正在测试连接的主机 id 集合(E08:并行多台时各自独立防重,一个完成不解锁另一个) */
+  const [testing, setTesting] = useState<Set<string>>(new Set());
   const [importing, setImporting] = useState(false);
   const [filter, setFilter] = useState('');
 
@@ -87,6 +92,7 @@ export function ServerDashboardSettings({ t }: { t: T }) {
       setError('');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      setConfigReady(false); // E04:未知基线禁止提交
     } finally {
       setLoading(false);
     }
@@ -101,26 +107,33 @@ export function ServerDashboardSettings({ t }: { t: T }) {
     setHosts(body.config.hosts ?? []);
     if (typeof body.config.refreshIntervalS === 'number') setRefreshIntervalS(body.config.refreshIntervalS);
     if (typeof body.config.staleMinutes === 'number') setStaleMinutes(body.config.staleMinutes);
+    setConfigReady(true);
     if (typeof body.config.alertIdleMin === 'number') setAlertIdleMin(body.config.alertIdleMin);
   };
 
   const saveIntervals = async () => {
+    // E11:阈值保存只提交阈值——后端对省略字段保持持久值,不会用本页可能过期的
+    // hosts 快照覆盖并发保存的主机编辑;ready 守卫防未知基线提交(E04)
+    if (!configReady || mutationBusy) return;
+    setMutationBusy(true);
     try {
       const res = await api<PutConfigResponse>('/dash/config', {
         method: 'PUT',
-        body: JSON.stringify({ hosts, refreshIntervalS, staleMinutes, alertIdleMin }),
+        body: JSON.stringify({ refreshIntervalS, staleMinutes, alertIdleMin }),
       });
       syncConfig(res);
       setError('');
       setNotice(t('settings.saved'));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMutationBusy(false);
     }
   };
 
   /** 连接测试(一次真实 SSH 握手):per-host testing 态 + 期间禁用按钮 */
   const runTest = async (row: HostRow, secret?: { password?: string; privateKey?: string }) => {
-    setTesting(row.id);
+    setTesting((cur) => new Set(cur).add(row.id)); // E08:按主机加锁
     try {
       const res = await api<{ ok: boolean; detail: string }>('/dash/test', {
         method: 'POST',
@@ -135,11 +148,22 @@ export function ServerDashboardSettings({ t }: { t: T }) {
     } catch (e) {
       setTestResult((m) => ({ ...m, [row.id]: '❌ ' + (e instanceof Error ? e.message : String(e)) }));
     } finally {
-      setTesting('');
+      setTesting((cur) => { const n = new Set(cur); n.delete(row.id); return n; }); // E08:只清自身
     }
   };
 
   const save = async (row: HostRow) => {
+    // E04/E11:未知基线不提交;本页共享写锁防两处保存交错覆盖
+    if (!configReady || mutationBusy) return;
+    setMutationBusy(true);
+    try {
+    await saveInner(row);
+    } finally { setMutationBusy(false); }
+  };
+  const saveInner = async (row: HostRow) => {
+    const previous = hosts.find(h => h.id === row.id);
+    if (previous?.hostKeyFingerprint && previous.hostKeyFingerprint !== row.hostKeyFingerprint
+      && !window.confirm(t('settings.confirmFingerprint'))) return;
     const next = hosts.some((h) => h.id === row.id)
       ? hosts.map((h) => (h.id === row.id ? row : h))
       : [...hosts, row];
@@ -169,7 +193,7 @@ export function ServerDashboardSettings({ t }: { t: T }) {
       });
       // auto-test right after saving, with the one-off secret still in hand
       // (an existing credentialRef falls back to the vault server-side)
-      await runTest(row, savedSecret);
+      await runTest(put.config?.hosts.find(h => h.id === row.id) ?? row, savedSecret);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -189,11 +213,11 @@ export function ServerDashboardSettings({ t }: { t: T }) {
   };
 
   interface LogCandidate { pid: number; user: string; cmd: string; logPath: string; size: number; mtimeMs: number; source: string }
-  const [discovering, setDiscovering] = useState<string>('');
+  const [discovering, setDiscovering] = useState<Set<string>>(new Set());
   const [discovered, setDiscovered] = useState<Record<string, LogCandidate[]>>({});
   const discoverLogs = async (row: HostRow) => {
     try {
-      setDiscovering(row.id);
+      setDiscovering((cur) => new Set(cur).add(row.id)); // E08:按主机加锁
       const res = await api<{ candidates: LogCandidate[] }>('/dash/discover-logs', {
         method: 'POST',
         body: JSON.stringify({
@@ -208,7 +232,7 @@ export function ServerDashboardSettings({ t }: { t: T }) {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setDiscovering('');
+      setDiscovering((cur) => { const n = new Set(cur); n.delete(row.id); return n; }); // E08:只清自身
     }
   };
 
@@ -326,7 +350,7 @@ export function ServerDashboardSettings({ t }: { t: T }) {
           {t('settings.alertIdleSuffix')}
         </label>
         <span style={{ flex: 1 }} />
-        <button type="button" style={btn} onClick={() => void saveIntervals()}>{t('settings.save')}</button>
+        <button type="button" style={btn} onClick={() => void saveIntervals()} disabled={!configReady || mutationBusy || loading}>{t('settings.save')}</button>
       </div>
       {error && <div style={{ color: 'var(--dsw-alias-state-danger, #e5484d)', marginBottom: 8 }}>{error}</div>}
       {!error && notice && <div style={{ color: 'var(--dsw-alias-state-success-primary, #30a46c)', marginBottom: 8 }}>{notice}</div>}
@@ -346,11 +370,11 @@ export function ServerDashboardSettings({ t }: { t: T }) {
             {row.pinned && <span style={{ fontSize: 10, color: 'var(--dsw-alias-state-business-primary, #4d6bfe)' }}>{t('settings.pinnedTag')}</span>}
             {row.archived && <span style={{ fontSize: 10, color: 'var(--dsw-alias-label-caption)' }}>{t('host.archivedTag')}</span>}
             <span style={{ flex: 1 }} />
-            <button type="button" style={btn} onClick={() => test(row)} disabled={testing === row.id}>
-              {testing === row.id ? t('settings.testing') : t('settings.testShort')}
+            <button type="button" style={btn} onClick={() => test(row)} disabled={testing.has(row.id)}>
+              {testing.has(row.id) ? t('settings.testing') : t('settings.testShort')}
             </button>
-            <button type="button" style={btn} onClick={() => void discoverLogs(row)} disabled={discovering === row.id}>
-              {discovering === row.id ? t('settings.discovering') : `🔍 ${t('settings.discover')}`}
+            <button type="button" style={btn} onClick={() => void discoverLogs(row)} disabled={discovering.has(row.id)}>
+              {discovering.has(row.id) ? t('settings.discovering') : `🔍 ${t('settings.discover')}`}
             </button>
             <button type="button" style={btn} onClick={() => setEditing({ ...row })}>{t('settings.edit')}</button>
             <button type="button" style={btn} onClick={() => void remove(row.id)}>{t('settings.remove')}</button>
@@ -361,7 +385,7 @@ export function ServerDashboardSettings({ t }: { t: T }) {
             {row.authKind === 'key' && !row.credentialRef && row.identityFile && ` · ${t('settings.identityFile')} ${row.identityFile}`}
             {row.logPath && ` · ${t('settings.logPathLabel')} ${row.logPath}`}
           </div>
-          {discovered[row.id]?.length === 0 && discovering !== row.id && (
+          {discovered[row.id]?.length === 0 && !discovering.has(row.id) && (
             <div style={{ fontSize: 11, color: 'var(--dsw-alias-label-caption)', marginTop: 4 }}>
               {t('settings.discoverEmpty')}
             </div>
@@ -433,9 +457,13 @@ export function ServerDashboardSettings({ t }: { t: T }) {
           <input
             style={input}
             value={editing.credentialRef}
-            placeholder="SD_<ID>_KEY"
-            onChange={(e) => setEditing({ ...editing, credentialRef: e.target.value })}
+            placeholder={t('f.credAuto')}
+            readOnly
           />
+          <label style={label}>{t('f.fingerprint')}</label>
+          <input style={input} value={editing.hostKeyFingerprint ?? ''} placeholder="SHA256:…"
+            onChange={e => setEditing({ ...editing, hostKeyFingerprint: e.target.value.trim() })} />
+          <div style={{ ...label, marginBottom: 8 }}>{t('f.fingerprintHint')}</div>
           {editing.authKind !== 'none' && (
             <>
               <label style={label}>{t('f.secret')}</label>

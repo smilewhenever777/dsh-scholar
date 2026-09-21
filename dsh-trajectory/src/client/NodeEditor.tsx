@@ -78,6 +78,21 @@ export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
     setCmdPattern(editing?.refs?.cmdPattern ?? '');
   }, [editing, file]);
 
+  // E05:dirty = 任一可编辑字段偏离编辑基线(轮询刷新不重置表单的修复保留)
+  const initialRef = useRef<{ title: string; kind: string; status: string; detail: string; tags: string; hypoId: string; mainline: boolean }>({
+    title: editing?.title ?? '', kind: editing?.kind ?? 'other', status: editing?.status ?? 'todo',
+    detail: editing?.detail ?? '', tags: (editing?.tags ?? []).join(', '), hypoId: editing?.hypothesisId ?? '',
+    mainline: !!editing && file.project.mainline.includes(editing.id),
+  });
+  const dirty = title !== initialRef.current.title || kind !== initialRef.current.kind
+    || status !== initialRef.current.status || detail !== initialRef.current.detail
+    || tags !== initialRef.current.tags || hypoId !== initialRef.current.hypoId
+    || mainline !== initialRef.current.mainline;
+  // 所有关闭路径统一入口:干净直关;脏时确认(继续编辑=保留,放弃更改=关闭)
+  const requestClose = () => {
+    if (!dirty || saving) { onClose(); return; }
+    if (window.confirm(t('node.confirmDiscard'))) onClose();
+  };
   const save = async () => {
     if (saving) return;
     setSaving(true);
@@ -112,6 +127,7 @@ export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
           method: 'POST',
           body: JSON.stringify({
             projectId: file.project.id,
+            hypothesisId: hypoId,
             kind, title, status,
             detail,
             tags: tags.split(/[,，]/).map((x) => x.trim()).filter(Boolean),
@@ -131,7 +147,7 @@ export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
   };
 
   return (
-    <Modal title={editing ? t('node.edit') : t('node.new')} onClose={onClose} width={460}>
+    <Modal title={editing ? t('node.edit') : t('node.new')} onClose={requestClose} width={460}>
       <Field label={t('node.title')}>
         <Input value={title} placeholder={t('node.titlePh')} onChange={(e) => setTitle(e.target.value)} autoFocus />
       </Field>
@@ -244,7 +260,7 @@ export function NodeEditorModal({ t, file, editing, onClose, onSaved }: {
           </>
         )}
         <span style={{ flex: 1 }} />
-        <Btn onClick={onClose}>{t('common.cancel')}</Btn>
+        <Btn onClick={requestClose}>{t('common.cancel')}</Btn>
         <Btn tone="primary" disabled={!title.trim() || saving} onClick={() => void save()}>{t('common.save')}</Btn>
       </div>
     </Modal>

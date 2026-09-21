@@ -38,7 +38,9 @@ interface SnapBody {
   staleMinutes?: number;
 }
 
-const normPath = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+// E06:远端 SSH/Linux 按 POSIX 语义匹配——保留大小写(ExpA≠expa),不全局把
+// 反斜杠换斜杠(POSIX 反斜杠可以是文件名字符);只去尾斜杠。
+const normPath = (p: string): string => p.replace(/\/+$/, '');
 
 /** Scan a log tail bottom-up for the newest tqdm `cur/total [` pair. */
 function tqdmFromLines(lines: string[] | undefined): { pct: number; label: string } | null {

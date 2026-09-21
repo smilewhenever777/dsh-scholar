@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import type { ServerSnapshot, GpuInfo, MetricSeries } from './types';
 import { Dot, SectionHeader, MetricBlock, Icon, Icons, IconButton, Sparkline, LogView, LiveText, ProcTable, T, relTime } from './ui';
 import { focusBus } from './focus';
-import { TEMP_HOT, TEMP_WARM, UTIL_SATURATED, DISK_WARN } from './thresholds';
+import { TEMP_HOT, TEMP_WARM, UTIL_SATURATED, DISK_WARN, logStalled, logIdleMinutes } from './thresholds';
 
 type TFunc = (key: string, params?: Record<string, unknown>) => string;
 
@@ -725,8 +725,8 @@ function GpuBlock({ gpu, staleMinutes, t, focusIndex }: { gpu: GpuInfo; staleMin
   const hot = gpu.tempC >= TEMP_HOT || gpu.utilPercent >= UTIL_SATURATED;
   const tempTone = gpu.tempC >= TEMP_HOT ? 'hot' : gpu.tempC >= TEMP_WARM ? 'warm' : undefined;
   // F23:停滞判定用宿主盖章的增量新鲜度(远程时钟偏移免疫);分钟数取本机观测的 changeAt
-  const idleMin = gpu.log && gpu.log.mtimeMs > 0 ? Math.floor((Date.now() - (gpu.log.changeAt ?? Date.now())) / 60_000) : 0;
-  const stalled = gpu.log?.fresh === false;
+  const idleMin = gpu.log ? logIdleMinutes(gpu.log) : 0;
+  const stalled = logStalled(gpu.log, staleMinutes);
   const toggleTab = (x: string) => setTab((cur) => (cur === x ? null : x));
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1392,8 +1392,7 @@ function FleetOverview({ hosts, snapshots, staleMinutes, t, onPick }: {
                 <div style={{ flex: 1, display: 'flex', gap: 3 }}>
                   {(s.gpus ?? []).filter(hasGpuData).map((g) => {
                     const hot = g.tempC >= TEMP_HOT || g.utilPercent >= UTIL_SATURATED;
-                    const stalled = g.log && g.log.mtimeMs > 0 && staleMinutes !== undefined
-                      && Date.now() - g.log.mtimeMs >= staleMinutes * 60_000;
+                    const stalled = logStalled(g.log, staleMinutes);
                     const bg = hot
                       ? `color-mix(in srgb, ${T.danger} 55%, transparent)`
                       : g.utilPercent >= 60

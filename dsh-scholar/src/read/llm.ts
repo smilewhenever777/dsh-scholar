@@ -1,5 +1,6 @@
 import type { AbortLike, HostContext, ModelSelection } from './types.js'
 import { errorMessage, isLlmCatalogService, isLlmStreamService, isRecord } from './types.js'
+import { providerSignal, throwIfCancelled } from './cancel.js'
 
 export function str(v: unknown, fallback: string): string {
   return typeof v === 'string' && v.trim() !== '' ? v.trim() : fallback
@@ -211,36 +212,29 @@ async function streamOnce(options: Record<string, unknown>, signal?: AbortLike |
   if (!isLlmStreamService(ctx.llm)) throw new Error('模型服务不支持流式调用')
   // R08:把 AbortLike 桥接成真 AbortSignal 注入 provider 选项——宿主/供应商
   // 支持时取消即刻中断(含等待首块),不再依赖下一块到达后才检查标志
-  let bridge: AbortController | null = null
-  let bridgePoll: ReturnType<typeof setInterval> | undefined
-  if (signal !== undefined && signal !== null) {
-    bridge = new AbortController()
-    if (signal.aborted) bridge.abort()
-    else {
-      bridgePoll = setInterval(() => { if (signal.aborted) { bridge!.abort(); if (bridgePoll) clearInterval(bridgePoll) } }, 100)
-    }
-    options = { ...options, signal: bridge.signal }
-  }
+  throwIfCancelled(signal)
+  const bridge = providerSignal(signal)
+  if (bridge.signal) options = { ...options, signal: bridge.signal }
   try {
-  for await (const chunk of ctx.llm.stream(options)) {
-    if (signal !== undefined && signal !== null && signal.aborted) throw new Error('任务已取消')
-    if (!isRecord(chunk)) continue
-    if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
-      text += chunk.text
-    } else if (chunk.type === 'finish') {
-      const reason = chunk.reason
-      if (isRecord(reason) && (reason.kind === 'error' || reason.kind === 'aborted')) {
-        const f = reason.failure
-        failure = isRecord(f) ? str(f.message, str(f.code, '模型调用失败')) : '模型调用失败'
+    for await (const chunk of ctx.llm.stream(options)) {
+      if (signal !== undefined && signal !== null && signal.aborted) throw new Error('任务已取消')
+      if (!isRecord(chunk)) continue
+      if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
+        text += chunk.text
+      } else if (chunk.type === 'finish') {
+        const reason = chunk.reason
+        if (isRecord(reason) && (reason.kind === 'error' || reason.kind === 'aborted')) {
+          const f = reason.failure
+          failure = isRecord(f) ? str(f.message, str(f.code, '模型调用失败')) : '模型调用失败'
+        }
       }
     }
-  }
-  if (failure !== null) throw new Error('模型调用失败：' + failure)
-  if (text.trim() === '') throw new Error('模型返回了空结果')
-  return text
+    if (failure !== null) throw new Error('模型调用失败：' + failure)
+    if (text.trim() === '') throw new Error('模型返回了空结果')
+    return text
   } finally {
     // R08:轮询清理(bridge abort 后 provider 流自然终止)
-    if (bridgePoll) clearInterval(bridgePoll)
+    bridge.dispose()
   }
 }
 

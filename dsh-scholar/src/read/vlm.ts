@@ -6,6 +6,8 @@
  * 占位文本——首图探测到占位/空洞回答即中止并标记 unusable（后续图不再烧 token）。
  */
 import { createLlmRuntime } from './llm.js'
+import { providerSignal, throwIfCancelled } from './cancel.js'
+import type { AbortLike } from './types.js'
 import { errorMessage, isRecord, type HostContext, type ModelSelection } from './types.js'
 import type { PdfFigureImg } from './figures.js'
 
@@ -23,7 +25,7 @@ interface AttachmentRefLike {
 
 export interface FigureReader {
   /** 单图视觉解读；unusable（模型看不到图/附件服务缺失）时返回 '' */
-  describeFigure(img: PdfFigureImg, hint: string): Promise<string>
+  describeFigure(img: PdfFigureImg, hint: string, signal?: AbortLike): Promise<string>
   readonly usable: boolean
 }
 
@@ -43,7 +45,9 @@ export function createFigureReader(ctx: HostContext): FigureReader {
   let usable = typeof store?.saveImage === 'function'
   let probed = false
 
-  async function streamText(cfg: ModelSelection, system: string, content: unknown[], maxTokens: number): Promise<string> {
+  async function streamText(cfg: ModelSelection, system: string, content: unknown[], maxTokens: number, signal?: AbortLike): Promise<string> {
+    throwIfCancelled(signal)
+    const bridge = providerSignal(signal)
     const options = {
       provider: cfg.provider,
       model: cfg.model,
@@ -51,23 +55,28 @@ export function createFigureReader(ctx: HostContext): FigureReader {
       messages: [{ role: 'user', content }],
       temperature: 0.2,
       maxTokens,
+      signal: bridge.signal,
     }
     let text = ''
     let failure: string | null = null
     const llm = (ctx as { llm?: { stream(o: unknown): AsyncIterable<unknown> } }).llm
-    if (!llm) throw new Error('llm 服务不可用')
-    for await (const chunk of llm.stream(options)) {
-      if (isRecord(chunk) && chunk.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
-      else if (isRecord(chunk) && chunk.type === 'finish') {
-        const reason = chunk.reason as { kind?: string; failure?: { message?: string } } | undefined
-        if (reason && (reason.kind === 'error' || reason.kind === 'aborted')) {
-          const f = reason.failure as { message?: string; code?: string } | undefined
-          failure = f?.message ?? f?.code ?? '模型调用失败'
+    try {
+      if (!llm) throw new Error('llm 服务不可用')
+      for await (const chunk of llm.stream(options)) {
+        throwIfCancelled(signal)
+        if (isRecord(chunk) && chunk.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
+        else if (isRecord(chunk) && chunk.type === 'finish') {
+          const reason = chunk.reason as { kind?: string; failure?: { message?: string } } | undefined
+          if (reason && (reason.kind === 'error' || reason.kind === 'aborted')) {
+            const f = reason.failure as { message?: string; code?: string } | undefined
+            failure = f?.message ?? f?.code ?? '模型调用失败'
+          }
         }
       }
-    }
-    if (failure !== null) throw new Error('模型调用失败：' + failure)
-    return text
+      throwIfCancelled(signal)
+      if (failure !== null) throw new Error('模型调用失败：' + failure)
+      return text
+    } finally { bridge.dispose() }
   }
 
   /** 纯文本模型的图片占位/空洞回答探测：首图结果可疑即全局降级 */
@@ -81,7 +90,8 @@ export function createFigureReader(ctx: HostContext): FigureReader {
 
   return {
     get usable() { return usable },
-    async describeFigure(img: PdfFigureImg, hint: string): Promise<string> {
+    async describeFigure(img: PdfFigureImg, hint: string, signal?: AbortLike): Promise<string> {
+      throwIfCancelled(signal)
       if (!usable) return ''
       try {
         const ref = (await store!.saveImage({
@@ -89,6 +99,7 @@ export function createFigureReader(ctx: HostContext): FigureReader {
           mediaType: img.mime,
           name: `paper-figure-${img.obj}.${img.mime === 'image/jpeg' ? 'jpg' : 'png'}`,
         })) as AttachmentRefLike
+        throwIfCancelled(signal)
         if (!isRecord(ref) || ref.attachmentId === undefined) throw new Error('附件引用无效')
         const cfg = await pickConfig()
         const answer = await streamText(cfg,
@@ -98,7 +109,7 @@ export function createFigureReader(ctx: HostContext): FigureReader {
             { type: 'text', text: (hint ? '图注线索：' + hint + '\n' : '') + '请描述这张论文配图。' },
             { type: 'image', attachment: ref },
           ],
-          500)
+          500, signal)
         if (!probed) {
           probed = true
           if (looksUnusable(answer)) {
@@ -108,6 +119,7 @@ export function createFigureReader(ctx: HostContext): FigureReader {
         }
         return answer.trim()
       } catch (err) {
+        throwIfCancelled(signal) // A cancellation does not disable this reader.
         if (!probed) {
           probed = true
           usable = false

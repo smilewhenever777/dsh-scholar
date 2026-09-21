@@ -97,17 +97,20 @@ async function downloadPaperPdf(
   }
   if (buf.length > 50 * 1024 * 1024) throw new Error('PDF 超过 50MB 附件上限');
   const file = join(store.dir, 'attachments', `${safeName(paper.id)}.pdf`);
-  await mkdir(join(store.dir, 'attachments'), { recursive: true });
-  // 随机 tmp 后缀：与 REST 上传/存储层并发写不再共用同一 tmp 名（防撕裂）
-  const tmp = `${file}.${randomUUID().slice(0, 8)}.tmp`;
-  await writeFile(tmp, buf);
-  await rename(tmp, file).catch(async (err: unknown) => {
-    await unlink(tmp).catch(() => {});
-    throw err;
-  });
+  const saved = await store.commitPaperArtifacts([paper], async () => {
+    await mkdir(join(store.dir, 'attachments'), { recursive: true });
+    // 随机 tmp 后缀：与 REST 上传/存储层并发写不再共用同一 tmp 名（防撕裂）
+    const tmp = `${file}.${randomUUID().slice(0, 8)}.tmp`;
+    await writeFile(tmp, buf);
+    await rename(tmp, file).catch(async (err: unknown) => {
+      await unlink(tmp).catch(() => {});
+      throw err;
+    });
+    return true;
+  }, { id: paper.id, apply: cur => ({ ...cur, pdfPath: `attachments/${safeName(paper.id)}.pdf`, updatedAt: Date.now() }) });
+  if (!saved) throw new Error('论文已删除，下载结果未保存');
+  // Callers display this snapshot; only the transaction above writes the store.
   paper.pdfPath = `attachments/${safeName(paper.id)}.pdf`;
-  paper.updatedAt = Date.now();
-  await store.upsertPaper(paper);
 }
 
 /**
@@ -204,11 +207,11 @@ export function registerScholarTools(
           const dup = findDuplicate(store.papers.values(), args);
           if (dup) {
             if (args.update) {
-              const paper = applyPaperPatch(dup, {
+              const paper = await store.updatePaperTx(dup.id, cur => applyPaperPatch(cur, {
                 ...args, year, importance,
                 ...(colIds !== undefined ? { collectionIds: colIds } : {}),
-              });
-              await store.upsertPaper(paper);
+              }));
+              if (!paper) throw new Error('论文已删除，请重新保存');
               let pdfWarning: string | undefined;
               if (paper.arxivId && !paper.pdfPath) {
                 try {
@@ -1088,7 +1091,9 @@ export function registerScholarTools(
               owner: ownerAgent,
               // 后台任务完成即在任务内归档（长文不丢报告）
               onResult: async (o) => {
-                if (paperRef !== undefined) await archiveReadResult(store, paperRef, o)
+                if (paperRef !== undefined && !(await archiveReadResult(store, paperRef, o)).file) {
+                  throw new Error('论文已删除，精读结果未保存');
+                }
               },
             },
           );
@@ -1105,6 +1110,7 @@ export function registerScholarTools(
             return { ok: true, mode, title: (outcome.result as PaperOutcome | QuickOutcome).title, summary: ((outcome.result as PaperOutcome | QuickOutcome).kind === 'paper' ? (outcome.result as PaperOutcome).summary : (outcome.result as QuickOutcome).summary), summaryUpdated: false };
           }
           const info = await archiveReadResult(store, paper, outcome.result as PaperOutcome | QuickOutcome);
+          if (!info.file) return { ok: false, error: '论文已删除，精读结果未保存' };
           return { ok: true, file: info.file ?? undefined, mode: info.mode, title: paper.title, summary: info.summary, summaryUpdated: info.summaryUpdated };
         },
       })),
@@ -1164,7 +1170,11 @@ export function registerScholarTools(
           if (!session) return { ok: false, error: '该论文还没有精读会话（先用 paper_read 精读一次）' };
           const history = session.qa.slice(-3).map((e) => ({ q: e.q, a: e.a }));
           const ans = await asker(session.chunks, question, history);
-          await appendQA(store.dir, paper.id, { q: question, a: ans.answer, pages: ans.pages, confidence: ans.confidence, sufficient: ans.sufficient, at: Date.now() });
+          const committed = await store.commitPaperArtifacts([paper], async () => {
+            await appendQA(store.dir, paper.id, { q: question, a: ans.answer, pages: ans.pages, confidence: ans.confidence, sufficient: ans.sufficient, at: Date.now() });
+            return true;
+          });
+          if (!committed) return { ok: false, error: '论文已删除，回答未保存' };
           return { ok: true, answer: toJson(ans) };
         },
       })),

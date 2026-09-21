@@ -111,6 +111,45 @@ function derivedCredName(hostId: string): string {
   return out;
 }
 
+function sameAuthIdentity(a: DashboardHostConfig, b: DashboardHostConfig): boolean {
+  return a.host === b.host && a.port === b.port && a.username === b.username && a.authKind === b.authKind;
+}
+
+/** Only persisted rows can migrate their own historical names. New request
+ * bodies never select a source vault entry. Ambiguous legacy names fail closed. */
+async function migrateSavedCredentials(ctx: Context, scope: { get(): unknown; update(patch: Partial<DashboardConfig>): Promise<unknown> }): Promise<void> {
+  const initial = scope.get() as DashboardConfig;
+  const migrated = new Map<string, string>();
+  for (const host of initial.hosts) {
+    const old = host.credentialRef, next = derivedCredName(host.id);
+    if (!old || old === next || !CRED_NAME.test(old)) continue;
+    const legacy = [
+      `SD_${host.id.replace(/[^A-Za-z0-9]/g, c => '_' + c.codePointAt(0)!.toString(16))}`,
+      `SD_${host.id.replace(/[^A-Za-z0-9_]/g, '_')}`,
+    ];
+    if (!legacy.includes(old)) continue;
+    if (initial.hosts.some(h => h.id !== host.id && (h.credentialRef === old || derivedCredName(h.id) === old))) {
+      ctx.logger.warn(`主机 ${host.id} 的旧凭据引用有歧义，请重新输入凭据`);
+      continue;
+    }
+    const current = await ctx.credentials.resolve(credentialRef(next));
+    if (!current?.value) {
+      const value = await ctx.credentials.resolve(credentialRef(old));
+      if (!value?.value) continue;
+      await ctx.credentials.set(credentialRef(next), value.value);
+    }
+    migrated.set(host.id, old);
+  }
+  if (migrated.size) {
+    const current = scope.get() as DashboardConfig;
+    await scope.update({ hosts: current.hosts.map(h => {
+      const before = initial.hosts.find(x => x.id === h.id);
+      return before && migrated.get(h.id) === h.credentialRef && sameAuthIdentity(before, h)
+        ? { ...h, credentialRef: derivedCredName(h.id) } : h;
+    }) });
+  }
+}
+
 /** Cached resolveAuth result per host; invalidated by PUT /dash/config or by an
  *  identity-file mtime change, so polling does not re-read key files each round. */
 interface AuthCacheEntry {
@@ -124,7 +163,7 @@ interface AuthCacheEntry {
 async function resolveAuth(ctx: Context, cfg: DashboardHostConfig, cache?: Map<string, AuthCacheEntry>): Promise<SshAuth> {
   const ref = derivedCredName(cfg.id);
   // R02:指纹必须进缓存签名——TOFU 写入 pin 后旧的无 pin 缓存条目立即失效
-  const sig = `${cfg.authKind}|${cfg.username}@${cfg.host}:${cfg.port}|${cfg.hostKeyFingerprint ?? ""}`;
+  const sig = `${cfg.authKind}|${cfg.username}@${cfg.host}:${cfg.port}|${cfg.hostKeyFingerprint ?? ""}|${cfg.credentialRef}`;
   let identityMtimeMs = -1;
   if (cfg.authKind === 'key' && cfg.identityFile) {
     try {
@@ -138,21 +177,8 @@ async function resolveAuth(ctx: Context, cfg: DashboardHostConfig, cache?: Map<s
   if (cfg.hostKeyFingerprint) auth.hostKeyFingerprint = cfg.hostKeyFingerprint;
   // 1) credential vault (explicitly stored private key / password) — always
   //    addressed by the SERVER-DERIVED name, never by a client-supplied ref
-  if (cfg.authKind !== 'none') {
-    let cred = await ctx.credentials.resolve(credentialRef(ref)).catch(() => undefined);
-    // legacy migration: pre-derivation configs stored credentials under the
-    // client-supplied ref (SD_<hostId> style). If the derived name is empty but
-    // the legacy ref holds a value, copy it across once — self-heals existing
-    // installs without weakening the derived-name model.
-    // R01:legacy 迁移只信看板自有命名空间(SD_*)——凭据 seam 可解析环境变量等
-    // 任意引用,不带前缀检查就会把无关 secret 拷贝进派生引用并用作 SSH 密码
-    if (!cred?.value && cfg.credentialRef && cfg.credentialRef.startsWith('SD_') && CRED_NAME.test(cfg.credentialRef) && cfg.credentialRef !== ref) {
-      const legacy = await ctx.credentials.resolve(credentialRef(cfg.credentialRef)).catch(() => undefined);
-      if (legacy?.value) {
-        await ctx.credentials.set(credentialRef(ref), legacy.value).catch(() => undefined);
-        cred = legacy;
-      }
-    }
+  if (cfg.authKind !== 'none' && cfg.credentialRef === ref) {
+    const cred = await ctx.credentials.resolve(credentialRef(ref)).catch(() => undefined);
     const value = cred?.value;
     if (value) {
       if (cfg.authKind === 'password') auth.password = String(value);
@@ -191,6 +217,7 @@ async function resolveAuthFromBody(ctx: Context, body: {
   host?: string; port?: number; username?: string;
   authKind?: DashboardHostConfig['authKind']; credentialRef?: string;
   identityFile?: string; password?: string; privateKey?: string;
+  hostKeyFingerprint?: string;
 }, savedHosts?: DashboardHostConfig[]): Promise<SshAuth> {
   const auth: SshAuth = { host: body.host as string, port: body.port ?? 22, username: body.username ?? 'root' };
   const kind = body.authKind ?? 'none';
@@ -200,9 +227,18 @@ async function resolveAuthFromBody(ctx: Context, body: {
   const refOk = async (r: string | undefined): Promise<boolean> => {
     if (!r || !CRED_NAME.test(r) || !r.startsWith('SD_')) return false;
     if (!savedHosts) return false;
-    const hit = savedHosts.find((h) => h.host === body.host && (h.port ?? 22) === (body.port ?? 22) && h.username === (body.username ?? 'root'));
-    return !!hit && derivedCredName(hit.id) === r;
+    const hit = savedHosts.find((h) => h.host === body.host && (h.port ?? 22) === (body.port ?? 22) && h.username === (body.username ?? 'root')
+      && h.authKind === kind && h.credentialRef === r && derivedCredName(h.id) === r);
+    return !!hit;
   };
+  const pins = new Set((savedHosts ?? []).filter(h => h.host === auth.host && h.port === auth.port)
+    .map(h => h.hostKeyFingerprint).filter((p): p is string => !!p));
+  if (pins.size > 1) throw new Error('已保存的主机指纹冲突，请先核对设置');
+  const savedPin = [...pins][0];
+  if (savedPin && body.hostKeyFingerprint && body.hostKeyFingerprint !== savedPin) {
+    throw new Error('请求指纹与已保存的主机指纹不一致，请在设置中核实后重新信任');
+  }
+  auth.hostKeyFingerprint = savedPin || body.hostKeyFingerprint || undefined;
   if (kind === 'password') {
     if (body.password) auth.password = body.password;
     else if (await refOk(body.credentialRef)) {
@@ -378,6 +414,11 @@ export function planLogPathUpdates(
 
 export function apply(ctx: Context) {
   const scope = ctx.settings.register(NS, DashboardConfigSchema, {});
+  let credentialMigration: Promise<void> | undefined;
+  const ensureCredentials = () => credentialMigration ??= migrateSavedCredentials(ctx, scope).catch(error => {
+    credentialMigration = undefined;
+    throw error;
+  });
 
   const hostState = new Map<string, CollectState>();
   // last good snapshot cache, so a transient collect failure still renders
@@ -545,6 +586,8 @@ export function apply(ctx: Context) {
   }
 
   async function pollAll(config: DashboardConfig, force = false, forceHost?: string): Promise<Record<string, ServerSnapshot>> {
+    await ensureCredentials();
+    config = scope.get() as DashboardConfig;
     // loop: after awaiting an inflight round, RE-CHECK before starting our own —
     // two concurrent ?force=1 requests would otherwise overlap rounds (double
     // config writes from planLogPathUpdates, duplicate stall events)
@@ -737,6 +780,7 @@ export function apply(ctx: Context) {
     handler: async (req, res) => {
       if (!guard(req, res)) return;
       try {
+        await ensureCredentials();
         if (req.method === 'GET') {
           const config = scope.get() as DashboardConfig;
           sendJson(res, 200, { config });
@@ -773,7 +817,17 @@ export function apply(ctx: Context) {
             .filter(([, s]) => s?.privateKey || s?.password)
             .map(([id]) => id));
           for (const row of hosts) {
-            if (secretIds.has(row.id)) row.credentialRef = derivedCredName(row.id);
+            const previous = current.hosts.find(h => h.id === row.id);
+            const secret = body.secrets?.[row.id];
+            if (secretIds.has(row.id) && (row.authKind === 'none'
+              || (row.authKind === 'key' ? !secret?.privateKey || !!secret?.password : !secret?.password || !!secret?.privateKey))) {
+              return sendJson(res, 400, { error: `主机 ${row.id} 的凭据与认证方式不匹配` });
+            }
+            if (previous?.credentialRef && !sameAuthIdentity(previous, row) && !secretIds.has(row.id) && row.authKind !== 'none') {
+              return sendJson(res, 400, { error: `主机 ${row.id} 的地址、用户或认证方式已改变，请重新输入凭据` });
+            }
+            row.credentialRef = secretIds.has(row.id) || (previous && sameAuthIdentity(previous, row)
+              && previous.credentialRef === derivedCredName(row.id)) ? derivedCredName(row.id) : '';
           }
           const prevHostIds = new Set(current.hosts.map((h) => h.id));
           await scope.update({ hosts, refreshIntervalS, staleMinutes, alertIdleMin });
@@ -846,6 +900,7 @@ export function apply(ctx: Context) {
       if (!guard(req, res)) return;
       if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
       try {
+        await ensureCredentials();
         const body = JSON.parse(await readBody(req)) as {
           host?: string; port?: number; username?: string;
           authKind?: DashboardHostConfig['authKind']; credentialRef?: string;
@@ -854,12 +909,6 @@ export function apply(ctx: Context) {
         };
         if (!body.host) return sendJson(res, 400, { error: 'host 必填' });
         const auth = await resolveAuthFromBody(ctx, body, (scope.get() as DashboardConfig).hosts);
-        // R02/F04:临时测试的主机身份验证——请求显式提供指纹,或坐标匹配的
-        // 已保存主机已有已确认指纹,二者皆用(显式优先)
-        const savedPin = (scope.get() as DashboardConfig).hosts.find((h) => h.host === body.host && (h.port ?? 22) === (body.port ?? 22) && h.username === (body.username ?? 'root'))?.hostKeyFingerprint;
-        const bodyPin = typeof (body as { hostKeyFingerprint?: string }).hostKeyFingerprint === 'string' && (body as { hostKeyFingerprint?: string }).hostKeyFingerprint ? (body as { hostKeyFingerprint?: string }).hostKeyFingerprint : undefined;
-        const pin = bodyPin ?? savedPin;
-        if (pin) auth.hostKeyFingerprint = pin;
         const result = await testConnection(auth);
         sendJson(res, 200, result);
       } catch (err) {
@@ -875,6 +924,7 @@ export function apply(ctx: Context) {
     handler: async (req, res) => {
       if (!guard(req, res)) return;
       try {
+        await ensureCredentials();
         const body = JSON.parse(await readBody(req)) as {
           host?: string; port?: number; username?: string;
           authKind?: DashboardHostConfig['authKind']; credentialRef?: string;
@@ -883,10 +933,6 @@ export function apply(ctx: Context) {
         };
         if (!body.host) return sendJson(res, 400, { error: 'host 必填' });
         const auth = await resolveAuthFromBody(ctx, body, (scope.get() as DashboardConfig).hosts);
-        const savedPin2 = (scope.get() as DashboardConfig).hosts.find((h) => h.host === body.host && (h.port ?? 22) === (body.port ?? 22) && h.username === (body.username ?? 'root'))?.hostKeyFingerprint;
-        const bodyPin2 = typeof (body as { hostKeyFingerprint?: string }).hostKeyFingerprint === 'string' && (body as { hostKeyFingerprint?: string }).hostKeyFingerprint ? (body as { hostKeyFingerprint?: string }).hostKeyFingerprint : undefined;
-        const pin2 = bodyPin2 ?? savedPin2;
-        if (pin2) auth.hostKeyFingerprint = pin2;
         const candidates = await discoverLogs(auth);
         sendJson(res, 200, { candidates });
       } catch (err) {

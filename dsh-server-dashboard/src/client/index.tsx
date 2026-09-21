@@ -5,7 +5,7 @@ import { DashboardPanel } from './DashboardPanel';
 import { ServerDashboardSettings } from './SettingsSection';
 import { Icon, IconButton, Icons, relTime } from './ui';
 import { focusBus } from './focus';
-import { TEMP_HOT, UTIL_SATURATED } from './thresholds';
+import { TEMP_HOT, UTIL_SATURATED, logStalled, logIdleMinutes } from './thresholds';
 import { registerDashboardRightbar, rightbarAvailable, openGpuInRightbar } from './rightbar';
 import type { ServerSnapshot } from './types';
 
@@ -287,20 +287,19 @@ function useDashboard(t: TFunc) {
       }
       // experiment-finished detection: log mtime/size unchanged for staleMinutes —
       // both the host-level log and each GPU's own log
-      const staleMs = (body.staleMinutes ?? 10) * 60_000;
+      const staleMinutes = body.staleMinutes ?? 10;
       const now = Date.now();
       const nextToasts: DashToast[] = [];
       const liveKeys = new Set<string>();
-      const checkStale = (key: string, hostId2: string, hostName: string, gpuIndex: number | undefined, log: { mtimeMs: number; size: number; fresh?: boolean }) => {
+      const checkStale = (key: string, hostId2: string, hostName: string, gpuIndex: number | undefined, log: { mtimeMs: number; size: number; fresh?: boolean; changeAt?: number }) => {
         liveKeys.add(key);
         const prev = staleLedger.get(key);
         if (prev && log.mtimeMs === prev.mtimeMs && log.size === prev.size) {
           // F23/R13:宿主盖章 fresh 优先;未盖章回退旧启发式
-          const toastStale = log.fresh === false || (log.fresh === undefined && now - log.mtimeMs >= staleMs);
+          const toastStale = logStalled(log, staleMinutes, now);
           if (!prev.notified && toastStale) {
             prev.notified = true;
-            // toast 里的"已 N 分钟"用实际 now−mtime,而非配置阈值本身
-            nextToasts.push({ id: ++toastSeq.current, hostId: hostId2, hostName, minutes: Math.max(1, Math.round((now - log.mtimeMs) / 60_000)), gpuIndex });
+            nextToasts.push({ id: ++toastSeq.current, hostId: hostId2, hostName, minutes: Math.max(1, logIdleMinutes(log, now)), gpuIndex });
           }
         } else {
           staleLedger.set(key, { mtimeMs: log.mtimeMs, size: log.size, notified: false });
@@ -339,7 +338,7 @@ function useDashboard(t: TFunc) {
         }
         for (const g of s.gpus ?? []) {
           if (g.tempC >= TEMP_HOT || g.utilPercent >= UTIL_SATURATED) status.hot++;
-          if (g.log && g.log.mtimeMs > 0 && (g.log.fresh === false || (g.log.fresh === undefined && now - g.log.mtimeMs >= staleMs))) status.stalled++;
+          if (logStalled(g.log, staleMinutes, now)) status.stalled++;
         }
       }
       statusBus.set(status);

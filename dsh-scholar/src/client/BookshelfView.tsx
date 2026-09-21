@@ -199,6 +199,15 @@ export function BookshelfView({ t }: { t: TFunc }) {
     return papers.find((p) => p.id === id)?.title ?? id;
   };
 
+  /** E10:非表单操作(看板拖拽/详情状态/详情星级)的错误 toast——saveError 只进表单,
+   *  这些操作失败此前完全静默(卡片看似没拖动,无任何提示) */
+  const [opError, setOpError] = useState<{ cardId: string; msg: string } | null>(null);
+  const opErrorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showOpError = (cardId: string, msg: string) => {
+    setOpError({ cardId, msg });
+    if (opErrorTimer.current) clearTimeout(opErrorTimer.current);
+    opErrorTimer.current = setTimeout(() => setOpError(null), 6000);
+  };
   const saveCard = async (draft: CardDraft) => {
     const body = {
       title: draft.title,
@@ -262,7 +271,9 @@ export function BookshelfView({ t }: { t: TFunc }) {
       && !window.confirm(t('card.confirmStatus', { status: t(STATUS_LABELS[status]) }))) return;
     try {
       await saveCard({ ...card, status });
-    } catch { /* error shown by saveCard */ }
+    } catch (e) {
+      showOpError(card.id, e instanceof Error ? e.message : String(e)); // E10
+    }
   };
 
   /** 关闭"新建卡片"弹窗(含脏数据确认) */
@@ -525,6 +536,12 @@ export function BookshelfView({ t }: { t: TFunc }) {
       <SchStyles />
       {toolbar}
       {error && <div style={{ color: T.danger, padding: '2px 12px 6px', fontSize: 11 }}>{error}</div>}
+      {opError && (
+        <div style={{ color: T.danger, padding: '2px 12px 6px', fontSize: 11, display: 'flex', gap: 8, alignItems: 'center' }} role='alert'>
+          <span>{t('card.opFailed')}: {opError.msg} — {t('card.stateUnchanged')}</span>
+          <button type='button' onClick={() => setOpError(null)} style={{ border: 'none', background: 'none', color: 'inherit', cursor: 'pointer', fontSize: 11, textDecoration: 'underline' }}>✕</button>
+        </div>
+      )}
       {degraded && !error && (
         <div style={{ color: T.warning, padding: '2px 12px 6px', fontSize: 11 }}>{degraded}</div>
       )}
@@ -657,9 +674,14 @@ export function BookshelfView({ t }: { t: TFunc }) {
                       // adopted/dropped 是定论型流转，与状态按钮同级——先确认
                       if ((st === 'adopted' || st === 'dropped')
                         && !window.confirm(t('card.confirmStatus', { status: t(STATUS_LABELS[st]) }))) return;
-                      setDroppedId(id);
-                      setTimeout(() => setDroppedId((cur) => (cur === id ? null : cur)), 700);
-                      void saveCard({ ...c, status: st });
+                      // E10:确认成功才播放落位动画(失败不得显示成功效果),
+                      // 失败提示绑定该卡(看板列头红条),不再静默
+                      void saveCard({ ...c, status: st }).then(() => {
+                        setDroppedId(id);
+                        setTimeout(() => setDroppedId((cur) => (cur === id ? null : cur)), 700);
+                      }).catch((err: unknown) => {
+                        showOpError(id, err instanceof Error ? err.message : String(err));
+                      });
                     }}
                     style={{
                       flex: '1 1 0', minWidth: 150, display: 'flex', flexDirection: 'column',

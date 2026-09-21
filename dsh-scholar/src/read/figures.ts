@@ -121,18 +121,22 @@ function latin1ToBytes(s: string): Uint8Array {
 /** F05:图像流解压输出上限(64MiB/流)——异常 PDF 不能靠压缩展开耗尽内存 */
 const FIG_STREAM_MAX_OUTPUT = 64 * 1024 * 1024;
 
-function inflateZlibRaw(data: Uint8Array): Uint8Array {
-  return new Uint8Array(inflateSync(Buffer.from(data), { maxOutputLength: FIG_STREAM_MAX_OUTPUT }))
+function inflateZlibRaw(data: Uint8Array, remaining: number): Uint8Array {
+  return new Uint8Array(inflateSync(Buffer.from(data), { maxOutputLength: Math.min(FIG_STREAM_MAX_OUTPUT, remaining) }))
 }
 
 /** latin1 全文 → 图像列表（文档顺序）+ 统计。失败容错：单图错误不影响其他。 */
 export function extractPdfFigures(latin1: string): { images: PdfFigureImg[]; stats: FigureExtractStats } {
+  if (latin1.length > 50 * 1024 * 1024) throw new Error('PDF 文件超过 50 MiB')
+  let remaining = 64 * 1024 * 1024, scanned = 0
+  const started = Date.now()
   const stats: FigureExtractStats = { scanned: 0, skippedSmall: 0, skippedUnsupported: 0, kept: 0 }
   const found: Array<{ img: PdfFigureImg; area: number; seq: number }> = []
   const re = /(\d+)\s+\d+\s+obj\s*([\s\S]*?)endstream/g
   let m: RegExpExecArray | null
   let seq = 0
   while ((m = re.exec(latin1)) !== null) {
+    if (++scanned > 50_000 || remaining <= 0 || Date.now() - started > 5000) break
     const objNum = m[1]!
     const body = m[2]!
     const dictPart = body.slice(0, body.indexOf('stream'))
@@ -160,12 +164,15 @@ export function extractPdfFigures(latin1: string): { images: PdfFigureImg[]; sta
       if (filters.includes('DCTDecode')) {
         if (data.length > MAX_BYTES_EACH || data.length < 500) { stats.skippedSmall++; continue }
         img = { mime: 'image/jpeg', b64: Buffer.from(data).toString('base64'), w, h, obj: objNum }
+        remaining -= data.length
       } else if (filters.includes('JPXDecode') || filters.includes('CCITTFaxDecode') || filters.includes('JBIG2Decode')) {
         stats.skippedUnsupported++
       } else if (filters.length === 0 || filters.every((f) => f === 'FlateDecode')) {
         const comps = colorComponents(dictPart)
         if (bpc !== 8 || comps === undefined) { stats.skippedUnsupported++; continue }
-        const raw0 = filters.length > 0 ? inflateZlibRaw(data) : data
+        const raw0 = filters.length > 0 ? inflateZlibRaw(data, remaining) : data
+        remaining -= raw0.length
+        if (remaining < 0) break
         let compsUse: 1 | 3 = comps === 4 ? 3 : comps
         let raw = raw0
         if (comps === 4) {
@@ -187,11 +194,17 @@ export function extractPdfFigures(latin1: string): { images: PdfFigureImg[]; sta
       } else {
         stats.skippedUnsupported++
       }
-    } catch {
+    } catch (error) {
       stats.skippedUnsupported++
+      if ((error as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE') break
     }
     if (img !== null) {
       found.push({ img, area: w * h, seq: seq++ })
+      // Retain only the top figures throughout scanning, not every decoded image.
+      if (found.length > MAX_FIGS) {
+        found.sort((a, b) => b.area - a.area)
+        found.length = MAX_FIGS
+      }
     }
   }
   // 面积 top-N（去掉图标后尽量保留大图），恢复文档顺序

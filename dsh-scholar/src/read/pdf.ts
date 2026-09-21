@@ -1,7 +1,11 @@
 import type { PdfStats } from './types.js'
+import { inflateRawSync } from 'node:zlib'
 
 export interface PdfProgress { done: number; total: number }
-type HuffmanTable = Record<string, number>
+export interface PdfLimits {
+  streamBytes: number; documentBytes: number; objects: number; streams: number; operations: number; timeMs: number
+}
+export class PdfBudgetError extends Error {}
 interface PdfTextRun { text: string; font: string | null; gap: number; br: boolean }
 interface PdfTextPart { text?: string; gap?: number }
 interface ParsedPdfObject { dict: string; stream: string | null; filters: string[] }
@@ -11,8 +15,19 @@ type PdfObjectGetter = (num: string | number | undefined) => ParsedPdfObject | n
 type PdfRefResolver = (dict: string, key: string) => string | null
 type PdfMultiRefResolver = (dict: string, key: string) => string[]
 
-export function createPdfTools(estimateTokens: (text: string) => number) {
-// ---------- PDF 文本提取（纯 JS：inflate + ToUnicode） ----------
+export function createPdfTools(estimateTokens: (text: string) => number, budget: Partial<PdfLimits> = {}) {
+const limits: PdfLimits = { streamBytes: 64 * 1024 * 1024, documentBytes: 128 * 1024 * 1024,
+  objects: 50_000, streams: 4096, operations: 500_000, timeMs: 5000, ...budget }
+for (const value of Object.values(limits)) if (!Number.isSafeInteger(value) || value <= 0) throw new Error('PDF 预算必须为正整数')
+let decodedBytes = 0, streamCount = 0, operations = 0, startedAt = Date.now()
+function checkBudget(bytes = 0): void {
+  decodedBytes += bytes
+  operations++
+  if (decodedBytes > limits.documentBytes || operations > limits.operations || Date.now() - startedAt > limits.timeMs) {
+    throw new PdfBudgetError('PDF 累计大小、处理量或时间超过预算')
+  }
+}
+// ---------- PDF 文本提取（受限 zlib + ToUnicode） ----------
 function bytesToLatin1(bytes: Uint8Array): string {
   let s = ''
   const CH = 32768
@@ -29,148 +44,21 @@ function latin1ToBytes(s: string): Uint8Array {
 }
 
 // R07:文本流解压输出上限(提前于 inflateRaw:其被 hoisting 使用)
-const STREAM_MAX_OUTPUT = 64 * 1024 * 1024;
+const STREAM_MAX_OUTPUT = limits.streamBytes;
 
 function inflateRaw(data: Uint8Array): Uint8Array {
-  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
-  let pos = 0
-  let bitBuf = 0
-  let bitCnt = 0
-  const out: number[] = []
-  // R07:三条输出路径共用的预算检查——压缩炸弹在此被截断
-  const budget = () => {
-    if (out.length > STREAM_MAX_OUTPUT) throw new Error('inflate: output exceeds stream budget')
+  checkBudget()
+  const remaining = limits.documentBytes - decodedBytes
+  if (remaining <= 0) throw new PdfBudgetError('PDF 累计解压量超限')
+  try {
+    // Native zlib applies the same bound to compressed, stored and mixed blocks.
+    const output = inflateRawSync(data, { maxOutputLength: Math.min(STREAM_MAX_OUTPUT, remaining) })
+    checkBudget(output.length)
+    return output
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE') throw new PdfBudgetError('PDF 解压输出超过预算')
+    throw error
   }
-  function readBits(n: number): number {
-    while (bitCnt < n) {
-      if (pos >= bytes.length) throw new Error('inflate: unexpected EOF')
-      const byte = bytes[pos++]
-      if (byte === undefined) throw new Error('inflate: unexpected EOF')
-      bitBuf |= byte << bitCnt
-      bitCnt += 8
-    }
-    const v = bitBuf & ((1 << n) - 1)
-    bitBuf >>>= n
-    bitCnt -= n
-    return v
-  }
-  const LEN_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
-  const LEN_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
-  const DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
-  const DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
-  const CLEN_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
-  function buildHuffman(lengths: number[]): HuffmanTable {
-    const maxLen = Math.max.apply(null, lengths)
-    const blCount = new Array(maxLen + 1).fill(0)
-    for (const l of lengths) if (l > 0) blCount[l] = (blCount[l] ?? 0) + 1
-    let code = 0
-    const nextCode = new Array(maxLen + 1).fill(0)
-    for (let bits = 1; bits <= maxLen; bits++) {
-      code = (code + (blCount[bits - 1] ?? 0)) << 1
-      nextCode[bits] = code
-    }
-    const table: HuffmanTable = {}
-    for (let sym = 0; sym < lengths.length; sym++) {
-      const len = lengths[sym] ?? 0
-      if (len === 0) continue
-      const c = nextCode[len] ?? 0
-      nextCode[len] = c + 1
-      table[len + ':' + c.toString(2).padStart(len, '0')] = sym
-    }
-    return table
-  }
-  function decodeSym(table: HuffmanTable, maxLen: number): number {
-    let code = 0
-    for (let len = 1; len <= maxLen; len++) {
-      code = (code << 1) | readBits(1)
-      const hit = table[len + ':' + code.toString(2).padStart(len, '0')]
-      if (hit !== undefined) return hit
-    }
-    throw new Error('inflate: invalid huffman code')
-  }
-  function fixedLitTable() {
-    const lengths = []
-    for (let i = 0; i < 144; i++) lengths.push(8)
-    for (let i = 144; i < 256; i++) lengths.push(9)
-    for (let i = 256; i < 280; i++) lengths.push(7)
-    for (let i = 280; i < 288; i++) lengths.push(8)
-    return buildHuffman(lengths)
-  }
-  function fixedDistTable() {
-    return buildHuffman(new Array(30).fill(5))
-  }
-  let litTable: HuffmanTable | null = null
-  let distTable: HuffmanTable | null = null
-  let finalBlock = false
-  function decodeBlock() {
-    for (;;) {
-      if (litTable === null || distTable === null) throw new Error('inflate: missing huffman table')
-      const sym = decodeSym(litTable, 15)
-      if (sym < 256) {
-        out.push(sym)
-        budget()
-      } else if (sym === 256) {
-        return
-      } else {
-        const lenIdx = sym - 257
-        if (lenIdx < 0 || lenIdx >= LEN_BASE.length) throw new Error('inflate: bad length symbol')
-        const length = LEN_BASE[lenIdx]! + readBits(LEN_EXTRA[lenIdx]!)
-        const distSym = decodeSym(distTable, 15)
-        if (distSym < 0 || distSym >= DIST_BASE.length) throw new Error('inflate: bad distance symbol')
-        const dist = DIST_BASE[distSym]! + readBits(DIST_EXTRA[distSym]!)
-        const start = out.length - dist
-        if (start < 0) throw new Error('inflate: distance too far back')
-        for (let i = 0; i < length; i++) { out.push(out[start + i]!); if ((i & 0x3fff) === 0) budget() }
-      }
-    }
-  }
-  while (!finalBlock) {
-    finalBlock = readBits(1) === 1
-    const btype = readBits(2)
-    if (btype === 0) {
-      readBits(bitCnt & 7)
-      const len = bytes[pos]! | (bytes[pos + 1]! << 8)
-      const nlen = bytes[pos + 2]! | (bytes[pos + 3]! << 8)
-      pos += 4
-      if ((len ^ 0xffff) !== nlen) throw new Error('inflate: stored block len mismatch')
-      for (let i = 0; i < len; i++) out.push(bytes[pos++]!)
-    } else if (btype === 1) {
-      litTable = fixedLitTable()
-      distTable = fixedDistTable()
-      decodeBlock()
-    } else if (btype === 2) {
-      const hlit = readBits(5) + 257
-      const hdist = readBits(5) + 1
-      const hclen = readBits(4) + 4
-      const clLengths = new Array(19).fill(0)
-      for (let i = 0; i < hclen; i++) clLengths[CLEN_ORDER[i]!] = readBits(3)
-      const clTable = buildHuffman(clLengths)
-      const lengths: number[] = []
-      while (lengths.length < hlit + hdist) {
-        const sym = decodeSym(clTable, 7)
-        if (sym < 16) lengths.push(sym)
-        else if (sym === 16) {
-          const prev = lengths[lengths.length - 1]
-          if (prev === undefined) throw new Error('inflate: missing previous code length')
-          const rep = 3 + readBits(2)
-          for (let i = 0; i < rep; i++) lengths.push(prev)
-        } else if (sym === 17) {
-          const rep = 3 + readBits(3)
-          for (let i = 0; i < rep; i++) lengths.push(0)
-        } else if (sym === 18) {
-          const rep = 11 + readBits(7)
-          for (let i = 0; i < rep; i++) lengths.push(0)
-        } else throw new Error('inflate: bad code length symbol')
-      }
-      if (lengths.length > hlit + hdist) lengths.length = hlit + hdist
-      litTable = buildHuffman(lengths.slice(0, hlit))
-      distTable = buildHuffman(lengths.slice(hlit))
-      decodeBlock()
-    } else {
-      throw new Error('inflate: reserved block type')
-    }
-  }
-  return new Uint8Array(out)
 }
 
 /** F05:单流解压输出上限——压缩炸弹(高压缩比流)不能把内存/时间打穿;
@@ -231,7 +119,11 @@ function findStreamEnd(body: string, startIdx: number): { end: number; data: str
 }
 
 function decodeStreamData(streamData: string, filters: string[]): string {
+  checkBudget()
+  if (++streamCount > limits.streams) throw new PdfBudgetError('PDF 流数量超过预算')
+  if (streamData.length > STREAM_MAX_OUTPUT) throw new PdfBudgetError('PDF 流大小超过预算')
   let data = streamData
+  if (!filters.length) checkBudget(data.length)
   for (let i = 0; i < filters.length; i++) {
     const f = filters[i]
     if (f === 'FlateDecode' || f === 'Fl') {
@@ -266,8 +158,12 @@ function decodeStreamData(streamData: string, filters: string[]): string {
       }
       data = out
     } else if (f !== '') {
-      try { data = bytesToLatin1(inflateZlib(latin1ToBytes(data))) } catch (error) { /* keep as-is */ }
+      try { data = bytesToLatin1(inflateZlib(latin1ToBytes(data))) } catch (error) {
+        if (error instanceof PdfBudgetError) throw error
+        checkBudget(data.length)
+      }
     }
+    if (f === 'ASCIIHexDecode' || f === 'AHx' || f === 'ASCII85Decode' || f === 'A85') checkBudget(data.length)
   }
   return data
 }
@@ -279,6 +175,7 @@ function extractTextOperations(content: string): PdfTextRun[] {
   const re = /\(((?:[^()\\]|\\.)*)\)\s*Tj|<((?:[0-9A-Fa-f\s]+))>\s*Tj|\[((?:[^\[\]\\]|\\.)*)\]\s*TJ|'((?:[^()\\]|\\.)*)'|"((?:[^()\\]|\\.)*)"|\/([A-Za-z0-9_+\-.]+)\s+[\d.]+\s+Tf|(T\*)|(Td)|(TD)/g
   let m
   while ((m = re.exec(content)) !== null) {
+    checkBudget()
     if (m[1] !== undefined) {
       runs.push({ text: decodePdfString(m[1]), font: currentFont, gap: 0, br: newLine })
       newLine = false
@@ -377,12 +274,14 @@ function parseCmap(cmapText: string): { map: Record<string, string>; twoByte: bo
         if (target.length === width) {
           let t = parseInt(target, 16)
           for (let c = lo; c <= hi; c++) {
+            checkBudget()
             map[key(c, width)] = hexToStr(t.toString(16).toUpperCase().padStart(width, '0'))
             t++
           }
         } else if (target.length < width) {
           const prefixHex = target.slice(0, Math.max(0, target.length - 2))
           for (let c = lo; c <= hi; c++) {
+            checkBudget()
             const lastByte = (c & 0xff).toString(16).toUpperCase().padStart(2, '0')
             map[key(c, width)] = hexToStr(prefixHex + lastByte)
           }
@@ -390,6 +289,7 @@ function parseCmap(cmapText: string): { map: Record<string, string>; twoByte: bo
       } else if (p[4] !== undefined) {
         const entries = p[4].trim().split(/\s+/).filter(Boolean)
         for (let c = lo; c <= hi && c - lo < entries.length; c++) {
+          checkBudget()
           map[key(c, width)] = hexToStr(entries[c - lo]!.replace(/[<>]/g, ''))
         }
       }
@@ -400,10 +300,15 @@ function parseCmap(cmapText: string): { map: Record<string, string>; twoByte: bo
 
 // 解析 PDF 结构（xref/ObjStm/页树），返回页对象编号与后续单页提取所需的对象解析闭包。
 function collectPageNums(latin1: string) {
+  decodedBytes = 0; streamCount = 0; operations = 0; startedAt = Date.now()
+  if (latin1.length > 50 * 1024 * 1024) throw new PdfBudgetError('PDF 文件超过 50 MiB')
   const objects: Record<string, string> = {}
+  let objectCount = 0
   const objRe = /(\d+)\s+(\d+)\s+obj([\s\S]*?)endobj/g
   let m
   while ((m = objRe.exec(latin1)) !== null) {
+    checkBudget()
+    if (++objectCount > limits.objects) throw new PdfBudgetError('PDF 对象数量超过预算')
     if (m[1] !== undefined && m[3] !== undefined) objects[m[1]] = m[3]
   }
 
@@ -503,6 +408,7 @@ function collectPageNums(latin1: string) {
       const first = pair[0]
       const count = pair[1]
       for (let i = 0; i < count; i++) {
+        checkBudget()
         if (p + rowLen > bytes.length) return entries
         const row = bytes.subarray(p, p + rowLen)
         p += rowLen
@@ -551,6 +457,8 @@ function collectPageNums(latin1: string) {
         const count = parseInt(h[2]!, 10)
         pos = h.index + h[0].length
         for (let i = 0; i < count; i++) {
+          checkBudget()
+          if (pos + 20 > tableText.length) break
           const line = tableText.slice(pos, pos + 20)
           pos += 20
           const em = line.match(/(\d{10})\s+(\d{5})\s+([nf])/)
@@ -614,6 +522,8 @@ function collectPageNums(latin1: string) {
     const toks = head.trim().split(/\s+/)
     const pairs: Array<[number, number]> = []
     for (let i = 0; i < n && i * 2 + 1 < toks.length; i++) {
+      checkBudget()
+      if (++objectCount > limits.objects) throw new PdfBudgetError('PDF 对象数量超过预算')
       const num = parseInt(toks[i * 2]!, 10)
       const off = parseInt(toks[i * 2 + 1]!, 10)
       if (!Number.isNaN(num) && !Number.isNaN(off)) pairs.push([num, off])
@@ -686,6 +596,7 @@ function collectPageNums(latin1: string) {
   const stack = [pagesNum]
   const visited = new Set<string>()
   while (stack.length > 0) {
+    checkBudget()
     const n = stack.pop()
     if (n === undefined || visited.has(n)) continue
     visited.add(n)
@@ -740,6 +651,7 @@ function extractPageTexts(
 
   const pageTexts: string[] = []
   for (const pn of pageNums) {
+    checkBudget()
     const page = getObject(pn)
     if (!page) continue
     let resDict = page.dict

@@ -13,6 +13,7 @@
 import { createPdfTools } from './pdf.js'
 import { extractPdfFigures, type PdfFigureImg } from './figures.js'
 import { createFigureReader } from './vlm.js'
+import { throwIfCancelled } from './cancel.js'
 import { arr, createLlmRuntime, splitChunksPaper, str } from './llm.js'
 import {
   errorMessage, isBinaryFileService, isRecord, isTextFileService,
@@ -378,6 +379,7 @@ export function createReadEngine(ctx: HostContext): ReadEngine {
   })()
 
   async function runFlow(text: string, source: string, figures: PdfFigureImg[], input: ReadInput, onProgress: ((line: string) => void) | null, signal: AbortLike): Promise<PaperOutcome | QuickOutcome> {
+    throwIfCancelled(signal)
     const started = Date.now()
     const cfg = await pickConfig()
     // 默认中文输出：中文科研工作流里英文论文的报告也要中文表述
@@ -400,8 +402,10 @@ export function createReadEngine(ctx: HostContext): ReadEngine {
     if (input.mode === 'paper' && input.vlm !== false && figures.length > 0 && figureReader.usable) {
       const top = figures.slice(0, 6)
       for (let i = 0; i < top.length; i++) {
+        throwIfCancelled(signal)
         if (onProgress !== null) onProgress('VLM 读图 ' + (i + 1) + '/' + top.length + '…')
-        const d = await figureReader.describeFigure(top[i]!, '')
+        const d = await figureReader.describeFigure(top[i]!, '', signal)
+        throwIfCancelled(signal)
         if (!figureReader.usable) break
         figureDescList.push(d)
       }
