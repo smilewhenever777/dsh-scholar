@@ -77,7 +77,7 @@ dsh plugin --profile web add dsh-trajectory
 
 按需安装一个或多个。安装或升级后，完整重启 DSH 宿主并重新加载页面。
 
-**GitHub 当前源码可能领先于 npm 已发布版本。**本轮修复列在各插件的“未发布”更新记录中；推送仓库不会自动更新 npm 包。
+**GitHub Release v0.3.0 已包含三个插件的预构建包与 SHA-256 校验文件。**见 [v0.3.0 下载与升级说明](https://github.com/smilewhenever777/dsh-scholar/releases/tag/v0.3.0)。本次 GitHub 发布不包含 npm 发布，上述包名安装命令仍使用 npm 上的已发布版本。
 
 ### 当前源码
 
@@ -86,6 +86,7 @@ dsh plugin --profile web add dsh-trajectory
 ```sh
 git clone https://github.com/smilewhenever777/dsh-scholar.git
 cd dsh-scholar
+git checkout v0.3.0
 npm ci --prefix dsh-scholar
 npm ci --prefix dsh-server-dashboard
 npm ci --prefix dsh-trajectory

@@ -48,6 +48,8 @@
 
 ## 安装与更新
 
+[GitHub Release v0.3.0](https://github.com/smilewhenever777/dsh-scholar/releases/tag/v0.3.0) 提供预构建包和校验文件。GitHub 发布与 npm 发布相互独立；本次没有发布 npm 版本。使用源码安装时可先在仓库根目录执行 `git checkout v0.3.0` 固定版本。
+
 npm 已发布版本：
 
 ```sh

@@ -1,6 +1,6 @@
 {
   "name": "dsh-trajectory",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH 研究主线图：按工作区管理研究目标、假设、DAG、实验台账及论文与服务器进度关联",
   "license": "MIT",
   "type": "module",

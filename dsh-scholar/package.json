@@ -1,6 +1,6 @@
 {
   "name": "dsh-scholar-desk",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "DSH 学者工作台：论文库、PDF 精读与追问、多篇对比、Idea 书柜和知识图谱",
   "license": "MIT",
   "type": "module",
