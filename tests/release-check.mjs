@@ -42,7 +42,7 @@ const currentIssues = issues.splice(0);
 inspect('git-history', git('log', '--all', '--format=', '-p', '--no-ext-diff'));
 const historyIssues = issues.splice(0);
 if (!process.env.npm_execpath) throw Error('Run npm run check:release.');
-for (const plugin of ['dsh-scholar', 'dsh-server-dashboard', 'dsh-trajectory']) {
+for (const plugin of ['dsh-scholar', 'dsh-server-dashboard', 'dsh-trajectory', 'dsh-dispatch']) {
  const cwd = resolve(root, plugin), pkg = JSON.parse(await readFile(resolve(cwd, 'package.json'), 'utf8'));
  const [pack] = JSON.parse(execFileSync(process.execPath, [process.env.npm_execpath, 'pack', '--dry-run', '--ignore-scripts', '--json'], { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true }));
  const names = new Set(pack.files.map(f => f.path));
