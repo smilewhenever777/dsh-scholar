@@ -1,0 +1,4 @@
+# dsh-dispatch bundle layer — applied when a profile lists this bundle.
+- insert:
+    - id: dsh-dispatch
+      name: dsh-dispatch

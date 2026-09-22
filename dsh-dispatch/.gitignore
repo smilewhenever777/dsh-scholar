@@ -1,0 +1,6 @@
+# build artifacts & local state
+node_modules/
+dist/
+dist-client/
+probe-results/
+*.tgz

@@ -8,6 +8,7 @@ import {
   statusColor, T, TrajStyles, truncate,
 } from './ui';
 import { EDGE_KIND_LABELS, NODE_KIND_LABELS, STATUS_LABELS } from './locales';
+import { api } from './api';
 
 /* ---------- geometry constants (v2: 大信息卡 + 画布感) ---------- */
 const NODE_W = 230;
@@ -181,6 +182,54 @@ export function TrajGraphView({ t, file, progress, filter, onFilter, statusFilte
     dragOffsets.current = new Map();
     fitOnLoad.current = true; // 切换项目:重置拖拽偏移 + 重新适配视图
   }, [projectId]);
+
+  /* P4 派发:dsh-dispatch 在装时,跟随绑定工作区的活跃派发(10s,页面隐藏暂停)。
+   * 按钮态/徽标与 /dispatch/list 共用同一数据;插件缺席则整个入口隐藏。 */
+  const wsKey = file?.project.workspaceKey ?? null;
+  const [dispatchActive, setDispatchActive] = useState<Map<string, { phase: string; createdAt: number }>>(new Map());
+  const [dispatchAvailable, setDispatchAvailable] = useState(false);
+  const [dispatchStarting, setDispatchStarting] = useState(false);
+  useEffect(() => {
+    setDispatchAvailable(false);
+    if (!wsKey) { setDispatchActive(new Map()); return; }
+    let alive = true;
+    const load = () => {
+      if (document.hidden) return;
+      api<{ dispatches: { id: string; phase: string; createdAt: number; node: { nodeId: string } }[] }>(`/dispatch/list?ws=${encodeURIComponent(wsKey)}`)
+        .then((r) => {
+          if (!alive) return;
+          setDispatchAvailable(true);
+          const m = new Map<string, { phase: string; createdAt: number }>();
+          for (const d of r.dispatches) if (d.phase !== 'finished') m.set(d.node.nodeId, { phase: d.phase, createdAt: d.createdAt });
+          setDispatchActive(m);
+        })
+        .catch(() => { if (alive) setDispatchAvailable(false); });
+    };
+    load();
+    const timer = setInterval(load, 10_000);
+    const onVis = () => { if (!document.hidden) load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { alive = false; clearInterval(timer); document.removeEventListener('visibilitychange', onVis); };
+  }, [wsKey]);
+  const onDispatchNode = async (node: TrajNode) => {
+    if (!wsKey || !file || dispatchStarting) return;
+    setDispatchStarting(true);
+    try {
+      const r = await api<{ dispatchId: string }>('/dispatch/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          targetType: 'traj_node', projectId: file.project.id, nodeId: node.id, ws: wsKey,
+          idempotencyKey: `ui-${(globalThis.crypto?.randomUUID?.() ?? String(Date.now() + Math.random()))}`,
+        }),
+      });
+      setDispatchActive((m) => new Map(m).set(node.id, { phase: 'queued', createdAt: Date.now() }));
+      void r;
+    } catch (e) {
+      window.alert(`派发失败:${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDispatchStarting(false);
+    }
+  };
 
   // dragTick 入 deps:节点拖拽改的是 dragOffsets(ref,引用不变),靠 tick 强制重算;
   // 不再原地改 memo 结果(mutate-memo 反模式)
@@ -804,6 +853,30 @@ export function TrajGraphView({ t, file, progress, filter, onFilter, statusFilte
                   );
                 })}
               </div>
+
+              {dispatchAvailable && (() => {
+                const act = dispatchActive.get(selected.id);
+                if (act) {
+                  const mins = Math.max(1, Math.round((Date.now() - act.createdAt) / 60000));
+                  return (
+                    <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: 'var(--dsw-alias-state-business-primary, #4d6bfe)' }}>
+                      <span>🤖</span><span>{t('dispatch.executing')} · {mins}m · {act.phase}</span>
+                    </div>
+                  );
+                }
+                if (!wsKey || !['todo', 'blocked'].includes(selected.status)) return null;
+                return (
+                  <button type="button" className="traj-press" disabled={dispatchStarting}
+                    onClick={() => void onDispatchNode(selected)}
+                    title={t('dispatch.executeHint')}
+                    style={{
+                      marginTop: 6, height: 20, borderRadius: 5, cursor: 'pointer', fontSize: 10.5, width: '100%',
+                      border: '1px solid var(--dsw-alias-state-business-primary, rgba(77,107,254,.45))',
+                      background: 'var(--dsw-alias-bg-layer-1, rgba(127,127,127,.12))', color: 'var(--dsw-alias-state-business-primary, #4d6bfe)',
+                    }}
+                  >{dispatchStarting ? '…' : t('dispatch.execute')}</button>
+                );
+              })()}
 
               {selected.detail && (
                 <div style={{ marginTop: 6, fontSize: 10.5, color: T.secondary, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>

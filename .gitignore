@@ -6,6 +6,7 @@
 !/dsh-scholar/
 !/dsh-server-dashboard/
 !/dsh-trajectory/
+!/dsh-dispatch/
 !/tests/
 !/package.json
 !/package-lock.json

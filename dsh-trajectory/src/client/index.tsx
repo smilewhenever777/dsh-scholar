@@ -1136,6 +1136,14 @@ export function apply(ctx: any) {
   // 官方右侧 Sidebar 页签(0.1.5+):旧宿主无该服务时静默跳过
   registerTrajRightbar(ctx);
 
+  // P4:dsh-dispatch 面板/卡片深链 → 主线图聚焦该节点
+  const onDispatchNav = (ev: Event) => {
+    const d = (ev as CustomEvent).detail as { nodeId?: string } | undefined;
+    if (d?.nodeId) navBus.go('graph', d.nodeId);
+  };
+  window.addEventListener('dsh-dispatch-nav', onDispatchNav as EventListener);
+  ctx.effect(() => () => window.removeEventListener('dsh-dispatch-nav', onDispatchNav as EventListener), 'dsh-trajectory: dispatch nav');
+
   // capture shell services for workspace resolution (kanban pattern)
   try {
     shell.sessions = ctx.get ? ctx.get('sessions') : undefined;

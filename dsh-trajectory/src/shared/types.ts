@@ -114,8 +114,43 @@ export interface TrajNode {
   tags?: string[];
   /** 实验台账:这条线路上已发生的工作(按时间倒序展示) */
   entries?: TrajEntry[];
+  /** P2 派发所有权(DISPATCH-DESIGN-REVISED.md §5.5);无派发时缺省 */
+  dispatchClaim?: TrajDispatchClaim;
+  /** P2 派发所有权历史(release 审计 + finalize 幂等回执) */
+  dispatchHistory?: TrajDispatchHistoryEntry[];
   createdAt: number;
   updatedAt: number;
+}
+
+/* ═══════════════ P2:派发所有权(§5.5) ═══════════════ */
+
+/** 活跃派发所有权:dispatch 侧条件写入的唯一凭据。 */
+export interface TrajDispatchClaim {
+  dispatchId: string;
+  childSessionId: string;
+  /** 节点所有权代次;人工接管/语义编辑令整个 claim 失效,不靠 epoch 保密。 */
+  epoch: number;
+  /** 领取时的任务语义指纹(§5.5:排除执行自身产生的台账/状态/派发管理字段)。 */
+  taskFingerprint: string;
+  claimedAt: number;
+  /** 执行者写入开关:普通取消/报告提交只关此开关,宿主保留 claim 收尾;takeover 才废整个 claim。 */
+  workerWrites: boolean;
+}
+
+export type TrajDispatchReleaseReason =
+  | 'finalize'
+  | 'takeover'
+  | 'human-edit'
+  | 'workspace-rebound';
+
+export interface TrajDispatchHistoryEntry {
+  dispatchId: string;
+  epoch: number;
+  claimedAt: number;
+  releasedAt: number;
+  releasedReason: TrajDispatchReleaseReason;
+  /** finalize 幂等回执:同 operationId 重试返回原回执,不重复台账(T21)。 */
+  receipt?: { operationId: string; appliedAt: number };
 }
 
 export interface TrajEdge {

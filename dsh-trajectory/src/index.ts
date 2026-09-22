@@ -19,7 +19,7 @@ import z from 'schemastery';
 import type {} from '@deepseek-ai/dsh-settings';
 import type { TrajConfig } from './shared/types.js';
 import { TrajStore } from './store.js';
-import { registerTrajRoutes } from './routes.js';
+import { registerDispatchOpRoute, registerTrajRoutes } from './routes.js';
 import { registerTrajTools } from './tools.js';
 import { registerTrajPrompt } from './prompt.js';
 
@@ -91,6 +91,7 @@ export function apply(ctx: Context) {
   });
 
   registerTrajRoutes(ctx, getStore, getConfig, updateConfig);
+  registerDispatchOpRoute(ctx, getStore);
   registerTrajTools(ctx, getStore);
   registerTrajPrompt(ctx, { getStore: () => store });
 

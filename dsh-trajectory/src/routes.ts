@@ -15,6 +15,7 @@ import type { TrajConfig, TrajEdge, TrajNodeKind, TrajStatus } from './shared/ty
 import { TRAJ_NODE_KINDS, TRAJ_STATUSES } from './shared/types.js';
 import type { TrajStore } from './store.js';
 import { countsByStatus, normalizeWorkspaceKey } from './domain.js';
+import { ensureServiceToken, tokenMatches } from './dispatchop.js';
 
 const NodeInputSchema = z.object({
   kind: z.union([...TRAJ_NODE_KINDS]).default('other'),
@@ -584,6 +585,103 @@ export function registerTrajRoutes(
         sendJson(res, 405, { error: 'method not allowed' });
       } catch (err) {
         sendJson(res, errorStatus(err), { error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  } satisfies WebRoute));
+}
+
+/* ═══════════════ P2:派发操作入口(§5.4,/traj/dispatch-op) ═══════════════ */
+
+/**
+ * 版本化派发契约入口:仅接受固定动作 read/claim/progress/finalize/revoke。
+ * 服务身份:请求必须携带与 $DSH_HOME/.dispatch-service-token 一致的 x-dispatch-token
+ * (同宿主 dispatch 插件持有;凭据不进 prompt,子代理工具白名单下模型无法读取文件)。
+ * loopback 三重守卫继续保留,但不替代服务身份。
+ */
+export function registerDispatchOpRoute(ctx: Context, getStore: () => Promise<TrajStore>): void {
+  let token: string | null = null;
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/traj/dispatch-op',
+    handler: async (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => {
+      try {
+        if (!guardRoute(req, res)) return;
+        if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+        // 服务身份认证(§5.4):token 不可得时拒绝开放写入路径
+        if (!token) token = ensureServiceToken();
+        const provided = String(req.headers['x-dispatch-token'] ?? '');
+        if (!tokenMatches(provided, token)) {
+          return sendJson(res, 403, { ok: false, code: 'UNAUTHORIZED', error: '服务身份校验失败' });
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const action = String(body.action ?? '');
+        const store = await getStore();
+        const str = (k: string): string => (typeof body[k] === 'string' ? body[k] as string : '');
+
+        switch (action) {
+          case 'read': {
+            const task = store.dispatchRead(str('projectId'), str('nodeId'));
+            if (!task) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+            return sendJson(res, 200, { ok: true, task });
+          }
+          case 'claim': {
+            const r = await store.dispatchClaim({
+              dispatchId: str('dispatchId'),
+              childSessionId: str('childSessionId'),
+              projectId: str('projectId'),
+              nodeId: str('nodeId'),
+              expectedFingerprint: str('expectedFingerprint'),
+            });
+            return sendJson(res, r.ok ? 200 : r.code === 'NOT_FOUND' ? 404 : 409, r.ok ? { ok: true, epoch: r.epoch, fingerprint: r.fingerprint } : r);
+          }
+          case 'progress': {
+            const r = await store.dispatchProgress({
+              dispatchId: str('dispatchId'),
+              projectId: str('projectId'),
+              nodeId: str('nodeId'),
+              operationId: str('operationId'),
+              sequence: Number(body.sequence ?? 0),
+              title: str('title'),
+              payload: body.payload,
+              metrics: body.metrics,
+            });
+            return sendJson(res, r.ok ? 200 : r.code === 'NOT_FOUND' ? 404 : 409, r);
+          }
+          case 'finalize': {
+            const outcome = str('outcome');
+            if (!['done', 'failed', 'blocked', 'aborted'].includes(outcome)) {
+              return sendJson(res, 422, { ok: false, code: 'VALIDATION', detail: `非法 outcome:${outcome}` });
+            }
+            const r = await store.dispatchFinalize({
+              dispatchId: str('dispatchId'),
+              projectId: str('projectId'),
+              nodeId: str('nodeId'),
+              operationId: str('operationId'),
+              outcome: outcome as 'done' | 'failed' | 'blocked' | 'aborted',
+              summary: str('summary'),
+              reasonCode: str('reasonCode'),
+            });
+            return sendJson(res, r.ok ? 200 : r.code === 'NOT_FOUND' ? 404 : 409, r);
+          }
+          case 'revoke': {
+            const mode = str('mode');
+            if (!['worker_only', 'takeover'].includes(mode)) {
+              return sendJson(res, 422, { ok: false, detail: `非法 mode:${mode}` });
+            }
+            const r = await store.dispatchRevoke({
+              dispatchId: str('dispatchId'),
+              projectId: str('projectId') || undefined,
+              nodeId: str('nodeId') || undefined,
+              mode: mode as 'worker_only' | 'takeover',
+            });
+            return sendJson(res, 200, r);
+          }
+          default:
+            return sendJson(res, 422, { ok: false, code: 'VALIDATION', detail: `未知 action:${action}` });
+        }
+      } catch (err) {
+        sendJson(res, errorStatus(err), { ok: false, error: err instanceof Error ? err.message : String(err) });
       }
     },
   } satisfies WebRoute));

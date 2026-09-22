@@ -10,14 +10,15 @@
  * <file>.bad with a warning) so a single bad write never breaks the store.
  */
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { TrajEdge, TrajEntry, TrajGoal, TrajGoalLog, TrajHypothesis, TrajHypStatus, TrajNode, TrajProject, TrajProjectFile, TrajStats, TrajTrack } from './shared/types.js';
+import type { TrajDispatchClaim, TrajDispatchHistoryEntry, TrajDispatchReleaseReason, TrajEdge, TrajEntry, TrajGoal, TrajGoalLog, TrajHypothesis, TrajHypStatus, TrajNode, TrajProject, TrajProjectFile, TrajStats, TrajTrack } from './shared/types.js';
 import { TRAJ_STATUSES } from './shared/types.js';
+import { computeDispatchFingerprint, type TrajTaskRead } from './dispatchop.js';
 import {
   applyNodePatch, applyHypothesisPatch, countsByStatus, createEntry, createGoal, createGoalLog,
   createHypothesis, createNode, applyProjectPatch, MAX_EDGES, MAX_NODES, MAX_PROJECTS,
-  newEdgeValidated, newProjectId, normalizeMainline, normalizeWorkspaceKey, reviseGoal, wsBasename,
+  newEdgeValidated, newProjectId, normalizeMainline, normalizeMetrics, normalizeWorkspaceKey, reviseGoal, wsBasename,
 } from './domain.js';
 import type { NodeInput, NodePatch } from './domain.js';
 
@@ -237,9 +238,15 @@ export class TrajStore {
           && normalizeWorkspaceKey(x.project.workspaceKey).toLowerCase() === lower,
         );
         if (other) throw new Error(`该工作区已绑定项目「${other.project.name}」`);
-        f.project.workspaceKey = key;
-      } else {
-        delete f.project.workspaceKey;
+      }
+      // P2(§5.5):工作区改绑影响任务绑定 → 撤销本项目全部派发所有权
+      const prevKey = f.project.workspaceKey;
+      if (key) f.project.workspaceKey = key;
+      else delete f.project.workspaceKey;
+      if ((f.project.workspaceKey ?? '') !== (prevKey ?? '')) {
+        for (let i = 0; i < f.nodes.length; i++) {
+          if (f.nodes[i].dispatchClaim) this.releaseClaimOnNode(f.nodes[i], 'workspace-rebound');
+        }
       }
       await this.saveFile(f);
       return f.project;
@@ -569,6 +576,12 @@ export class TrajStore {
       }
       const idx = file.nodes.findIndex((n) => n.id === id);
       const next = applyNodePatch(file.nodes[idx], patch);
+      // P2(§5.5):人工语义/管理编辑撤销派发所有权——即使指纹未变(status 编辑)。
+      // entries 整体替换也视为人工编辑;addEntry(台账追加)不在此列。
+      if (file.nodes[idx].dispatchClaim
+        && ['title', 'kind', 'status', 'detail', 'refs', 'tags', 'hypothesisId', 'entries'].some((k) => (patch as Record<string, unknown>)[k] !== undefined)) {
+        this.releaseClaimOnNode(next, 'human-edit');
+      }
       file.nodes.splice(idx, 1, next);
       if (patch.mainline === false) file.project.mainline = file.project.mainline.filter(x => x !== id);
       else if (patch.mainline === true && !file.project.mainline.includes(id)) file.project.mainline.push(id);
@@ -666,5 +679,247 @@ export class TrajStore {
       dir: this.dir,
       activeProjectName: active?.project.name,
     };
+  }
+
+  /* ═══════════════ P2:派发四动作(§5.4/§5.5,DISPATCH-DESIGN-REVISED.md) ═══════════════ */
+
+  /** 把活跃 claim 移入历史(保留审计);不动 workerWrites 之外的字段。 */
+  private releaseClaimOnNode(node: TrajNode, reason: TrajDispatchReleaseReason, now = Date.now()): void {
+    const claim = node.dispatchClaim;
+    if (!claim) return;
+    const rec: TrajDispatchHistoryEntry = {
+      dispatchId: claim.dispatchId,
+      epoch: claim.epoch,
+      claimedAt: claim.claimedAt,
+      releasedAt: now,
+      releasedReason: reason,
+    };
+    node.dispatchClaim = undefined;
+    node.dispatchHistory = [...(node.dispatchHistory ?? []), rec].slice(-50);
+  }
+
+  /** 同 file 内的下一个所有权代次(扫 claim + history 取最大值 +1,随数据持久)。 */
+  private nextDispatchEpoch(file: TrajProjectFile): number {
+    let max = 0;
+    for (const n of file.nodes) {
+      if (n.dispatchClaim) max = Math.max(max, n.dispatchClaim.epoch);
+      for (const h of n.dispatchHistory ?? []) max = Math.max(max, h.epoch);
+    }
+    return max + 1;
+  }
+
+  /** 组装只读任务卡 + 指纹(指纹由 trajectory 单侧计算,dispatch 原样带回比对)。 */
+  private buildTaskRead(file: TrajProjectFile, node: TrajNode): TrajTaskRead {
+    const goal = this.getActiveGoal(file.project.id);
+    const hypothesis = node.hypothesisId ? (file.hypotheses.find((h) => h.id === node.hypothesisId) ?? null) : null;
+    const fingerprint = computeDispatchFingerprint({ project: file.project, node, goal, hypothesis });
+    const refs: Record<string, string> = {};
+    for (const k of Object.keys(node.refs ?? {})) {
+      const v = (node.refs as Record<string, string> | undefined)?.[k];
+      if (typeof v === 'string' && v) refs[k] = v;
+    }
+    return {
+      projectId: file.project.id,
+      nodeId: node.id,
+      workspaceKey: file.project.workspaceKey ?? '',
+      goal: goal ? { text: goal.text, version: goal.version } : null,
+      hypothesis: hypothesis ? { id: hypothesis.id, text: hypothesis.text, status: hypothesis.status, track: hypothesis.track } : null,
+      node: {
+        title: node.title,
+        kind: node.kind,
+        status: node.status,
+        detail: node.detail ?? '',
+        tags: [...(node.tags ?? [])],
+        refs,
+      },
+      entriesCount: node.entries?.length ?? 0,
+      fingerprint,
+    };
+  }
+
+  /** read:只读,不进临界区(内存态即时快照)。 */
+  dispatchRead(projectId: string, nodeId: string): TrajTaskRead | null {
+    const file = this.resolveFileForNode(nodeId, projectId);
+    if (!file) return null;
+    const node = file.nodes.find((n) => n.id === nodeId);
+    if (!node) return null;
+    return this.buildTaskRead(file, node);
+  }
+
+  /** 按 projectId+nodeId 精确定位;缺省时按活跃 claim 的 dispatchId 全库定位
+   *  (dispatch 侧 progress/finalize 只需携带 dispatchId,无需知道节点坐标)。 */
+  private locateClaimNode(projectId?: string, nodeId?: string, dispatchId?: string): { file: TrajProjectFile; idx: number } | null {
+    if (projectId && nodeId) {
+      const file = this.resolveFileForNode(nodeId, projectId);
+      if (!file) return null;
+      const idx = file.nodes.findIndex((n) => n.id === nodeId);
+      return idx >= 0 ? { file, idx } : null;
+    }
+    if (dispatchId) {
+      for (const f of this.files.values()) {
+        const idx = f.nodes.findIndex((n) => n.dispatchClaim?.dispatchId === dispatchId);
+        if (idx >= 0) return { file: f, idx };
+      }
+    }
+    return null;
+  }
+
+  async dispatchClaim(input: {
+    dispatchId: string; childSessionId: string; projectId: string; nodeId: string; expectedFingerprint: string;
+  }): Promise<{ ok: true; epoch: number; fingerprint: string } | { ok: false; code: 'NODE_OCCUPIED' | 'TASK_CHANGED' | 'NOT_FOUND' | 'SUPERSEDED'; detail: string }> {
+    return this.mutate(async () => {
+      const file = this.resolveFileForNode(input.nodeId, input.projectId);
+      if (!file) return { ok: false, code: 'NOT_FOUND', detail: `节点 ${input.projectId}/${input.nodeId} 不存在` } as const;
+      const idx = file.nodes.findIndex((n) => n.id === input.nodeId);
+      const node = file.nodes[idx];
+      if (node.dispatchClaim) {
+        if (node.dispatchClaim.dispatchId === input.dispatchId) {
+          // T07:幂等重领 → 原 epoch
+          return { ok: true, epoch: node.dispatchClaim.epoch, fingerprint: node.dispatchClaim.taskFingerprint } as const;
+        }
+        return { ok: false, code: 'NODE_OCCUPIED', detail: `节点已被派发 ${node.dispatchClaim.dispatchId} 领取(epoch=${node.dispatchClaim.epoch})` } as const;
+      }
+      if (node.dispatchHistory?.some((h) => h.dispatchId === input.dispatchId)) {
+        return { ok: false, code: 'SUPERSEDED', detail: '该派发的领取已释放;重派需新派发' } as const;
+      }
+      const task = this.buildTaskRead(file, node);
+      if (task.fingerprint !== input.expectedFingerprint) {
+        return { ok: false, code: 'TASK_CHANGED', detail: '任务语义指纹已变化,请重新读取任务' } as const;
+      }
+      const now = Date.now();
+      const claim: TrajDispatchClaim = {
+        dispatchId: input.dispatchId,
+        childSessionId: input.childSessionId,
+        epoch: this.nextDispatchEpoch(file),
+        taskFingerprint: task.fingerprint,
+        claimedAt: now,
+        workerWrites: true,
+      };
+      const next: TrajNode = { ...node, dispatchClaim: claim, updatedAt: now };
+      file.nodes.splice(idx, 1, next);
+      await this.saveFile(file);
+      return { ok: true, epoch: claim.epoch, fingerprint: claim.taskFingerprint } as const;
+    });
+  }
+
+  async dispatchProgress(input: {
+    dispatchId: string; projectId: string; nodeId: string; operationId: string; sequence: number; title: string; payload?: unknown; metrics?: unknown;
+  }): Promise<{ ok: boolean; code?: 'SUPERSEDED' | 'WRITES_DISABLED' | 'CONFLICT' | 'NOT_FOUND'; detail: string }> {
+    return this.mutate(async () => {
+      const located = this.locateClaimNode(input.projectId, input.nodeId, input.dispatchId);
+      if (!located) return { ok: false, code: 'NOT_FOUND', detail: '节点不存在' };
+      const { file, idx } = located;
+      const node = file.nodes[idx];
+      const claim = node.dispatchClaim;
+      if (!claim || claim.dispatchId !== input.dispatchId) {
+        return { ok: false, code: 'SUPERSEDED', detail: '无本派发的有效领取(可能已被接管/终写)' };
+      }
+      if (!claim.workerWrites) return { ok: false, code: 'WRITES_DISABLED', detail: '执行者写入已封闭(worker_only)' };
+      // 幂等:operationId 决定台账 id → 同 id 同内容重放,不同内容冲突
+      const id = `t_d${createHash('sha256').update(input.operationId).digest('hex').slice(0, 20)}`;
+      const dataStr = JSON.stringify(input.payload ?? null);
+      const dup = node.entries?.find((e) => e.id === id);
+      if (dup) {
+        return dup.title.includes(input.title) && dup.data === dataStr
+          ? { ok: true, detail: '幂等重放' }
+          : { ok: false, code: 'CONFLICT', detail: '同 operationId 不同内容' };
+      }
+      const now = Date.now();
+      // 结构化指标走 TrajEntry.metrics(§6.2 实验类证据),经 normalizeMetrics 校验
+      const metrics = normalizeMetrics(input.metrics);
+      const entry: TrajEntry = {
+        id,
+        ts: now,
+        title: `⚡派发#${input.sequence} ${input.title}`.slice(0, 120),
+        data: dataStr === 'null' ? undefined : dataStr,
+        ...(metrics.length ? { metrics } : {}),
+      };
+      const next: TrajNode = { ...node, entries: [...(node.entries ?? []), entry], updatedAt: now };
+      // 台账是执行自身产物:不改指纹、不撤所有权(§5.5)
+      file.nodes.splice(idx, 1, next);
+      await this.saveFile(file);
+      return { ok: true, detail: '已追加' };
+    });
+  }
+
+  async dispatchFinalize(input: {
+    dispatchId: string; projectId: string; nodeId: string; operationId: string;
+    outcome: 'done' | 'failed' | 'blocked' | 'aborted'; summary: string; reasonCode: string;
+  }): Promise<{ ok: true; receipt: { operationId: string; appliedAt: number }; detail: string } | { ok: false; code: 'SUPERSEDED' | 'NOT_FOUND'; detail: string }> {
+    return this.mutate(async () => {
+      const located = this.locateClaimNode(input.projectId, input.nodeId, input.dispatchId);
+      if (!located) return { ok: false, code: 'NOT_FOUND', detail: '节点不存在(已删除?)' } as const;
+      const { file, idx } = located;
+      const node = file.nodes[idx];
+      // T21:同 operationId(或同派发任一终写)重试 → 原回执,不重复台账
+      const prior = node.dispatchHistory?.find((h) => h.dispatchId === input.dispatchId && h.receipt);
+      if (prior?.receipt) return { ok: true, receipt: prior.receipt, detail: '幂等重放(原回执)' } as const;
+      const claim = node.dispatchClaim;
+      if (!claim || claim.dispatchId !== input.dispatchId) {
+        return { ok: false, code: 'SUPERSEDED', detail: '所有权已被接管/释放' } as const;
+      }
+      const now = Date.now();
+      // §5.6 状态映射:done→done;blocked/failed→blocked(可重审,保存原因);aborted→保持(不自动回 todo)
+      const nextStatus = input.outcome === 'done' ? 'done' : (input.outcome === 'blocked' || input.outcome === 'failed') ? 'blocked' : undefined;
+      const entry: TrajEntry = {
+        id: `t_f${createHash('sha256').update(input.operationId).digest('hex').slice(0, 20)}`,
+        ts: now,
+        title: `🏁派发终局:${input.outcome}(${input.reasonCode})`.slice(0, 120),
+        data: input.summary,
+        conclusion: input.outcome === 'done' ? input.summary.slice(0, 300) : undefined,
+      };
+      const next: TrajNode = {
+        ...node,
+        entries: [...(node.entries ?? []), entry],
+        ...(nextStatus ? { status: nextStatus } : {}),
+        updatedAt: now,
+      };
+      next.dispatchClaim = undefined;
+      next.dispatchHistory = [...(next.dispatchHistory ?? []), {
+        dispatchId: claim.dispatchId,
+        epoch: claim.epoch,
+        claimedAt: claim.claimedAt,
+        releasedAt: now,
+        releasedReason: 'finalize' as const,
+        receipt: { operationId: input.operationId, appliedAt: now },
+      }].slice(-50);
+      // 结论+状态+最终台账+释放所有权:同一次原子存储提交(§5.4)
+      file.nodes.splice(idx, 1, next);
+      await this.saveFile(file);
+      return { ok: true, receipt: { operationId: input.operationId, appliedAt: now }, detail: '已终写' } as const;
+    });
+  }
+
+  /** 两级撤权(§5.5):worker_only 关执行者写入保留宿主收尾 claim;takeover 废整个所有权。 */
+  async dispatchRevoke(input: {
+    dispatchId: string; projectId?: string; nodeId?: string; mode: 'worker_only' | 'takeover';
+  }): Promise<{ ok: boolean; detail: string }> {
+    return this.mutate(async () => {
+      let file: TrajProjectFile | null = null;
+      let idx = -1;
+      if (input.projectId && input.nodeId) {
+        file = this.resolveFileForNode(input.nodeId, input.projectId);
+        if (file) idx = file.nodes.findIndex((n) => n.id === input.nodeId);
+      }
+      if (!file || idx < 0) {
+        for (const f of this.files.values()) {
+          const i = f.nodes.findIndex((n) => n.dispatchClaim?.dispatchId === input.dispatchId);
+          if (i >= 0) { file = f; idx = i; break; }
+        }
+      }
+      if (!file || idx < 0) return { ok: true, detail: '无在册所有权(视为已撤)' };
+      const node = file.nodes[idx];
+      const claim = node.dispatchClaim;
+      if (!claim || claim.dispatchId !== input.dispatchId) return { ok: true, detail: '无本派发所有权(视为已撤)' };
+      const now = Date.now();
+      if (input.mode === 'takeover') {
+        this.releaseClaimOnNode(node, 'takeover', now);
+      } else {
+        node.dispatchClaim = { ...claim, workerWrites: false };
+      }
+      node.updatedAt = now;
+      await this.saveFile(file);
+      return { ok: true, detail: input.mode === 'takeover' ? '所有权已撤销(takeover)' : '执行者写入已封闭(worker_only)' };
+    });
   }
 }
