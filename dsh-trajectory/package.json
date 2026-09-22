@@ -33,7 +33,8 @@
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "smoke": "node scripts/smoke-test.mjs",
-    "typecheck:client": "tsc -p tsconfig.client.json --noEmit"
+    "typecheck:client": "tsc -p tsconfig.client.json --noEmit",
+    "test": "npm run build && node --test \"tests/*.test.mjs\""
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",

@@ -91,6 +91,7 @@ export function apply(ctx: Context) {
   });
 
   registerTrajRoutes(ctx, getStore, getConfig, updateConfig);
+
   registerTrajTools(ctx, getStore);
   registerTrajPrompt(ctx, { getStore: () => store });
 

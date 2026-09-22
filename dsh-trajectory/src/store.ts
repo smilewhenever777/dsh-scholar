@@ -10,14 +10,14 @@
  * <file>.bad with a warning) so a single bad write never breaks the store.
  */
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { TrajEdge, TrajEntry, TrajGoal, TrajGoalLog, TrajHypothesis, TrajHypStatus, TrajNode, TrajProject, TrajProjectFile, TrajStats, TrajTrack } from './shared/types.js';
 import { TRAJ_STATUSES } from './shared/types.js';
 import {
   applyNodePatch, applyHypothesisPatch, countsByStatus, createEntry, createGoal, createGoalLog,
   createHypothesis, createNode, applyProjectPatch, MAX_EDGES, MAX_NODES, MAX_PROJECTS,
-  newEdgeValidated, newProjectId, normalizeMainline, normalizeWorkspaceKey, reviseGoal, wsBasename,
+  newEdgeValidated, newProjectId, normalizeMainline, normalizeMetrics, normalizeWorkspaceKey, reviseGoal, wsBasename,
 } from './domain.js';
 import type { NodeInput, NodePatch } from './domain.js';
 
@@ -237,10 +237,9 @@ export class TrajStore {
           && normalizeWorkspaceKey(x.project.workspaceKey).toLowerCase() === lower,
         );
         if (other) throw new Error(`该工作区已绑定项目「${other.project.name}」`);
-        f.project.workspaceKey = key;
-      } else {
-        delete f.project.workspaceKey;
       }
+      if (key) f.project.workspaceKey = key;
+      else delete f.project.workspaceKey;
       await this.saveFile(f);
       return f.project;
     });

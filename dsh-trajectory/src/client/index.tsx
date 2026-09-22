@@ -1136,6 +1136,7 @@ export function apply(ctx: any) {
   // 官方右侧 Sidebar 页签(0.1.5+):旧宿主无该服务时静默跳过
   registerTrajRightbar(ctx);
 
+
   // capture shell services for workspace resolution (kanban pattern)
   try {
     shell.sessions = ctx.get ? ctx.get('sessions') : undefined;

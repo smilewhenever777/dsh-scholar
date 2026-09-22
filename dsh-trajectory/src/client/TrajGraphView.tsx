@@ -8,6 +8,7 @@ import {
   statusColor, T, TrajStyles, truncate,
 } from './ui';
 import { EDGE_KIND_LABELS, NODE_KIND_LABELS, STATUS_LABELS } from './locales';
+import { api } from './api';
 
 /* ---------- geometry constants (v2: 大信息卡 + 画布感) ---------- */
 const NODE_W = 230;
