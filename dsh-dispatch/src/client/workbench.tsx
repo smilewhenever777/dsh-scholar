@@ -561,7 +561,7 @@ function Workbench() {
     }
     finally { setBusy(false); }
   }
-  function begin(kind: 'project' | 'agent' | 'task' | 'squad', id?: string) {
+  function begin(kind: 'project' | 'agent' | 'task' | 'squad' | 'automation', id?: string) {
     const item = kind === 'project' ? overview.projects.find((p) => p.id === id) : kind === 'agent' ? overview.agents.find((a) => a.id === id) : kind === 'squad' ? squads.find((s) => s.id === id) : kind === 'automation' ? autoRules.find((r) => r.id === id) as unknown as Record<string, unknown> : overview.tasks.find((t) => t.id === id);
     setEditing(id ?? null);
     setFormError('');
