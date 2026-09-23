@@ -488,8 +488,6 @@ function Workbench() {
       {selectedRun && <RunPanel key={selectedRun.id} run={selectedRun}
         latestProgress={[...selected.timeline].reverse().find((event) => event.kind === 'progress' && event.runId === selectedRun.id)}
         onCancel={async () => { await mutate(() => write('/runs/' + selectedRun.id + '/cancel', 'POST', { reason: '用户取消' }), 'detail'); }}
-        onTakeover={async (reason) => { await mutate(() => write('/runs/' + selectedRun.id + '/takeover', 'POST', { reason }), 'detail'); }}
-        onResolve={async (evidence) => { await mutate(() => write('/runs/' + selectedRun.id + '/resolve', 'POST', { evidence }), 'detail'); }}
         onAskTakeover={() => setConfirmReq({
           title: '人工接管本次执行',
           description: '接管会撤销执行者的写入权限并请求其停止;迟到的报告不会再改动任务。请填写接管原因(审计记录)。',
