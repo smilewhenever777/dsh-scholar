@@ -271,7 +271,7 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
     </section>}
     {view === 'activity' && <section className="dsh-wb-panel dsh-wb-run-content dsh-wb-activity-scroll" ref={scrollerRef}>
       <div className="dsh-wb-run-section-head"><div><h3>执行过程</h3><p>Agent 消息按对话排版;工具调用卡片可展开参数与结果。</p></div>
-        <span>{activity.length} 条活动</span></div>
+        <span>{filter === 'all' ? `${activity.length} 条活动` : `显示 ${shown.length} / ${activity.length} 条`}</span></div>
       <div className="dsh-wb-filter" role="group" aria-label="筛选执行活动">
         {([['all', '全部'], ['agent', 'Agent 消息'], ['tool', '工具调用'], ['error', '错误']] as const).map(([key, label]) =>
           <button key={key} type="button" className={filter === key ? 'active' : ''} aria-pressed={filter === key} onClick={() => setFilter(key)}>{label}</button>)}
@@ -532,7 +532,7 @@ function Workbench() {
       <div className="dsh-wb-row" style={{ margin: '16px 0' }}><button className="dsh-wb-btn" disabled={!!selected.owner || ['in_review', 'done'].includes(selected.status)} onClick={() => begin('task', selected.id)}>编辑任务</button>
         {selected.status === 'done' && <button className="dsh-wb-btn" disabled={busy} onClick={() => void mutate(() => write(`/tasks/${selected.id}`, 'PATCH', { expectedRevision: selected.revision, status: 'todo' }), 'detail')}>重新打开</button>}
         {['todo', 'blocked'].includes(selected.status) && !selected.owner && <select className="dsh-wb-select" aria-label="修改任务状态" value={selected.status} onChange={(e) => moveTask(selected.id, e.target.value as Status)}><option value="todo">待办</option><option value="blocked">受阻</option></select>}</div>
-      <details className="dsh-wb-panel dsh-wb-task-brief" key={selected.id} open={!selected.runIds.length}>
+      <details className="dsh-wb-panel dsh-wb-task-brief" open={!selected.runIds.length}>
         <summary><b>任务要求与验收标准</b><span>{preview(selected.acceptanceCriteria, 90)}</span></summary>
         <h3>任务目标</h3><p style={{ whiteSpace: 'pre-wrap' }}>{selected.description || '无补充说明'}</p>
         <h3>验收标准</h3><p style={{ whiteSpace: 'pre-wrap' }}>{selected.acceptanceCriteria}</p>
