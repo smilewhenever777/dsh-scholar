@@ -35,6 +35,15 @@ npm run smoke
 > 设计全文见仓库根 `DISPATCH-DESIGN-REVISED.md`(r2);P0 运行时实测结论见
 > [docs/runtime-capabilities.md](docs/runtime-capabilities.md)。
 
+## v0.6.0 UI/UX 优化(2026-09-23,四波)
+
+| 波次 | 内容 |
+|---|---|
+| 交互止血 | 错误按发生处渲染(modal/抽屉内);ConfirmModal+toast 替换全部 window.prompt/alert;表单必填校验+autoFocus+焦点陷阱;409 友好+自动刷新重试;看板五列可拖入+非法目标 toast;rightbar 按钮不再卸载重建 |
+| 视觉统一 | 全部颜色经 dsw-alias 令牌+color-mix 派生(亮色宿主自动适配);动效令牌体系(过渡/stagger/滑入/弹入/抖动/脉冲);导航图标化+窄屏适配;统计卡状态语义色;bundle minify(183KB→141KB) |
+| 信息架构 | Run 执行过程对话化(Agent 气泡+头像 chip,安全 markdown 渲染);自动滚动+新事件浮标;总览计数可点带筛选;Agent 指令折叠;旧表中文;抽屉隐藏 revision |
+| 架构打磨 | overview timeline 瘦身(最近 6+总数);?sinceRevision 短路(零负载轮询);讨论区显示截取说明 |
+
 ## 关卡进度
 
 - **P0 运行时语义验证**:✅(探针 + 真实模型三链 + 冷恢复)
