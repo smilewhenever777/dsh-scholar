@@ -229,7 +229,7 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
   const [more, setMore] = React.useState(false);
   const [error, setError] = React.useState('');
   const [view, setView] = React.useState<'overview' | 'activity' | 'raw'>('overview');
-  const [filter, setFilter] = React.useState<'all' | 'agent' | 'tool' | 'error'>('all');
+  const [filter, setFilter] = React.useState<'key' | 'all' | 'agent' | 'tool' | 'error'>('key');
   const [order, setOrder] = React.useState<'asc' | 'desc'>('asc');
   const [copied, setCopied] = React.useState(-1);
   // P0-3:交付物安全预览
@@ -298,7 +298,8 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
     return () => clearInterval(timer);
   }, [load, run.phase]);
   const activity = groupActivity(events);
-  const shownRaw = activity.filter((item) => filter === 'all' || (filter === 'agent' && item.event.kind === 'assistant') ||
+  const shownRaw = activity.filter((item) => filter === 'all' || (filter === 'key' && (item.event.kind === 'assistant' || item.event.error || item.result?.error)) ||
+    (filter === 'agent' && item.event.kind === 'assistant') ||
     (filter === 'tool' && item.event.kind === 'tool_call') || (filter === 'error' && (item.event.error || item.result?.error)));
   // P1-2:顺序切换(评审 §4.4.4)——默认正序;可切倒序(最新在前)
   const shown = order === 'desc' ? [...shownRaw].reverse() : shownRaw;
@@ -375,7 +376,7 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
           <button type="button" className="dsh-wb-order-toggle" aria-label={order === 'asc' ? '切换为最新在前' : '切换为最早在前'} onClick={() => setOrder(order === 'asc' ? 'desc' : 'asc')}>{order === 'asc' ? '↑ 最早在前' : '↓ 最新在前'}</button>
         </div></div>
       <div className="dsh-wb-filter" role="group" aria-label="筛选执行活动">
-        {([['all', '全部'], ['agent', 'Agent 消息'], ['tool', '工具调用'], ['error', '错误']] as const).map(([key, label]) =>
+        {([['key', '关键事件'], ['all', '全部'], ['agent', 'Agent 消息'], ['tool', '工具调用'], ['error', '错误']] as const).map(([key, label]) =>
           <button key={key} type="button" className={filter === key ? 'active' : ''} aria-pressed={filter === key} onClick={() => setFilter(key)}>{label}</button>)}
       </div>
       {error && <div className="dsh-wb-error">{error}</div>}
@@ -445,16 +446,26 @@ function RunHistory({ runs, selectedId, onSelect }: { runs: Run[]; selectedId: s
   </section>;
 }
 function TaskTimeline({ items, onRun }: { items: Timeline[]; onRun: (id: string) => void }) {
+  // 阶段A:活动流重组(评审 §4.3.2)——评论/交付/决定为主线;进度收起为摘要
+  const main = items.filter((e) => e.kind === 'comment' || e.kind === 'review' || (e.kind === 'run' && e.text !== '开始执行'));
+  const collapsed = items.filter((e) => e.kind === 'progress' || (e.kind === 'run' && e.text === '开始执行'));
   const title = (event: Timeline) => event.kind === 'progress' ? '进度更新' : event.kind === 'review' ? '人工验收' :
-    event.kind === 'comment' ? '评论' : event.text === '开始执行' ? '开始执行' : '执行结束';
-  return <div className="dsh-wb-task-timeline">{items.length ? items.map((event) => {
+    event.kind === 'comment' ? '评论' : event.text === '开始执行' ? '开始执行' : 'Agent 交付';
+  const renderEvent = (event: Timeline) => {
     const body = event.kind === 'run' && /^[A-Z_]+:/.test(event.text) ? event.text.slice(event.text.indexOf(':') + 1) : event.text;
     return <article className="dsh-wb-task-event" key={event.id}>
       <div className="dsh-wb-activity-head"><span className="dsh-wb-activity-kind">{title(event)}</span><time>{fmt(event.at)}</time></div>
       <ExpandableText text={body} label="查看事件内容" fold={event.kind === 'run' && event.text !== '开始执行'} />
       {event.runId && <button className="dsh-wb-link" onClick={() => onRun(event.runId!)}>查看关联执行 →</button>}
     </article>;
-  }) : <div className="dsh-wb-empty">暂无讨论或状态更新</div>}</div>;
+  };
+  return <div className="dsh-wb-task-timeline">
+    {main.length ? main.map(renderEvent) : <div className="dsh-wb-empty">暂无讨论、交付或决定</div>}
+    {collapsed.length > 0 && <details className="dsh-wb-collapsed-progress">
+      <summary><b>进度与系统事件</b><span>{collapsed.length} 条已收起</span></summary>
+      {collapsed.map(renderEvent)}
+    </details>}
+  </div>;
 }
 function Workbench() {
   const [page, setPage] = React.useState<Page>('overview');

@@ -121,7 +121,10 @@ export function apply(ctx: Context): void {
   })();
   registerWorkbenchRoutes(ctx, async () => {
     const dispatch = await servicePromise;
-    return dispatch && workbenchInstance ? { workbench: workbenchInstance, dispatch } : null;
+    if (!dispatch || !workbenchInstance) return null;
+    const { SquadService } = await import('./workbench/squad.js');
+    const squad = new SquadService(workbenchStore);
+    return { workbench: workbenchInstance, squad, dispatch };
   });
 
   // §7.1:启动对账(初始退避 ~5s;只扫描,不重放业务任务)

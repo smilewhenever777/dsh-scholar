@@ -322,4 +322,11 @@ export const workbenchCss = `
 .dsh-wb-order-toggle { border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3)); background: transparent; color: var(--dsw-alias-label-caption); border-radius: 6px; padding: 3px 8px; font-size: 10.5px; cursor: pointer; }
 .dsh-wb-order-toggle:hover { color: var(--dsw-alias-label-primary); }
 
+
+/* ---------- 阶段A:活动流重组(进度收起) ---------- */
+.dsh-wb-collapsed-progress { margin-top: 10px; border-top: 1px dashed var(--dsw-alias-border-l2, rgba(127,127,127,.25)); padding-top: 8px; }
+.dsh-wb-collapsed-progress summary { cursor: pointer; color: var(--dsw-alias-label-caption); font-size: 11px; display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+.dsh-wb-collapsed-progress summary span { font-weight: 400; font-size: 10px; }
+.dsh-wb-collapsed-progress[open] summary { margin-bottom: 6px; }
+
 `;
