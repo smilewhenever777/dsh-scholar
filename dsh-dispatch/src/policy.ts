@@ -47,8 +47,9 @@ export function defaultPolicyConfig(): PolicyConfig {
  * 真机实测(2026-09-22):toolFilter 的 deny 对未注册工具名严格报错,且宿主语义本就是
  * "allow 即完备隔离"(被滤工具从子代理提示中消失且拒绝执行)——deny 冗余,不再下发。 */
 export function childToolFilter(requestedAllow?: string[]): { allow: string[] } {
-  const base = requestedAllow?.length ? requestedAllow : DEFAULT_CHILD_TOOL_ALLOW;
-  const allow = base.filter((t) => !(TRAJECTORY_WRITE_TOOLS as readonly string[]).includes(t));
+  const base = requestedAllow === undefined ? DEFAULT_CHILD_TOOL_ALLOW : requestedAllow;
+  const allow = [...new Set(base)].filter((t) => DEFAULT_CHILD_TOOL_ALLOW.includes(t)
+    && !(TRAJECTORY_WRITE_TOOLS as readonly string[]).includes(t));
   return { allow };
 }
 

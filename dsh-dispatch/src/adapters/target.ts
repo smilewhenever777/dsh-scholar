@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import type { TaskSnapshot } from '../types.js';
 import { ServiceError } from '../types.js';
 
-export type TargetRef = { projectId: string; nodeId: string; workspaceId: string; canonicalRoot: string };
+export type TargetRef = { projectId: string; nodeId: string; workspaceId: string; canonicalRoot: string; targetType?: 'traj_node' | 'workbench_task' };
 
 export type ClaimFailureCode = 'NODE_OCCUPIED' | 'TASK_CHANGED' | 'NOT_FOUND' | 'SUPERSEDED';
 
@@ -30,7 +30,7 @@ export interface FinalizeResult {
 }
 
 export interface TargetAdapter {
-  readonly kind: 'memory' | 'trajectory-http';
+  readonly kind: 'memory' | 'trajectory-http' | 'workbench' | 'routed';
   readTask(ref: TargetRef): Promise<{ snapshot: TaskSnapshot; fingerprint: string } | null>;
   /** 幂等:同 dispatchId 重复领取返回原 epoch/指纹(领取回执丢失恢复,T07)。 */
   claim(input: { dispatchId: string; childSessionId: string; ref: TargetRef; expectedFingerprint: string }): Promise<ClaimResult>;

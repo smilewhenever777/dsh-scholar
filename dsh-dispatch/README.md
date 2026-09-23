@@ -1,6 +1,37 @@
 # dsh-dispatch — 研究任务派发引擎
 
-> 状态:**P3 最小真实研究任务闭环已交付并通过真机 E2E**(2026-09-22)。
+## 独立 AI 团队工作台（第一里程碑）
+
+`dsh-dispatch` 现在可以独立于 `dsh-trajectory` 使用。安装插件并重新加载 DSH 客户端后，点击侧栏底部的 **◈ AI 团队**，进入大幅工作台。右侧「任务派发」页签提供状态摘要与入口。
+
+1. 创建项目，绑定一个已存在的本机工作区绝对路径。工作区不能位于 `DSH_HOME` 中，且每个路径只绑定一个项目。
+2. 在 Agent 目录创建执行者，选择 DSH 设置允许的模型、受控工具权限并填写工作指令。
+3. 创建任务，写明目标和验收标准。分派 Agent 后任务仍保持待办；点击「手动运行」才启动子代理。
+4. 在任务详情查看每次 Run 的会话消息、工具调用、结果、报告与证据。正常完成进入「待验收」，只有人工接受才进入「已完成」；填写意见退回后可再次运行，旧 Run 保留。
+
+执行详情默认先显示中文状态、最近进度、报告和证据；「执行过程」把 Agent 消息与工具调用分开展示，长参数和工具结果默认折叠，「原始记录」保留按序事件。任务有多次运行时可选择任意两次对照结果、报告和证据数量。证据区域显示工作区内的完整路径并可复制。
+
+看板支持拖动待办与受阻任务，也可在任务详情使用键盘可操作的状态选择。首版全局仅一个执行槽，忙时返回明确冲突原因，不自动排队。执行者沿用当前受控读取、报告写入和进度工具；工具白名单在服务端收紧。旧 trajectory 派发保留原接口，在工作台的「旧派发历史」中只读展示，不会自动转换为已验收任务。
+
+工作台接口为 `/dispatch/workbench/*`，写入需要当前 `expectedRevision`；失配返回 409。项目、Agent、任务及讨论保存在 `$DSH_HOME/dispatch/workbench.json`，写前留备份，损坏后进入只读故障态。Run 存储仍是 `$DSH_HOME/dispatch/dispatches.json`。会话记录通过 DSH `sessionQuery` 读取，前端只接收该 Run 子会话的可见消息与工具事件；系统提示词和推理内容不会下发。
+
+当前交付范围是第一里程碑。顺序执行的小队与本地定时自动化将在核心闭环验收后实施；停机期间错过的定时触发不会补跑。
+
+### 工作台验证
+
+```bash
+cd dsh-dispatch
+npm test
+npm run smoke
+```
+
+隔离宿主真机脚本需要设置 `DSH_E2E_BASE`（本机 URL）、`DSH_E2E_WS`（独立工作区）和 `DSH_E2E_RECEIPT`（结果 JSON 路径），然后运行 `npm run e2e:workbench`；宿主重启后使用同一组变量运行 `npm run e2e:workbench -- --post-restart`。脚本会调用实际模型并生成两个 Run。
+
+若从旧版升级，请先备份 `DSH_HOME`，升级插件后重启 DSH 宿主并重新加载客户端。`dispatches.json` v2 会升级为 v3 根格式并保留备份；旧 Run 记录保持原样。
+
+---
+
+> 以下 P0–P3 记录保留为原 trajectory 集成的历史验收资料（2026-09-22）。
 > 设计全文见仓库根 `DISPATCH-DESIGN-REVISED.md`(r2);P0 运行时实测结论见
 > [docs/runtime-capabilities.md](docs/runtime-capabilities.md)。
 
@@ -14,7 +45,7 @@
 - **P3 最小真实研究任务闭环**:✅ 附录 B 首任务真机 E2E 全绿(`scripts/e2e-p3.mjs`):
   三日志对比 → 报告文件 + 结构化 metrics 台账(TrajEntry.metrics)+ done 回写;
   **负结果如实报告**(exp_c 低于基线如实写入);不可访问日志 → blocked 且不编造
-- **P4 客户端与发布**:⬜(右侧栏页签/节点按钮/徽标/详情)
+- **P4 客户端与发布**:✅ 右侧栏页签和 trajectory 节点入口已交付；独立工作台见上文。
 
 ## P1 内核结构
 
@@ -87,5 +118,33 @@ node scripts/e2e-p3.mjs          # 附录 B 首任务(三日志对比 + blocked 
 
 ## 明确不做(当前)
 
-客户端 UI(P4)、无人值守任务、多执行槽、受控代码修改与前台执行(待后续按 P0 结论评估放开)。
+无人值守任务、多执行槽、受控代码修改与前台执行(待后续按 P0 结论评估放开)。
 settings 命名空间 `dispatch`(targetBackend 默认 memory;3081 测试环境已设 trajectory)。
+
+## 第三方许可
+
+看板交互打包了 `@dnd-kit/core`、`@dnd-kit/accessibility` 和 `@dnd-kit/utilities`。这些包使用以下 MIT 许可；工作台界面及其他业务代码由本项目实现，没有复制 Multica UI 源码。
+
+```text
+MIT License
+
+Copyright (c) 2021, Claudéric Demers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

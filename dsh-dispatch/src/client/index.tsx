@@ -5,6 +5,7 @@
  */
 import { zh, en } from './locales';
 import { registerDispatchRightbar } from './rightbar';
+import { WorkbenchOverlay, WorkbenchTrigger } from './workbench';
 
 const NS = 'dsh-dispatch';
 const APPLY_FLAG = '__dshDispatchClientApplied';
@@ -21,4 +22,10 @@ export function apply(ctx: any): void {
     ctx.locale.register(NS, { zh, en });
   } catch { /* already registered by a previous apply */ }
   registerDispatchRightbar(ctx);
+  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+    name: 'sidebar.footer.action', id: 'dsh-dispatch-workbench', order: 13, locale: NS,
+  }, WorkbenchTrigger));
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay', id: 'dsh-dispatch-workbench', order: 120, locale: NS,
+  }, WorkbenchOverlay));
 }

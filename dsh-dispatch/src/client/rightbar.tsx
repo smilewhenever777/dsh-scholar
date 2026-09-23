@@ -8,6 +8,7 @@
  */
 import React from 'react';
 import { api } from './api';
+import { openWorkbench } from './workbench';
 
 const NS = 'dsh-dispatch';
 const TAB_ID = 'dsh-dispatch';
@@ -17,6 +18,7 @@ type TFunc = (key: string, params?: Record<string, unknown>) => string;
 
 interface ListEntry {
   id: string;
+  targetType?: string;
   phase: string;
   node: { projectId: string; nodeId: string };
   ws?: string;
@@ -202,6 +204,7 @@ function PanelBody(props: { useTabInfo: () => { tab: any }; t: TFunc; sessionId?
   const [list, setList] = React.useState<ListEntry[] | null>(null);
   const [err, setErr] = React.useState('');
   const [showHistory, setShowHistory] = React.useState(false);
+  const [workbench, setWorkbench] = React.useState<{ counts: Record<string, number>; tasks: { id: string; title: string; status: string }[] } | null>(null);
 
   React.useEffect(() => {
     let alive = true;
@@ -218,12 +221,21 @@ function PanelBody(props: { useTabInfo: () => { tab: any }; t: TFunc; sessionId?
     return () => { alive = false; clearInterval(timer); document.removeEventListener('visibilitychange', onVis); };
   }, [cwd]);
 
-  if (err) return <div style={{ padding: 14, fontSize: 12, color: 'var(--dsw-alias-state-danger-primary)' }}>{err}</div>;
-  if (!cwd) return <div style={{ padding: 14, fontSize: 12, lineHeight: 1.8, color: 'var(--dsw-alias-label-caption)' }}>{t('panel.noWs')}</div>;
-  if (!list) return <div style={{ padding: 14, fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}>{t('panel.loading')}</div>;
+  React.useEffect(() => {
+    let alive = true;
+    const load = () => {
+      if (document.hidden) return;
+      api<{ counts: Record<string, number>; tasks: { id: string; title: string; status: string }[] }>('/dispatch/workbench/overview')
+        .then((value) => { if (alive) setWorkbench(value); }).catch(() => undefined);
+    };
+    load();
+    const timer = setInterval(load, 10_000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
 
-  const active = list.filter((d) => d.phase !== 'finished');
-  const history = list.filter((d) => d.phase === 'finished');
+  const legacy = (list ?? []).filter((d) => d.targetType !== 'workbench_task');
+  const active = legacy.filter((d) => d.phase !== 'finished');
+  const history = legacy.filter((d) => d.phase === 'finished');
   const refresh = () => {
     api<{ dispatches: ListEntry[] }>(`/dispatch/list${cwd ? `?ws=${encodeURIComponent(cwd)}` : ''}`)
       .then((r) => setList(r.dispatches))
@@ -232,6 +244,19 @@ function PanelBody(props: { useTabInfo: () => { tab: any }; t: TFunc; sessionId?
 
   return (
     <div style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8, minHeight: '100%', overflow: 'auto' }}>
+      <div style={{ padding: 12, borderRadius: 8, background: 'var(--dsw-alias-bg-layer-2)' }}>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>AI 团队工作台</div>
+        <div style={{ fontSize: 11, color: 'var(--dsw-alias-label-caption)', marginBottom: 8 }}>
+          {workbench ? `执行中 ${workbench.counts.in_progress ?? 0} · 待验收 ${workbench.counts.in_review ?? 0} · 受阻 ${workbench.counts.blocked ?? 0}` : '加载工作台摘要…'}
+        </div>
+        <button type="button" onClick={openWorkbench} className="dsh-dispatch-press"
+          style={{ border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 6, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)', padding: '5px 9px', cursor: 'pointer' }}>打开工作台 →</button>
+      </div>
+      {err && <div style={{ fontSize: 11, color: 'var(--dsw-alias-state-danger-primary)' }}>{err}</div>}
+      {!cwd && <div style={{ fontSize: 11, color: 'var(--dsw-alias-label-caption)' }}>当前会话没有 trajectory 工作区；工作台仍可独立使用。</div>}
+      {cwd && !list && <div style={{ fontSize: 11, color: 'var(--dsw-alias-label-caption)' }}>{t('panel.loading')}</div>}
+      {cwd && <div style={{ fontSize: 11, color: 'var(--dsw-alias-label-caption)', marginTop: 8 }}>旧 trajectory 派发</div>}
+      {cwd && <>
       <div style={{ fontSize: 11, color: 'var(--dsw-alias-label-caption)' }}>{t('panel.active')}({active.length})</div>
       {active.length === 0 && (
         <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-caption)', lineHeight: 1.8 }}>{t('panel.empty')}</div>
@@ -249,6 +274,7 @@ function PanelBody(props: { useTabInfo: () => { tab: any }; t: TFunc; sessionId?
           {showHistory && history.map((d) => <DispatchCard key={d.id} t={t} d={d} refresh={refresh} />)}
         </>
       )}
+      </>}
     </div>
   );
 }

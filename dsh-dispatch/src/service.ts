@@ -10,7 +10,7 @@ import { DispatchStore, idemKey, idemNodeKey } from './store.js';
 import type { RuntimeAdapter, RuntimeEvent, SponsorHandle } from './runtime.js';
 import type { FinalizeResult, TargetAdapter, TargetRef } from './adapters/target.js';
 import { reduceDispatch } from './reducer.js';
-import type { DispatchEvent, DispatchRecord, ServiceErrorCode, WorkerReport, WritebackState } from './types.js';
+import type { DispatchEvent, DispatchRecord, EvidenceRef, ServiceErrorCode, WorkerReport, WritebackState } from './types.js';
 import { ServiceError, attemptActive } from './types.js';
 import { buildPrompt, payloadHash, PROTOCOL_VERSION, sha256, TOOL_POLICY_VERSION } from './prompt.js';
 import { childToolFilter, gateWorkerCall, type PolicyConfig } from './policy.js';
@@ -25,6 +25,7 @@ export interface StartRequestInput {
   ws: string;
   model?: string;
   toolAllow?: string[];
+  agentProfile?: { id: string; name: string; instructions: string; revision: number; toolAllow: string[] };
 }
 
 export interface StartResult {
@@ -34,6 +35,22 @@ export interface StartResult {
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+function normalizeEvidence(input: unknown): EvidenceRef[] {
+  if (!Array.isArray(input)) return [];
+  const kinds = new Set<EvidenceRef['kind']>(['log', 'artifact', 'metric', 'command', 'code_change']);
+  return input.slice(0, 50).flatMap((value): EvidenceRef[] => {
+    if (typeof value === 'string') {
+      const ref = value.trim().slice(0, 2000);
+      return ref ? [{ kind: 'artifact', ref }] : [];
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+    const item = value as Record<string, unknown>;
+    if (!kinds.has(item.kind as EvidenceRef['kind']) || typeof item.ref !== 'string' || !item.ref.trim()) return [];
+    return [{ kind: item.kind as EvidenceRef['kind'], ref: item.ref.trim().slice(0, 2000),
+      ...(typeof item.summary === 'string' ? { summary: item.summary.slice(0, 2000) } : {}) }];
+  });
+}
 
 function rid(prefix: string): string {
   return `${prefix}${randomBytes(6).toString('hex')}`;
@@ -130,7 +147,7 @@ export class DispatchService {
   /* ================= 启动(§2.2 十步) ================= */
 
   async start(raw: StartRequestInput): Promise<StartResult> {
-    if (raw.targetType !== 'traj_node') throw new ServiceError('VALIDATION', `未知 targetType=${raw.targetType}`, 422);
+    if (raw.targetType !== 'traj_node' && raw.targetType !== 'workbench_task') throw new ServiceError('VALIDATION', `未知 targetType=${raw.targetType}`, 422);
     const actorScope = (raw.actorScope ?? 'local').replace(/\s+/g, '');
     const ws = assertValidWs(raw.ws);
     const model = raw.model ?? this.config.defaultModel;
@@ -153,7 +170,8 @@ export class DispatchService {
 
     // 步骤 2:读取任务(锁外;指纹由目标侧单侧计算并随 read 返回,P2 修订)
     const root0 = canonicalRoot(ws);
-    const ref: TargetRef = { projectId: raw.projectId, nodeId: raw.nodeId, workspaceId: root0, canonicalRoot: root0 };
+    const ref: TargetRef = { projectId: raw.projectId, nodeId: raw.nodeId, workspaceId: root0, canonicalRoot: root0,
+      targetType: raw.targetType as 'traj_node' | 'workbench_task' };
     const read = await this.target.readTask(ref);
     if (!read) throw new ServiceError('NOT_FOUND', `目标任务 ${raw.projectId}/${raw.nodeId} 不存在`, 404);
     const { snapshot, fingerprint } = read;
@@ -187,11 +205,11 @@ export class DispatchService {
       const now = Date.now();
       const [modelProvider, modelName] = model.split('/');
       const rec: DispatchRecord = {
-        schemaVersion: 2,
+        schemaVersion: raw.targetType === 'workbench_task' ? 3 : 2,
         revision: 0,
         id: dispatchId,
         request: { actorScope, idempotencyKey: raw.idempotencyKey, payloadHash: hash },
-        targetType: 'traj_node',
+        targetType: raw.targetType as 'traj_node' | 'workbench_task',
         targetRef: ref,
         source: { taskFingerprint: fingerprint, snapshot, protocolVersion: PROTOCOL_VERSION },
         runtime: {
@@ -212,6 +230,7 @@ export class DispatchService {
           modelProvider: modelProvider ?? '',
           model: modelName ?? model,
           toolPolicyVersion: TOOL_POLICY_VERSION,
+          ...(raw.agentProfile ? { agentProfile: raw.agentProfile } : {}),
         },
         audit: [{ at: now, type: 'created', actor: actorScope, detail: `node=${raw.nodeId}` }],
       };
@@ -265,6 +284,7 @@ export class DispatchService {
       dispatchId,
       workspaceRoot: ws,
       budgetMinutes: this.config.maxWallMs / 60000,
+      agentInstructions: raw.agentProfile?.instructions,
     });
     if (Buffer.byteLength(promptText, 'utf8') > this.config.maxPromptBytes) {
       await this.apply(dispatchId, { type: 'claim-conflict', at: Date.now(), detail: '任务提示词超出容量上限' });
@@ -516,7 +536,7 @@ export class DispatchService {
       runAssociation: activeRun ? 'verified' : 'unresolved',
       outcome: input.outcome as 'done' | 'failed' | 'blocked',
       summary: input.summary.slice(0, 2000),
-      evidence: Array.isArray(input.evidence) ? (input.evidence as WorkerReport['evidence']).slice(0, 50) : [],
+      evidence: normalizeEvidence(input.evidence),
       nextHint: input.nextHint?.slice(0, 500),
       receivedAt: Date.now(),
     };
@@ -773,6 +793,7 @@ export class DispatchService {
       .sort((a, b) => b.createdAt - a.createdAt)
       .map((d) => ({
         id: d.id,
+        targetType: d.targetType,
         phase: d.phase,
         node: { projectId: d.targetRef.projectId, nodeId: d.targetRef.nodeId },
         ws: d.targetRef.canonicalRoot,

@@ -55,7 +55,7 @@ export interface EvidenceRef {
 
 export interface TaskSnapshot {
   /** 内存目标(P1 测试)或 trajectory 读取后的规范化任务卡;来源字段 source 记录出处。 */
-  source: 'memory' | 'trajectory';
+  source: 'memory' | 'trajectory' | 'workbench';
   projectId: string;
   nodeId: string;
   nodeTitle: string;
@@ -100,7 +100,7 @@ export interface WorkerReport {
 }
 
 export interface DispatchRecord {
-  schemaVersion: 2;
+  schemaVersion: 2 | 3;
   revision: number;
   id: string;
   request: {
@@ -108,12 +108,13 @@ export interface DispatchRecord {
     idempotencyKey: string;
     payloadHash: string;
   };
-  targetType: 'traj_node';
+  targetType: 'traj_node' | 'workbench_task';
   targetRef: {
     projectId: string;
     nodeId: string;
     workspaceId: string;
     canonicalRoot: string;
+    targetType?: 'traj_node' | 'workbench_task';
   };
   source: {
     taskFingerprint: string;
@@ -175,6 +176,7 @@ export interface DispatchRecord {
     modelProvider: string;
     model: string;
     toolPolicyVersion: string;
+    agentProfile?: { id: string; name: string; instructions: string; revision: number; toolAllow: string[] };
   };
   audit: Array<{ at: number; type: string; actor: string; detail?: string }>;
 }

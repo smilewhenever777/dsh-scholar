@@ -1,7 +1,7 @@
 {
   "name": "dsh-dispatch",
-  "version": "0.4.0-p3.1",
-  "description": "DSH 研究任务派发引擎(P0 阶段:运行时语义探针,尚未实现业务派发)",
+  "version": "0.5.0",
+  "description": "DSH 独立 AI 团队工作台与受控任务派发引擎",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -32,11 +32,13 @@
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json --noEmit && tsdown && node scripts/wrap-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test \"tests/*.test.mjs\"",
-    "smoke": "node scripts/smoke-test.mjs"
+    "smoke": "node scripts/smoke-test.mjs",
+    "e2e:workbench": "node scripts/e2e-workbench.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-host-webserver": "^0.1.5-rc.2",
+    "@deepseek-ai/dsh-session-query": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-settings": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-tools": "^0.1.5-rc.2",
     "schemastery": "^3.18.0"
@@ -50,6 +52,7 @@
     "@deepseek-ai/dsh-llm": "0.1.5-rc.2",
     "@deepseek-ai/dsh-scope": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-session": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-session-query": "0.1.5-rc.2",
     "@deepseek-ai/dsh-settings": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-subagent": "0.1.5-rc.2",
     "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
@@ -77,5 +80,8 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/smilewhenever777/dsh-dispatch.git"
+  },
+  "dependencies": {
+    "@dnd-kit/core": "^6.3.1"
   }
 }

@@ -30,16 +30,22 @@ export function buildPrompt(input: {
   dispatchId: string;
   workspaceRoot: string;
   budgetMinutes: number;
+  agentInstructions?: string;
 }): string {
   const s = input.snapshot;
   const lines: string[] = [];
-  lines.push(`【研究任务卡 #${s.nodeId}】`);
+  lines.push(s.source === 'workbench' ? `【工作台任务 #${s.nodeId}】` : `【研究任务卡 #${s.nodeId}】`);
   if (s.goalText) lines.push(`研究目标:${s.goalText}${s.goalVersion ? `(版本 ${s.goalVersion})` : ''}`);
   if (s.hypothesisText) lines.push(`所属假设:${s.hypothesisText}`);
-  lines.push(`任务节点:${s.nodeTitle}${s.nodeKind ? `(${s.nodeKind})` : ''}`);
+  lines.push(`${s.source === 'workbench' ? '任务' : '任务节点'}:${s.nodeTitle}${s.nodeKind ? `(${s.nodeKind})` : ''}`);
   if (s.nodeDetail) lines.push(`详情:${s.nodeDetail}`);
   if (s.entriesCount !== undefined) lines.push(`已有台账:${s.entriesCount} 条`);
   lines.push('');
+  if (input.agentInstructions) {
+    lines.push('【执行者指令】');
+    lines.push(input.agentInstructions);
+    lines.push('');
+  }
   lines.push('【本次执行契约】');
   const c = s.contract ?? {};
   lines.push(`具体任务:${s.nodeDetail || s.nodeTitle}`);
@@ -59,7 +65,12 @@ export function buildPrompt(input: {
   lines.push('dispatch_progress(过程台账,metrics 传结构化指标数组,每项 {name,value,baseline?,unit?});');
   lines.push('dispatch_report(最终结果;文件交付物把路径写入 evidence)。');
   lines.push('仅处理本次任务;完成或受阻时提交 dispatch_report(done/failed/blocked),此后停止新增任务性写操作。');
-  lines.push('不得直接修改研究目标、假设、边结构或任务节点终态;不得修改工作区内任何既有文件。');
-  lines.push('不得把"实验未支持假设"报告为执行失败,也不得伪造积极结论;负结果如实报告。');
+  if (s.source === 'workbench') {
+    lines.push('不得修改工作区内任何既有文件；只在本次报告目录写交付物。');
+    lines.push('执行完成不等于任务已经验收；如实提供结果，等待用户审查。');
+  } else {
+    lines.push('不得直接修改研究目标、假设、边结构或任务节点终态;不得修改工作区内任何既有文件。');
+    lines.push('不得把"实验未支持假设"报告为执行失败,也不得伪造积极结论;负结果如实报告。');
+  }
   return lines.join('\n');
 }

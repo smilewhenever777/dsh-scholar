@@ -10,5 +10,7 @@ export default defineConfig({
   sourcemap: false,
   minify: false,
   platform: 'browser',
-  deps: { neverBundle: [/^react(\/.*)?$/, /^react-dom(\/.*)?$/, /^@deepseek-ai\//] },
+  define: { 'process.env.NODE_ENV': JSON.stringify('production') },
+  deps: { neverBundle: [/^react(\/.*)?$/, /^react-dom(\/.*)?$/, /^@deepseek-ai\//],
+    alwaysBundle: [/^@dnd-kit\//], onlyBundle: [/^@dnd-kit\//] },
 });

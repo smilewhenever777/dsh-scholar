@@ -13,7 +13,7 @@ import type { DispatchRecord } from './types.js';
 import { ServiceError } from './types.js';
 
 export interface DispatchStoreRoot {
-  schemaVersion: 2;
+  schemaVersion: 3;
   revision: number;
   dispatches: Record<string, DispatchRecord>;
   /** key = `${actorScope}\u0000${idempotencyKey}` */
@@ -117,7 +117,7 @@ export class DispatchStore {
     this.acquireLock();
     if (!existsSync(this.file)) {
       if (this.fault.readOnly) return; // 无锁也至少允许读空?
-      this.root = { schemaVersion: 2, revision: 0, dispatches: {}, idempotency: {} };
+      this.root = { schemaVersion: 3, revision: 0, dispatches: {}, idempotency: {} };
       this.persistLocked();
       return;
     }
@@ -130,11 +130,15 @@ export class DispatchStore {
       return;
     }
     try {
-      const parsed = JSON.parse(raw) as DispatchStoreRoot;
-      if (parsed.schemaVersion !== 2 || typeof parsed.dispatches !== 'object' || parsed.dispatches === null) {
+      const parsed = JSON.parse(raw) as DispatchStoreRoot | (Omit<DispatchStoreRoot, 'schemaVersion'> & { schemaVersion: 2 });
+      if ((parsed.schemaVersion !== 2 && parsed.schemaVersion !== 3)
+        || typeof parsed.dispatches !== 'object' || parsed.dispatches === null
+        || typeof parsed.idempotency !== 'object' || parsed.idempotency === null) {
         throw new Error(`schemaVersion=${parsed.schemaVersion}`);
       }
-      this.root = parsed;
+      this.root = { ...parsed, schemaVersion: 3 };
+      // v2 stays in the .bak file; individual legacy records are not rewritten.
+      if (parsed.schemaVersion === 2 && !this.fault.readOnly) this.persistLocked();
     } catch (e) {
       // §4.7:损坏文件原地保留,只读故障,绝不"备份后建空 store 继续"
       this.fault.readOnly = true;
@@ -166,6 +170,9 @@ export class DispatchStore {
       renameSync(tmp, this.file);
     } catch (e) {
       try { unlinkSync(tmp); } catch { /* 清理失败忽略 */ }
+      if (!existsSync(this.file) && existsSync(`${this.file}.bak`)) {
+        try { renameSync(`${this.file}.bak`, this.file); } catch { /* keep backup for manual recovery */ }
+      }
       throw new ServiceError('INTERNAL', `原子替换失败:${String(e)}`, 500);
     }
   }

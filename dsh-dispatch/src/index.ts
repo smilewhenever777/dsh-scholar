@@ -23,11 +23,16 @@ import { registerProbe } from './probe.js';
 import { journal } from './journal.js';
 import { ServiceError } from './types.js';
 import type { PolicyConfig } from './policy.js';
+import type {} from '@deepseek-ai/dsh-session-query';
+import { WorkbenchStore } from './workbench/store.js';
+import { WorkbenchTargetAdapter, RoutedTargetAdapter } from './workbench/target.js';
+import { WorkbenchService } from './workbench/service.js';
+import { guardLocal, registerWorkbenchRoutes } from './workbench/routes.js';
 
 export const name = 'dsh-dispatch';
 
 /** P0 实测:agents/subagents 是 cordis 服务,必须声明在 inject(否则取属性即抛错)。 */
-export const inject = ['settings', 'tools', 'webServer', 'agents', 'subagents'];
+export const inject = ['settings', 'tools', 'webServer', 'agents', 'subagents', 'sessionQuery'];
 
 const NS = 'dispatch';
 
@@ -65,20 +70,31 @@ export function apply(ctx: Context): void {
 
   const scope = ctx.settings.register(NS, ConfigSchema, {});
   let cfg = readConfig(scope);
+  let activePolicy: (PolicyConfig & { maxWallMs: number }) | null = null;
   ctx.effect(() => scope.watch?.(() => {
     cfg = readConfig(scope);
+    if (activePolicy) {
+      activePolicy.allowedModels = cfg.allowedModels.length ? cfg.allowedModels : [`${cfg.modelProvider}/${cfg.model}`];
+      activePolicy.defaultModel = `${cfg.modelProvider}/${cfg.model}`;
+      activePolicy.maxWallMs = cfg.maxWallMinutes * 60_000;
+    }
   }));
 
   const memoryTarget = new InMemoryTargetAdapter();
-  const target = cfg.targetBackend === 'trajectory'
+  const legacyTarget = cfg.targetBackend === 'trajectory'
     ? new HttpTrajectoryAdapter(`http://127.0.0.1:${(ctx as unknown as { webServer?: { port?: number } }).webServer?.port ?? 3080}`)
     : memoryTarget;
+  const workbenchStore = new WorkbenchStore();
+  const workbenchReady = workbenchStore.init();
+  const target = new RoutedTargetAdapter(legacyTarget, new WorkbenchTargetAdapter(workbenchStore));
   const runtimeAdapter = new SubagentRuntimeAdapter(ctx);
 
   let service: DispatchService | null = null;
+  let workbenchInstance: WorkbenchService | null = null;
   const servicePromise: Promise<DispatchService | null> = (async () => {
     const store = new DispatchStore();
     await store.init();
+    await workbenchReady;
     if (store.fault.readOnly) {
       console.error(`[dsh-dispatch] store 只读故障态:${store.fault.reason ?? '未知'}——派发写入被禁用`);
       journal('store/fault', { reason: store.fault.reason });
@@ -90,12 +106,23 @@ export function apply(ctx: Context): void {
       maxWallMs: cfg.maxWallMinutes * 60_000,
       maxPromptBytes: 256 * 1024,
     };
+    activePolicy = policy;
     const svc = new DispatchService({ store, runtime: runtimeAdapter, target, config: policy });
+    const workbench = !workbenchStore.snapshot() ? null : new WorkbenchService(
+      workbenchStore, svc, store,
+      () => policy.allowedModels,
+      () => policy.defaultModel,
+    );
+    workbenchInstance = workbench;
     service = svc;
     journal('service/ready', { backend: target.kind, defaultModel: policy.defaultModel });
     console.log(`[dsh-dispatch] 执行内核就绪(backend=${target.kind}, model=${policy.defaultModel})`);
     return svc;
   })();
+  registerWorkbenchRoutes(ctx, async () => {
+    const dispatch = await servicePromise;
+    return dispatch && workbenchInstance ? { workbench: workbenchInstance, dispatch } : null;
+  });
 
   // §7.1:启动对账(初始退避 ~5s;只扫描,不重放业务任务)
   void servicePromise.then((svc) => {
@@ -112,6 +139,7 @@ export function apply(ctx: Context): void {
   try {
     (ctx as unknown as { on?: (ev: string, fn: () => void) => void }).on?.('dispose', () => {
       service?.dispose();
+      workbenchStore.dispose();
       journal('service/dispose', {});
     });
   } catch {
@@ -128,20 +156,7 @@ export function apply(ctx: Context): void {
     res.end(JSON.stringify(payload));
   };
 
-  const guardRoute = (req: IncomingMessage, res: ServerResponse): boolean => {
-    const hostRaw = String(req.headers.host ?? '').toLowerCase();
-    let hostName = hostRaw;
-    if (hostName.startsWith('[')) hostName = hostName.slice(1, hostName.includes(']') ? hostName.indexOf(']') : undefined);
-    else if (hostName.includes(':')) hostName = hostName.split(':')[0];
-    if (hostName && !['localhost', '127.0.0.1', '::1'].includes(hostName)) {
-      sendJson(res, 403, { error: '非法 Host' });
-      return false;
-    }
-    const addr = req.socket.remoteAddress ?? '';
-    if (addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1') return true;
-    sendJson(res, 403, { error: '仅允许本机(loopback)访问' });
-    return false;
-  };
+  const guardRoute = guardLocal;
 
   const readBody = (req: IncomingMessage): Promise<string> => new Promise((resolve, reject) => {
     const ct = String(req.headers['content-type'] ?? '');
@@ -176,6 +191,9 @@ export function apply(ctx: Context): void {
         const svc = await servicePromise;
         if (!svc) return sendJson(res, 503, { code: 'STORE_READONLY', error: '执行内核不可用(只读故障态)' });
         const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        if (body.targetType !== undefined && body.targetType !== 'traj_node') {
+          return sendJson(res, 422, { code: 'VALIDATION', error: '工作台任务必须通过 /dispatch/workbench/tasks/:id/run 启动' });
+        }
         const r = await svc.start({
           actorScope: typeof body.actorScope === 'string' ? body.actorScope : 'local',
           idempotencyKey: String(body.idempotencyKey ?? ''),
