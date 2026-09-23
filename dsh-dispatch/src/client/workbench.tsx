@@ -11,13 +11,13 @@ type Project = { id: string; title: string; root: string; revision: number };
 type Agent = { id: string; name: string; instructions: string; model: string; toolAllow: string[]; revision: number };
 type Timeline = { id: string; kind: string; at: number; text: string; runId?: string; actor: string };
 type Task = { id: string; projectId: string; title: string; description: string; acceptanceCriteria: string; assigneeId?: string;
-  status: Status; revision: number; runIds: string[]; timeline: Timeline[]; owner?: { dispatchId: string } };
+  status: Status; revision: number; runIds: string[]; timeline: Timeline[]; timelineTotal?: number; owner?: { dispatchId: string } };
 type Run = { id: string; phase: string; createdAt: number; acceptedAt?: number; lastProgressAt?: number; endedAt?: number; runtime: { childSessionId: string; quiescence: string };
   effectiveConfig: { modelProvider: string; model: string; agentProfile?: { name: string } };
   report?: { outcome: string; summary: string; evidence: ({ kind: string; ref: string; summary?: string } | string)[]; nextHint?: string };
   result?: { kind: string; reasonCode: string; summary: string }; writeback: { state: string; lastErrorCode?: string };
   targetRef: { nodeId: string; canonicalRoot?: string }; targetType: string; cancel?: { reason: string } };
-type Overview = { projects: Project[]; agents: Agent[]; tasks: Task[]; counts: Record<Status, number>; legacyCount: number; readOnly: boolean };
+type Overview = { projects: Project[]; agents: Agent[]; tasks: Task[]; counts: Record<Status, number>; legacyCount: number; readOnly: boolean; revision?: number };
 type Event = { seq: number; at: number; kind: string; text?: string; name?: string; error?: boolean; interrupted?: boolean };
 type Models = { allowed: string[]; default: string };
 
@@ -371,6 +371,7 @@ function Workbench() {
   const [comment, setComment] = React.useState('');
   const [reviewText, setReviewText] = React.useState('');
   const [error, setError] = React.useState('');
+  const overviewRevision = React.useRef(0);
   const [formError, setFormError] = React.useState('');
   const [detailError, setDetailError] = React.useState('');
   const [confirmReq, setConfirmReq] = React.useState<ConfirmRequest | null>(null);
@@ -384,8 +385,12 @@ function Workbench() {
 
   const refresh = React.useCallback(async () => {
     try {
-      const value = await api<Overview>(`${BASE}/overview`);
-      setOverview(value);
+      // Wave 4:带 sinceRevision 短路——未变时服务端返回 {unchanged},不重传全量
+      const value = await api<Overview | { unchanged: true }>(`${BASE}/overview${overviewRevision.current ? `?sinceRevision=${overviewRevision.current}` : ''}`);
+      if (!('unchanged' in value)) {
+        if ('revision' in value && typeof value.revision === 'number') overviewRevision.current = value.revision;
+        setOverview(value as Overview);
+      }
       setError('');
     } catch (e) { setError(errorText(e)); }
   }, []);
@@ -563,7 +568,7 @@ function Workbench() {
         <div className="dsh-wb-row"><button className="dsh-wb-btn primary" disabled={busy} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/review', 'POST', { expectedRevision: selected.revision, decision: 'accept', comment: reviewText }), 'detail')}>接受，标记完成</button>
           <button className="dsh-wb-btn" disabled={busy || !reviewText.trim()} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/review', 'POST', { expectedRevision: selected.revision, decision: 'reject', comment: reviewText }), 'detail')}>退回待办</button></div>
       </div>}
-      <div className="dsh-wb-panel"><h3>任务讨论与状态更新</h3><TaskTimeline items={selected.timeline} onRun={setRunId} />
+      <div className="dsh-wb-panel"><h3>任务讨论与状态更新{selected.timelineTotal != null && selected.timelineTotal > selected.timeline.length ? <span className="dsh-wb-muted" style={{ fontWeight: 400 }}>{`(最近 ${selected.timeline.length}/${selected.timelineTotal} 条)`}</span> : null}</h3><TaskTimeline items={selected.timeline} onRun={setRunId} />
         <textarea className="dsh-wb-textarea" aria-label="发表评论" value={comment} onChange={(e) => setComment(e.target.value)} placeholder="记录问题、建议或决策" /><button className="dsh-wb-btn" disabled={!comment.trim() || busy} onClick={() => void mutate(() => write(`/tasks/${selected.id}/comments`, 'POST', { expectedRevision: selected.revision, text: comment }), 'detail').then((ok) => { if (ok) setComment(''); })}>发送评论</button></div>
     </aside></>}
     {modal && <><button className="dsh-wb-backdrop" style={{ zIndex: 112 }} aria-label="关闭表单" onClick={() => setModal(null)} /><div className="dsh-wb-modal" role="dialog" aria-modal="true" aria-label={editing ? '编辑' : '新建'}>

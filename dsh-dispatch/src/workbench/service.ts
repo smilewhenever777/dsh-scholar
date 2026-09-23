@@ -46,14 +46,23 @@ export class WorkbenchService {
     if (!root) throw new ServiceError('STORE_READONLY', this.store.fault.reason ?? '工作台不可用', 503);
     return root;
   }
-  overview() {
+  /** 根存储总 revision(任意写递增)——sinceRevision 短路的依据。 */
+  rootRevision(): number {
+    return this.store.snapshot()?.revision ?? 0;
+  }
+  overview(sinceRevision?: number) {
     const root = this.snapshot();
-    const tasks = Object.values(root.tasks).map((task) => this.withRuns(task));
+    if (sinceRevision !== undefined && Number.isSafeInteger(sinceRevision) && sinceRevision === root.revision) {
+      return { unchanged: true as const, revision: root.revision };
+    }
+    // 瘦身:任务 timeline 只带最近 6 条 + 总数(完整 timeline 在 /tasks/:id 详情)
+    const tasks = Object.values(root.tasks).map((task) => this.withRuns(task))
+      .map((task) => ({ ...task, timeline: task.timeline.slice(-6), timelineTotal: task.timeline.length }));
     const counts: Record<TaskStatus, number> = { todo: 0, in_progress: 0, in_review: 0, blocked: 0, done: 0 };
     for (const task of tasks) counts[task.status] += 1;
     return { projects: Object.values(root.projects), agents: Object.values(root.agents), tasks, counts,
       legacyCount: this.dispatchStore.all().filter((d) => d.targetType === 'traj_node').length,
-      readOnly: this.store.fault.readOnly };
+      readOnly: this.store.fault.readOnly, revision: root.revision };
   }
   private withRuns(task: WorkTask): WorkTask {
     const attempts = this.dispatchStore.all().filter((run) => run.targetType === 'workbench_task' && run.targetRef.nodeId === task.id)

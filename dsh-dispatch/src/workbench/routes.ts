@@ -94,8 +94,8 @@ export function registerWorkbenchRoutes(ctx: Context, getServices: () => Promise
         const method = req.method ?? 'GET';
         const body = ['POST', 'PATCH'].includes(method) ? await readBody(req) : {};
         const [area, id, action] = path;
-        if (!area && method === 'GET') return send(res, 200, workbench.overview());
-        if (area === 'overview' && method === 'GET') return send(res, 200, workbench.overview());
+        if (!area && method === 'GET') { const since = Number(url.searchParams.get('sinceRevision') ?? Number.NaN); return send(res, 200, workbench.overview(Number.isNaN(since) ? undefined : since)); }
+        if (area === 'overview' && method === 'GET') { const since = Number(url.searchParams.get('sinceRevision') ?? Number.NaN); return send(res, 200, workbench.overview(Number.isNaN(since) ? undefined : since)); }
         if (area === 'models' && method === 'GET') return send(res, 200, workbench.models());
         if (area === 'legacy' && method === 'GET') return send(res, 200, { runs: workbench.legacy() });
         if (area === 'projects' && !id && method === 'POST') return send(res, 201, await workbench.createProject(body));
