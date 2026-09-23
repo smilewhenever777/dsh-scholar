@@ -286,4 +286,29 @@ export const workbenchCss = `
 .dsh-wb-card-next[data-tone='blocked'] { color: var(--dsp-bad); background: color-mix(in srgb, var(--dsp-bad) 10%, transparent); }
 .dsh-wb-card-next[data-tone='idle'] { color: var(--dsw-alias-label-caption); background: var(--dsw-alias-bg-layer-1, rgba(127,127,127,.06)); }
 
+/* ---------- P1-1:任务详情完整页面(两栏) ---------- */
+.dsh-wb-taskpage { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 20px; align-items: start; animation: dsp-slide-up var(--dsp-dur-slow) var(--dsp-ease); }
+.dsh-wb-taskpage-main { min-width: 0; }
+.dsh-wb-taskpage-side { position: sticky; top: 0; display: flex; flex-direction: column; gap: 12px; max-height: calc(100vh - 80px); overflow-y: auto; }
+.dsh-wb-side-card { padding: 14px 16px; }
+.dsh-wb-side-card h3 { font-size: 12px; margin: 0 0 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--dsw-alias-label-caption); }
+.dsh-wb-side-dl { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; font-size: 12px; }
+.dsh-wb-side-dl dt { color: var(--dsw-alias-label-caption); font-size: 11px; align-self: baseline; }
+.dsh-wb-side-dl dd { margin: 0; overflow-wrap: anywhere; }
+.dsh-wb-side-action .dsh-wb-btn.primary { width: 100%; }
+@media (max-width: 1100px) { .dsh-wb-taskpage { grid-template-columns: 1fr; } .dsh-wb-taskpage-side { position: static; max-height: none; flex-direction: row; flex-wrap: wrap; } .dsh-wb-side-card { flex: 1 1 220px; } }
+
+/* ---------- P1-2:工具摘要行(Run 阅读) ---------- */
+.dsh-wb-tool-line { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.12)); font-size: 11.5px; }
+.dsh-wb-tool-line:last-of-type { border-bottom: 0; }
+.dsh-wb-tool-line-name { font-weight: 650; flex: none; min-width: 60px; color: var(--dsw-alias-label-primary); }
+.dsh-wb-tool-line-target { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary); font: 11px/1.4 ui-monospace,Consolas,monospace; }
+.dsh-wb-tool-line-status { flex: none; font-size: 10px; font-weight: 650; border-radius: 4px; padding: 1px 6px; }
+.dsh-wb-tool-line-status.ok { color: var(--dsp-ok); background: color-mix(in srgb, var(--dsp-ok) 10%, transparent); }
+.dsh-wb-tool-line-status.err { color: var(--dsp-bad); background: color-mix(in srgb, var(--dsp-bad) 10%, transparent); }
+.dsh-wb-tool-line-status.wait { color: var(--dsw-alias-label-caption); background: var(--dsw-alias-bg-layer-1); }
+.dsh-wb-tool-line time { flex: none; font-size: 10px; color: var(--dsw-alias-label-caption); font-variant-numeric: tabular-nums; }
+.dsh-wb-order-toggle { border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3)); background: transparent; color: var(--dsw-alias-label-caption); border-radius: 6px; padding: 3px 8px; font-size: 10.5px; cursor: pointer; }
+.dsh-wb-order-toggle:hover { color: var(--dsw-alias-label-primary); }
+
 `;

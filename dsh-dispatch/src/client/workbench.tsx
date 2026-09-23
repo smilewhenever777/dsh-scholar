@@ -149,14 +149,31 @@ function ActivityCard({ item }: { item: ActivityItem }) {
       </div>
     </article>;
   }
+  // P1-2:工具调用改为摘要行——工具名+目标+状态+时间一行扫读(评审 §4.4.2);详情次级展开
+  if (kind === 'tool') {
+    const toolName = TOOLS[event.name ?? ''] ?? event.name ?? '工具调用';
+    let target = '';
+    try { const args = JSON.parse(event.text ?? '{}'); target = args.path ?? args.filename ?? args.ref ?? args.sequence != null ? `seq=${args.sequence}` : ''; } catch { target = preview(event.text ?? '', 40); }
+    const status = result?.error ? 'err' : result ? 'ok' : 'wait';
+    const statusLabel = result?.error ? '失败' : result ? '成功' : '…';
+    return <article className="dsh-wb-activity tool">
+      <div className="dsh-wb-tool-line">
+        <span className="dsh-wb-tool-line-name">{toolName}</span>
+        {target && <span className="dsh-wb-tool-line-target" title={target}>{target}</span>}
+        <span className={'dsh-wb-tool-line-status ' + status}>{statusLabel}</span>
+        <time>{fmt(event.at)}</time>
+      </div>
+      <details className="dsh-wb-expand">
+        <summary><span>调用详情</span></summary>
+        <ExpandableText text={event.text ?? ''} label="参数" fold />
+        {result && <ExpandableText text={result.text ?? ''} label={result.error ? '错误结果' : '返回结果'} fold />}
+      </details>
+    </article>;
+  }
   return <article className={'dsh-wb-activity ' + kind + (event.error || result?.error ? ' error' : '')}>
     <div className="dsh-wb-activity-head"><span className="dsh-wb-activity-kind">{eventLabel(event)}</span><time>{fmt(event.at)}</time>
       {result?.error && <strong>工具报错</strong>}</div>
-    {event.kind === 'tool_call' ? <>
-        <ExpandableText text={event.text ?? ''} label="查看调用参数" fold />
-        {result ? <ExpandableText text={result.text ?? ''} label={result.error ? '查看错误结果' : '查看工具结果'} fold /> :
-          <div className="dsh-wb-muted">等待工具返回</div>}</> :
-      <ExpandableText text={event.text ?? ''} label="查看详情" fold />}
+    <ExpandableText text={event.text ?? ''} label="查看详情" fold />
   </article>;
 }
 function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }: { run: Run; latestProgress?: Timeline; onCancel: () => Promise<void>;
@@ -168,6 +185,7 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
   const [error, setError] = React.useState('');
   const [view, setView] = React.useState<'overview' | 'activity' | 'raw'>('overview');
   const [filter, setFilter] = React.useState<'all' | 'agent' | 'tool' | 'error'>('all');
+  const [order, setOrder] = React.useState<'asc' | 'desc'>('asc');
   const [copied, setCopied] = React.useState(-1);
   // P0-3:交付物安全预览
   const [previewLoading, setPreviewLoading] = React.useState('');
@@ -232,8 +250,10 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
     return () => clearInterval(timer);
   }, [load, run.phase]);
   const activity = groupActivity(events);
-  const shown = activity.filter((item) => filter === 'all' || (filter === 'agent' && item.event.kind === 'assistant') ||
+  const shownRaw = activity.filter((item) => filter === 'all' || (filter === 'agent' && item.event.kind === 'assistant') ||
     (filter === 'tool' && item.event.kind === 'tool_call') || (filter === 'error' && (item.event.error || item.result?.error)));
+  // P1-2:顺序切换(评审 §4.4.4)——默认正序;可切倒序(最新在前)
+  const shown = order === 'desc' ? [...shownRaw].reverse() : shownRaw;
   const lastActivity = [...events].reverse().find((event) => event.kind === 'tool_call' || (event.kind === 'assistant' && event.text?.trim()));
   const tone = run.phase !== 'finished' ? 'active' : run.result?.kind === 'done' ? 'success' : 'warning';
   const resultRepeatsReport = !!run.result?.summary && !!run.report?.summary &&
@@ -299,7 +319,10 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
     </section>}
     {view === 'activity' && <section className="dsh-wb-panel dsh-wb-run-content dsh-wb-activity-scroll" ref={scrollerRef}>
       <div className="dsh-wb-run-section-head"><div><h3>执行过程</h3><p>Agent 消息按对话排版;工具调用卡片可展开参数与结果。</p></div>
-        <span>{filter === 'all' ? `${activity.length} 条活动` : `显示 ${shown.length} / ${activity.length} 条`}</span></div>
+        <div className="dsh-wb-row" style={{ gap: 6 }}>
+          <span>{filter === 'all' ? `${activity.length} 条活动` : `显示 ${shownRaw.length} / ${activity.length} 条`}</span>
+          <button type="button" className="dsh-wb-order-toggle" aria-label={order === 'asc' ? '切换为最新在前' : '切换为最早在前'} onClick={() => setOrder(order === 'asc' ? 'desc' : 'asc')}>{order === 'asc' ? '↑ 最早在前' : '↓ 最新在前'}</button>
+        </div></div>
       <div className="dsh-wb-filter" role="group" aria-label="筛选执行活动">
         {([['all', '全部'], ['agent', 'Agent 消息'], ['tool', '工具调用'], ['error', '错误']] as const).map(([key, label]) =>
           <button key={key} type="button" className={filter === key ? 'active' : ''} aria-pressed={filter === key} onClick={() => setFilter(key)}>{label}</button>)}
@@ -539,10 +562,79 @@ function Workbench() {
       <div className="dsh-wb-navfoot">同一时间运行一个任务;<br />完成后由你验收归档。</div>
     </nav>
     <main className="dsh-wb-main">
-      <header className="dsh-wb-head"><div><div className="dsh-wb-kicker">DSH / DISPATCH</div><h1>{page === 'overview' ? '工作总览' : page === 'tasks' ? '任务' : page === 'projects' ? '项目' : page === 'agents' ? 'Agent 目录' : '旧派发历史'}</h1></div>
-        <div className="dsh-wb-head-actions"><button className="dsh-wb-btn" onClick={() => void refresh()}>刷新</button><button className="dsh-wb-btn ghost" onClick={() => setOpen(false)} aria-label="关闭工作台">关闭 ✕</button></div></header>
+      <header className="dsh-wb-head"><div><div className="dsh-wb-kicker">DSH / DISPATCH</div><h1>{selected ? '任务详情' : page === 'overview' ? '工作总览' : page === 'tasks' ? '任务' : page === 'projects' ? '项目' : page === 'agents' ? 'Agent 目录' : '旧派发历史'}</h1></div>
+        <div className="dsh-wb-head-actions">
+          {selected && <button className="dsh-wb-btn" onClick={() => { setTaskId(''); setDetail(null); }}>← 返回列表</button>}
+          <button className="dsh-wb-btn" onClick={() => void refresh()}>刷新</button><button className="dsh-wb-btn ghost" onClick={() => setOpen(false)} aria-label="关闭工作台">关闭 ✕</button></div></header>
       {error && <div role="alert" className="dsh-wb-error">{error}</div>}
       {overview.readOnly && <div role="status" className="dsh-wb-error">工作台当前只读；项目、任务和历史记录仍可查看。</div>}
+      {selected ? <div className="dsh-wb-taskpage">
+        {/* P1-1:任务详情改为完整页面——中央活动流 + 右栏常驻属性/Run/验收(评审 §4.3) */}
+        <div className="dsh-wb-taskpage-main">
+          <h1>{selected.title}</h1>
+          <p className="dsh-wb-muted">{overview.projects.find((p) => p.id === selected.projectId)?.title} · {LABEL[selected.status]}</p>
+          {selectedRun && <div className="dsh-wb-status-split">
+            <span className="dsh-wb-status-chip" data-tone={selected.status}>任务:{LABEL[selected.status]}</span>
+            <span className="dsh-wb-status-chip" data-tone="run">上次执行:{runLabel(selectedRun)}</span>
+          </div>}
+          {detailError && <div role="alert" className="dsh-wb-error">{detailError}</div>}
+          <details className="dsh-wb-panel dsh-wb-task-brief" open={!selected.runIds.length}>
+            <summary><b>任务要求与验收标准</b><span>{preview(selected.acceptanceCriteria, 90)}</span></summary>
+            <h3>任务目标</h3><p style={{ whiteSpace: 'pre-wrap' }}>{selected.description || '无补充说明'}</p>
+            <h3>验收标准</h3><p style={{ whiteSpace: 'pre-wrap' }}>{selected.acceptanceCriteria}</p>
+          </details>
+          {selectedRun && <RunPanel key={selectedRun.id} run={selectedRun}
+            latestProgress={[...selected.timeline].reverse().find((event) => event.kind === 'progress' && event.runId === selectedRun.id)}
+            onCancel={async () => { await mutate(() => write('/runs/' + selectedRun.id + '/cancel', 'POST', { reason: '用户取消' }), 'detail'); }}
+            onAskTakeover={() => setConfirmReq({
+              title: '人工接管本次执行',
+              description: '接管会撤销执行者的写入权限并请求其停止;迟到的报告不会再改动任务。请填写接管原因(审计记录)。',
+              placeholder: '例如:方向需要调整 / 发现任务描述有误',
+              confirmText: '接管', danger: true,
+              onConfirm: (reason) => { setConfirmReq(null); void mutate(() => write('/runs/' + selectedRun.id + '/takeover', 'POST', { reason }), 'detail'); },
+              onClose: () => setConfirmReq(null),
+            })}
+            onAskResolve={() => setConfirmReq({
+              title: '确认已停止并收尾',
+              description: '请先在「执行过程」确认子会话已停止且队列静止,再填写核验依据(操作员责任,审计记录)。',
+              placeholder: '例如:已核查子会话无新事件、无残留进程',
+              confirmText: '确认并收尾',
+              onConfirm: (evidence) => { setConfirmReq(null); void mutate(() => write('/runs/' + selectedRun.id + '/resolve', 'POST', { evidence }), 'detail'); },
+              onClose: () => setConfirmReq(null),
+            })} />}
+          {selected.status === 'in_review' && <div className="dsh-wb-panel dsh-wb-review">
+            <h3>人工验收</h3><p>先核对上方运行的报告与证据。接受后任务才会标记为已完成。</p>
+            <textarea className="dsh-wb-textarea" aria-label="验收或退回意见" value={reviewText} onChange={(e) => setReviewText(e.target.value)} placeholder="退回时必须填写意见" />
+            <div className="dsh-wb-row"><button className="dsh-wb-btn primary" disabled={busy} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/review', 'POST', { expectedRevision: selected.revision, decision: 'accept', comment: reviewText }), 'detail')}>接受，标记完成</button>
+              <button className="dsh-wb-btn" disabled={busy || !reviewText.trim()} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/review', 'POST', { expectedRevision: selected.revision, decision: 'reject', comment: reviewText }), 'detail')}>退回待办</button></div>
+          </div>}
+          <div className="dsh-wb-panel"><h3>任务讨论与状态更新{selected.timelineTotal != null && selected.timelineTotal > selected.timeline.length ? <span className="dsh-wb-muted" style={{ fontWeight: 400 }}>{`(最近 ${selected.timeline.length}/${selected.timelineTotal} 条)`}</span> : null}</h3><TaskTimeline items={selected.timeline} onRun={setRunId} />
+            <textarea className="dsh-wb-textarea" aria-label="发表评论" value={comment} onChange={(e) => setComment(e.target.value)} placeholder="记录问题、建议或决策" /><button className="dsh-wb-btn" disabled={!comment.trim() || busy} onClick={() => void mutate(() => write(`/tasks/${selected.id}/comments`, 'POST', { expectedRevision: selected.revision, text: comment }), 'detail').then((ok) => { if (ok) setComment(''); })}>发送评论</button></div>
+        </div>
+        <aside className="dsh-wb-taskpage-side" aria-label="任务属性与执行">
+          <div className="dsh-wb-panel dsh-wb-side-card">
+            <h3>任务属性</h3>
+            <dl className="dsh-wb-side-dl">
+              <dt>项目</dt><dd>{overview.projects.find((p) => p.id === selected.projectId)?.title ?? '—'}</dd>
+              <dt>执行者</dt><dd>{overview.agents.find((a) => a.id === selected.assigneeId)?.name ?? '未分派'}</dd>
+              {selected.assigneeId && <dt>模型</dt>}{selected.assigneeId && <dd>{overview.agents.find((a) => a.id === selected.assigneeId)?.model ?? '—'}</dd>}
+              <dt>执行次数</dt><dd>{selected.runIds.length}</dd>
+            </dl>
+            <div className="dsh-wb-row" style={{ marginTop: 10 }}>
+              <button className="dsh-wb-btn" disabled={!!selected.owner || ['in_review', 'done'].includes(selected.status)} onClick={() => begin('task', selected.id)}>编辑</button>
+              {selected.status === 'done' && <button className="dsh-wb-btn" disabled={busy} onClick={() => void mutate(() => write(`/tasks/${selected.id}`, 'PATCH', { expectedRevision: selected.revision, status: 'todo' }), 'detail')}>重新打开</button>}
+              {['todo', 'blocked'].includes(selected.status) && !selected.owner && <select className="dsh-wb-select" aria-label="修改任务状态" value={selected.status} onChange={(e) => moveTask(selected.id, e.target.value as Status)}><option value="todo">待办</option><option value="blocked">受阻</option></select>}
+            </div>
+          </div>
+          <div className="dsh-wb-panel dsh-wb-side-card dsh-wb-side-action">
+            <h3>执行</h3>
+            <div className="dsh-wb-row"><select className="dsh-wb-select" aria-label="分派 Agent" disabled={!!selected.owner || busy} value={selected.assigneeId ?? ''} onChange={(e) => void mutate(() => write('/tasks/' + selected.id, 'PATCH', { expectedRevision: selected.revision, assigneeId: e.target.value || null }), 'detail')}><option value="">未分派</option>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name} · {a.model}</option>)}</select></div>
+            {['todo', 'blocked'].includes(selected.status) && !selected.owner && <button className="dsh-wb-btn primary" style={{ width: '100%', marginTop: 8 }} disabled={!selected.assigneeId || busy} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/run', 'POST', { idempotencyKey: 'ui-' + crypto.randomUUID() }), 'detail')}>手动运行</button>}
+            {selected.owner && <p className="dsh-wb-muted" style={{ marginTop: 8 }}>执行中;目标与验收标准已锁定。取消后等待静止确认。</p>}
+          </div>
+          <RunHistory key={selected.id} runs={detail?.runs ?? []} selectedId={runId} onSelect={setRunId} />
+        </aside>
+      </div> : <>
       {page === 'overview' && <>
         {/* P0-2:「现在需要你处理」行动区(评审 §4.1)——按待验收→受阻→执行中→未分派排列 */}
         {(() => {
@@ -603,59 +695,8 @@ function Workbench() {
           <ExpandableText text={a.instructions} label="展开完整工作指令" fold /></div>)}</div></>}
       {page === 'legacy' && <div className="dsh-wb-panel"><p className="dsh-wb-muted">旧 trajectory 派发仅供查看,不会自动成为已验收任务。共 {overview.legacyCount} 条。</p>
         <table className="dsh-wb-table"><thead><tr><th>目标</th><th>结果</th><th>开始</th><th>结束</th></tr></thead><tbody>{legacy.map((r) => <tr key={r.id}><td>{r.targetType === 'workbench_task' ? '工作台任务' : r.targetRef.nodeId}</td><td>{OUTCOME_LABEL[r.result?.kind ?? ''] ?? PHASE_LABEL[r.phase] ?? r.phase}</td><td>{fmt(r.createdAt)}</td><td>{fmt(r.endedAt)}</td></tr>)}</tbody></table></div>}
+      </>}
     </main>
-    {selected && <><button className="dsh-wb-backdrop" aria-label="关闭任务详情" onClick={() => setTaskId('')} /><aside className="dsh-wb-detail" aria-label="任务详情">
-      <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><span className="dsh-wb-kicker">TASK / {selected.id}</span><button className="dsh-wb-btn ghost" onClick={() => setTaskId('')}>关闭 ✕</button></div>
-      <h1>{selected.title}</h1>
-      <p className="dsh-wb-muted">{overview.projects.find((p) => p.id === selected.projectId)?.title} · {LABEL[selected.status]}</p>
-      {/* P0-1:任务状态与 Run 状态分离(评审 §2)——历史 Run 的成功不冒充任务已完成 */}
-      {selectedRun && <div className="dsh-wb-status-split">
-        <span className="dsh-wb-status-chip" data-tone={selected.status}>任务:{LABEL[selected.status]}</span>
-        <span className="dsh-wb-status-chip" data-tone="run">上次执行:{runLabel(selectedRun)}</span>
-      </div>}
-      {detailError && <div role="alert" className="dsh-wb-error">{detailError}</div>}
-      <div className="dsh-wb-row" style={{ margin: '16px 0' }}><button className="dsh-wb-btn" disabled={!!selected.owner || ['in_review', 'done'].includes(selected.status)} onClick={() => begin('task', selected.id)}>编辑任务</button>
-        {selected.status === 'done' && <button className="dsh-wb-btn" disabled={busy} onClick={() => void mutate(() => write(`/tasks/${selected.id}`, 'PATCH', { expectedRevision: selected.revision, status: 'todo' }), 'detail')}>重新打开</button>}
-        {['todo', 'blocked'].includes(selected.status) && !selected.owner && <select className="dsh-wb-select" aria-label="修改任务状态" value={selected.status} onChange={(e) => moveTask(selected.id, e.target.value as Status)}><option value="todo">待办</option><option value="blocked">受阻</option></select>}</div>
-      <details className="dsh-wb-panel dsh-wb-task-brief" open={!selected.runIds.length}>
-        <summary><b>任务要求与验收标准</b><span>{preview(selected.acceptanceCriteria, 90)}</span></summary>
-        <h3>任务目标</h3><p style={{ whiteSpace: 'pre-wrap' }}>{selected.description || '无补充说明'}</p>
-        <h3>验收标准</h3><p style={{ whiteSpace: 'pre-wrap' }}>{selected.acceptanceCriteria}</p>
-      </details>
-      <div className="dsh-wb-panel dsh-wb-assignment">
-        <div className="dsh-wb-row"><span>执行者：</span><select className="dsh-wb-select" aria-label="分派 Agent" disabled={!!selected.owner || busy} value={selected.assigneeId ?? ''} onChange={(e) => void mutate(() => write('/tasks/' + selected.id, 'PATCH', { expectedRevision: selected.revision, assigneeId: e.target.value || null }), 'detail')}><option value="">未分派</option>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name} · {a.model}</option>)}</select>
-          {['todo', 'blocked'].includes(selected.status) && !selected.owner && <button className="dsh-wb-btn primary" disabled={!selected.assigneeId || busy} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/run', 'POST', { idempotencyKey: 'ui-' + crypto.randomUUID() }), 'detail')}>手动运行</button>}</div>
-        {selected.owner && <p className="dsh-wb-muted">执行中；目标与验收标准已锁定。取消后等待静止确认。</p>}
-      </div>
-      <RunHistory key={selected.id} runs={detail?.runs ?? []} selectedId={runId} onSelect={setRunId} />
-      {selectedRun && <RunPanel key={selectedRun.id} run={selectedRun}
-        latestProgress={[...selected.timeline].reverse().find((event) => event.kind === 'progress' && event.runId === selectedRun.id)}
-        onCancel={async () => { await mutate(() => write('/runs/' + selectedRun.id + '/cancel', 'POST', { reason: '用户取消' }), 'detail'); }}
-        onAskTakeover={() => setConfirmReq({
-          title: '人工接管本次执行',
-          description: '接管会撤销执行者的写入权限并请求其停止;迟到的报告不会再改动任务。请填写接管原因(审计记录)。',
-          placeholder: '例如:方向需要调整 / 发现任务描述有误',
-          confirmText: '接管', danger: true,
-          onConfirm: (reason) => { setConfirmReq(null); void mutate(() => write('/runs/' + selectedRun.id + '/takeover', 'POST', { reason }), 'detail'); },
-          onClose: () => setConfirmReq(null),
-        })}
-        onAskResolve={() => setConfirmReq({
-          title: '确认已停止并收尾',
-          description: '请先在「执行过程」确认子会话已停止且队列静止,再填写核验依据(操作员责任,审计记录)。',
-          placeholder: '例如:已核查子会话无新事件、无残留进程',
-          confirmText: '确认并收尾',
-          onConfirm: (evidence) => { setConfirmReq(null); void mutate(() => write('/runs/' + selectedRun.id + '/resolve', 'POST', { evidence }), 'detail'); },
-          onClose: () => setConfirmReq(null),
-        })} />}
-      {selected.status === 'in_review' && <div className="dsh-wb-panel dsh-wb-review">
-        <h3>人工验收</h3><p>先核对上方选中运行的报告、证据和过程记录。接受后任务才会标记为已完成。</p>
-        <textarea className="dsh-wb-textarea" aria-label="验收或退回意见" value={reviewText} onChange={(e) => setReviewText(e.target.value)} placeholder="退回时必须填写意见" />
-        <div className="dsh-wb-row"><button className="dsh-wb-btn primary" disabled={busy} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/review', 'POST', { expectedRevision: selected.revision, decision: 'accept', comment: reviewText }), 'detail')}>接受，标记完成</button>
-          <button className="dsh-wb-btn" disabled={busy || !reviewText.trim()} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/review', 'POST', { expectedRevision: selected.revision, decision: 'reject', comment: reviewText }), 'detail')}>退回待办</button></div>
-      </div>}
-      <div className="dsh-wb-panel"><h3>任务讨论与状态更新{selected.timelineTotal != null && selected.timelineTotal > selected.timeline.length ? <span className="dsh-wb-muted" style={{ fontWeight: 400 }}>{`(最近 ${selected.timeline.length}/${selected.timelineTotal} 条)`}</span> : null}</h3><TaskTimeline items={selected.timeline} onRun={setRunId} />
-        <textarea className="dsh-wb-textarea" aria-label="发表评论" value={comment} onChange={(e) => setComment(e.target.value)} placeholder="记录问题、建议或决策" /><button className="dsh-wb-btn" disabled={!comment.trim() || busy} onClick={() => void mutate(() => write(`/tasks/${selected.id}/comments`, 'POST', { expectedRevision: selected.revision, text: comment }), 'detail').then((ok) => { if (ok) setComment(''); })}>发送评论</button></div>
-    </aside></>}
     {modal && <><button className="dsh-wb-backdrop" style={{ zIndex: 112 }} aria-label="关闭表单" onClick={() => setModal(null)} /><div className="dsh-wb-modal" role="dialog" aria-modal="true" aria-label={editing ? '编辑' : '新建'}>
       <h2>{editing ? '编辑' : '新建'}{modal === 'project' ? '项目' : modal === 'agent' ? ' Agent' : '任务'}</h2>
       {formError && <div role="alert" className="dsh-wb-error">{formError}</div>}
