@@ -482,7 +482,7 @@ function Workbench() {
   const [taskId, setTaskId] = React.useState('');
   const [detail, setDetail] = React.useState<{ task: Task; runs: Run[] } | null>(null);
   const [runId, setRunId] = React.useState('');
-  const [modal, setModal] = React.useState<'project' | 'agent' | 'task' | null>(null);
+  const [modal, setModal] = React.useState<'project' | 'agent' | 'task' | 'squad' | null>(null);
   const [editing, setEditing] = React.useState<string | null>(null);
   const [form, setForm] = React.useState<Record<string, string>>({});
   const [toolAllow, setToolAllow] = React.useState<string[]>(Object.keys(TOOLS));
@@ -556,7 +556,7 @@ function Workbench() {
     }
     finally { setBusy(false); }
   }
-  function begin(kind: 'project' | 'agent' | 'task', id?: string) {
+  function begin(kind: 'project' | 'agent' | 'task' | 'squad', id?: string) {
     const item = kind === 'project' ? overview.projects.find((p) => p.id === id) : kind === 'agent' ? overview.agents.find((a) => a.id === id) : kind === 'squad' ? squads.find((s) => s.id === id) : overview.tasks.find((t) => t.id === id);
     setEditing(id ?? null);
     setFormError('');
