@@ -159,6 +159,18 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
   const [view, setView] = React.useState<'overview' | 'activity' | 'raw'>('overview');
   const [filter, setFilter] = React.useState<'all' | 'agent' | 'tool' | 'error'>('all');
   const [copied, setCopied] = React.useState(-1);
+  // P0-3:交付物安全预览
+  const [previewLoading, setPreviewLoading] = React.useState('');
+  const [previewData, setPreviewData] = React.useState<{ ref: string; content: string; size: number; truncated: boolean } | null>(null);
+  // P0-3:交付物安全预览(评审 §4.5)——经服务端工作区校验读取
+  async function previewFile(ref: string) {
+    setPreviewLoading(ref);
+    try {
+      const result = await api<{ content: string; size: number; truncated: boolean }>(`${BASE}/runs/${encodeURIComponent(run.id)}/preview?ref=${encodeURIComponent(ref)}`);
+      setPreviewData({ ref, content: result.content, size: result.size, truncated: result.truncated });
+    } catch (e) { showToast(`预览失败:${errorText(e)}`, 'error'); }
+    finally { setPreviewLoading(''); }
+  }
   // Wave 3:自动滚动跟随——用户滚到底部附近时新事件自动滚入;离开底部显示「N 条新事件」浮标
   const scrollerRef = React.useRef<HTMLDivElement | null>(null);
   const [follow, setFollow] = React.useState(true);
@@ -247,21 +259,27 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
           onClick={() => setView(key)}>{label}</button>)}
     </div>
     {view === 'overview' && <section className="dsh-wb-panel dsh-wb-run-content">
-      {run.result && !resultRepeatsReport && <div className="dsh-wb-run-result"><b>结果说明</b><p>{run.result.summary}</p></div>}
-      {run.report ? <>
-        <h3>Agent 交付报告</h3><div className="dsh-wb-copy">{run.report.summary}</div>
-        {run.report.nextHint && <div className="dsh-wb-run-next"><b>建议下一步</b><p>{run.report.nextHint}</p></div>}
-        <h3>证据 · {run.report.evidence?.length ?? 0}</h3>
-        {run.report.evidence?.length ? <div className="dsh-wb-evidence-list">{run.report.evidence.map((item, i) => {
-          const ref = typeof item === 'string' ? item : item.ref;
-          return <div className="dsh-wb-evidence" key={i}>
-            <span>{typeof item === 'string' ? '证据' : ({ log: '日志', artifact: '产物', metric: '指标', command: '命令', code_change: '代码修改' } as Record<string, string>)[item.kind] ?? item.kind}</span>
-            <div><b>{typeof item === 'string' ? ref : item.summary || ref}</b><small>{evidencePath(run, ref)}</small></div>
+      {/* P0-3:报告重排(评审 §4.5)——结论→交付物→验收标准→完整报告→技术 */}
+      {run.result && <div className="dsh-wb-run-result"><b>结论</b><p>{run.result.summary}</p>
+        {run.result.kind === 'done' && <p className="dsh-wb-muted">执行完成;是否满足验收标准请对照下方交付物判断。</p>}
+        {run.result.kind === 'blocked' && <p className="dsh-wb-muted">执行受阻;请查看执行过程了解原因。</p>}
+        {run.result.kind === 'failed' && <p className="dsh-wb-muted">执行失败;详情见执行过程与停止原因。</p>}</div>}
+      {run.report?.nextHint && <div className="dsh-wb-run-next"><b>建议下一步</b><p>{run.report.nextHint}</p></div>}
+      <h3>交付物 · {run.report?.evidence?.length ?? 0}</h3>
+      {run.report?.evidence?.length ? <div className="dsh-wb-evidence-list">{run.report.evidence.map((item, i) => {
+        const ref = typeof item === 'string' ? item : item.ref;
+        const label = typeof item === 'string' ? '文件' : ({ log: '日志', artifact: '产物', metric: '指标', command: '命令', code_change: '代码修改' } as Record<string, string>)[item.kind] ?? item.kind;
+        return <div className="dsh-wb-evidence" key={i}>
+          <span>{label}</span>
+          <div><b>{typeof item === 'string' ? ref.split('/').pop() : item.summary || ref.split('/').pop()}</b><small>{evidencePath(run, ref)}</small></div>
+          <div className="dsh-wb-row">
+            <button type="button" className="dsh-wb-btn" onClick={() => void previewFile(ref)} disabled={previewLoading === ref}>{previewLoading === ref ? '加载中…' : '预览'}</button>
             <button type="button" className="dsh-wb-link" onClick={() => void copyEvidence(i, ref)}>{copied === i ? '已复制' : '复制路径'}</button>
-          </div>;
-        })}</div> : <div className="dsh-wb-muted">本次报告未附证据引用。</div>}
-        {copied === -2 && <p className="dsh-wb-muted">浏览器未允许复制，请手动选中上方路径。</p>}
-      </> : <div className="dsh-wb-empty">{run.phase === 'finished' ? '本次执行没有提交报告。请查看结果说明和执行过程。' : 'Agent 尚未提交报告，执行过程可查看实时活动。'}</div>}
+          </div>
+        </div>;
+      })}</div> : <div className="dsh-wb-muted">{run.report ? '本次报告未附文件引用。' : 'Agent 尚未提交报告。'}</div>}
+      {copied === -2 && <p className="dsh-wb-muted">浏览器未允许复制，请手动选中上方路径。</p>}
+      {run.report && <ExpandableText text={run.report.summary} label="展开完整报告" fold />}
       <details className="dsh-wb-technical"><summary>技术信息</summary>
         <div>执行 ID：{run.id}</div><div>子会话：{run.runtime.childSessionId || '尚未创建'}</div>
         <div>内部阶段：{run.phase} · 状态同步：{run.writeback.state}</div>
@@ -294,6 +312,18 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
       {!events.length && <div className="dsh-wb-empty">暂无可显示的会话事件</div>}
       {more && <button className="dsh-wb-btn" onClick={() => void load(cursor, true)}>加载后续记录</button>}
     </section>}
+    {/* P0-3:交付物预览弹窗(只读,经服务端路径校验) */}
+    {previewData && <>
+      <button className="dsh-wb-backdrop" style={{ zIndex: 114 }} aria-label="关闭预览" onClick={() => setPreviewData(null)} />
+      <div className="dsh-wb-modal dsh-wb-preview" role="dialog" aria-modal="true" aria-label="文件预览">
+        <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}>
+          <b>{previewData.ref.split('/').pop()}</b>
+          <button className="dsh-wb-btn ghost" onClick={() => setPreviewData(null)}>关闭 ✕</button>
+        </div>
+        <p className="dsh-wb-muted">{previewData.size} 字节{previewData.truncated ? ' · 已截断' : ''} · {previewData.ref}</p>
+        <div className="dsh-wb-preview-content">{previewData.content}</div>
+      </div>
+    </>}
   </div>;
 }
 
@@ -315,7 +345,7 @@ function RunHistory({ runs, selectedId, onSelect }: { runs: Run[]; selectedId: s
   const [rightId, setRightId] = React.useState('');
   const left = runs.find((run) => run.id === leftId) ?? runs.at(-2);
   const right = runs.find((run) => run.id === rightId) ?? runs.at(-1);
-  if (runs.length === 1) return null;
+  // P0-1:第 1 次 Run 也展示——消除「待办但执行完成」歧义(评审 §2/§6)
   return <section className="dsh-wb-panel">
     <div className="dsh-wb-run-section-head"><div><h3>执行历史 · {runs.length}</h3><p>每次运行独立保存；选择一条查看结果和完整记录。</p></div>
       {runs.length > 1 && <button className="dsh-wb-btn" aria-expanded={compare} onClick={() => setCompare(!compare)}>
@@ -498,6 +528,39 @@ function Workbench() {
       {error && <div role="alert" className="dsh-wb-error">{error}</div>}
       {overview.readOnly && <div role="status" className="dsh-wb-error">工作台当前只读；项目、任务和历史记录仍可查看。</div>}
       {page === 'overview' && <>
+        {/* P0-2:「现在需要你处理」行动区(评审 §4.1)——按待验收→受阻→执行中→未分派排列 */}
+        {(() => {
+          const review = overview.tasks.filter((t) => t.status === 'in_review');
+          const blocked = overview.tasks.filter((t) => t.status === 'blocked');
+          const running = overview.tasks.filter((t) => t.status === 'in_progress' || t.owner);
+          const unassigned = overview.tasks.filter((t) => t.status === 'todo' && !t.assigneeId);
+          const actionable = [...review.map((t) => ({ task: t, why: '等待人工验收', act: '去验收' })),
+            ...blocked.map((t) => ({ task: t, why: '任务受阻,需查看原因', act: '查看' })),
+            ...running.map((t) => ({ task: t, why: 'Agent 正在工作', act: '查看进度' })),
+            ...unassigned.map((t) => ({ task: t, why: '未分派 Agent', act: '去分派' }))];
+          if (!actionable.length && !overview.projects.length) {
+            return <div className="dsh-wb-panel dsh-wb-next-steps">
+              <h2>开始使用</h2>
+              <div className="dsh-wb-guide-steps">
+                <div><b>1.</b> 创建项目,绑定本机工作区(须在 DSH_HOME 之外)</div>
+                <div><b>2.</b> 在 Agent 目录建一个执行者(选模型、写指令)</div>
+                <div><b>3.</b> 建任务并分派 Agent,点「手动运行」启动</div>
+              </div>
+              <button className="dsh-wb-btn primary" onClick={() => begin('project')}>创建第一个项目</button>
+            </div>;
+          }
+          if (!actionable.length) return <div className="dsh-wb-panel dsh-wb-next-steps"><p className="dsh-wb-muted">暂无需要你处理的事项。空闲时可新建任务或检查 Agent 配置。</p></div>;
+          return <div className="dsh-wb-panel dsh-wb-next-steps">
+            <h2>需要你处理 · {actionable.length}</h2>
+            <div className="dsp-stagger">{actionable.slice(0, 5).map(({ task, why, act }, i) =>
+              <div key={task.id} className="dsh-wb-action-row" style={{ ['--dsp-i' as string]: String(i) }}>
+                <span className="dsh-wb-action-why">{why}</span>
+                <button className="dsh-wb-link" onClick={() => taskButton(task.id)}>{task.title}</button>
+                <button className="dsh-wb-btn" onClick={() => taskButton(task.id)}>{act} →</button>
+              </div>)}</div>
+            {actionable.length > 5 && <p className="dsh-wb-muted">还有 {actionable.length - 5} 项…</p>}
+          </div>;
+        })()}
         <div className="dsh-wb-grid dsp-stagger">{STATUS.map((s, i) =>
           <button type="button" className="dsh-wb-stat" key={s} data-tone={s} style={{ ['--dsp-i' as string]: String(i) }}
             onClick={() => { setPage('tasks'); setStatusFilter(s); }} title={`查看${LABEL[s]}任务`}>
@@ -527,7 +590,13 @@ function Workbench() {
     </main>
     {selected && <><button className="dsh-wb-backdrop" aria-label="关闭任务详情" onClick={() => setTaskId('')} /><aside className="dsh-wb-detail" aria-label="任务详情">
       <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><span className="dsh-wb-kicker">TASK / {selected.id}</span><button className="dsh-wb-btn ghost" onClick={() => setTaskId('')}>关闭 ✕</button></div>
-      <h1>{selected.title}</h1><p className="dsh-wb-muted">{overview.projects.find((p) => p.id === selected.projectId)?.title} · {LABEL[selected.status]}</p>
+      <h1>{selected.title}</h1>
+      <p className="dsh-wb-muted">{overview.projects.find((p) => p.id === selected.projectId)?.title} · {LABEL[selected.status]}</p>
+      {/* P0-1:任务状态与 Run 状态分离(评审 §2)——历史 Run 的成功不冒充任务已完成 */}
+      {selectedRun && <div className="dsh-wb-status-split">
+        <span className="dsh-wb-status-chip" data-tone={selected.status}>任务:{LABEL[selected.status]}</span>
+        <span className="dsh-wb-status-chip" data-tone="run">上次执行:{runLabel(selectedRun)}</span>
+      </div>}
       {detailError && <div role="alert" className="dsh-wb-error">{detailError}</div>}
       <div className="dsh-wb-row" style={{ margin: '16px 0' }}><button className="dsh-wb-btn" disabled={!!selected.owner || ['in_review', 'done'].includes(selected.status)} onClick={() => begin('task', selected.id)}>编辑任务</button>
         {selected.status === 'done' && <button className="dsh-wb-btn" disabled={busy} onClick={() => void mutate(() => write(`/tasks/${selected.id}`, 'PATCH', { expectedRevision: selected.revision, status: 'todo' }), 'detail')}>重新打开</button>}

@@ -145,6 +145,19 @@ export function registerWorkbenchRoutes(ctx: Context, getServices: () => Promise
           const nextCursor = page.at(-1)?.seq ?? (owned.at(-1)?.seq ?? after);
           return send(res, 200, { events: page, nextCursor, hasMore: events.length > limit });
         }
+        // P0-3:交付物安全预览——按 Run 的工作区根校验路径,只读,大小限制(评审 §4.5)
+        if (area === 'runs' && id && action === 'preview' && method === 'GET') {
+          const run = workbench.runDetail(id);
+          if (run.targetType !== 'workbench_task') throw new ServiceError('NOT_FOUND', '该执行记录没有工作台交付', 404);
+          const ref = String(url.searchParams.get('ref') ?? '');
+          if (!ref) throw new ServiceError('VALIDATION', '缺少文件引用', 422);
+          const root = run.targetRef.canonicalRoot;
+          if (!root) throw new ServiceError('WRONG_STATE', '该执行没有记录工作区根', 409);
+          const { workerReadFile } = await import('../workerfs.js');
+          const result = workerReadFile(root, ref);
+          if (result.error) throw new ServiceError('NOT_FOUND', result.error, 404);
+          return send(res, 200, { path: result.path, size: result.size, truncated: result.truncated, content: result.content ?? '' });
+        }
         send(res, 404, { error: '工作台路径不存在' });
       } catch (e) {
         if (e instanceof ServiceError) return send(res, e.httpStatus, { code: e.code, error: e.message });
