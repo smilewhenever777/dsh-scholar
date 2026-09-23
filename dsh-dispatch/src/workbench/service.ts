@@ -140,16 +140,25 @@ export class WorkbenchService {
   }
   async createTask(raw: Record<string, unknown>): Promise<WorkTask> {
     const projectId = required(raw.projectId, '项目', 100);
-    const title = required(raw.title, '任务标题', 200);
+    const title = required(raw.taskTitle ?? raw.title, '任务标题', 200);
     const description = optional(raw.description, 30000);
     const acceptanceCriteria = required(raw.acceptanceCriteria, '验收标准', 10000);
     const assigneeId = typeof raw.assigneeId === 'string' && raw.assigneeId ? raw.assigneeId : undefined;
     return this.store.mutate((root) => {
       if (!root.projects[projectId]) throw new ServiceError('NOT_FOUND', '项目不存在', 404);
-      if (assigneeId && !root.agents[assigneeId]) throw new ServiceError('NOT_FOUND', '执行者不存在', 404);
+      // P0-1:assigneeId 可以是 Agent 或小队——按存在性判定 kind
+      let assignment: WorkTask['assignment'];
+      if (assigneeId) {
+        if (root.agents[assigneeId]) assignment = { kind: 'agent', id: assigneeId };
+        else {
+          const squadsRoot = root as unknown as { squads?: Record<string, { id: string }> };
+          if (squadsRoot.squads?.[assigneeId]) assignment = { kind: 'squad', id: assigneeId };
+          else throw new ServiceError('NOT_FOUND', '执行者或小队不存在', 404);
+        }
+      }
       const now = Date.now();
       const task: WorkTask = { id: newId('t'), projectId, title, description, acceptanceCriteria,
-        assignment: assigneeId ? { kind: 'agent', id: assigneeId } : undefined,
+        assignment,
         status: 'todo', revision: 1, contentVersion: 1, createdAt: now, updatedAt: now,
         leaseEpoch: 0, runIds: [], timeline: [], operations: {} };
       root.tasks[task.id] = task;
@@ -170,8 +179,15 @@ export class WorkbenchService {
       if (raw.acceptanceCriteria !== undefined) { const v = required(raw.acceptanceCriteria, '验收标准', 10000); semantic ||= v !== task.acceptanceCriteria; task.acceptanceCriteria = v; }
       if (raw.assigneeId !== undefined) {
         const assignee = raw.assigneeId === null || raw.assigneeId === '' ? undefined : String(raw.assigneeId);
-        if (assignee && !root.agents[assignee]) throw new ServiceError('NOT_FOUND', '执行者不存在', 404);
-        task.assignment = assignee ? { kind: 'agent', id: assignee } : undefined;
+        if (assignee) {
+          // P0-1:Agent 或小队
+          if (root.agents[assignee]) task.assignment = { kind: 'agent', id: assignee };
+          else {
+            const squadsRoot = root as unknown as { squads?: Record<string, { id: string }> };
+            if (squadsRoot.squads?.[assignee]) task.assignment = { kind: 'squad', id: assignee };
+            else throw new ServiceError('NOT_FOUND', '执行者或小队不存在', 404);
+          }
+        } else task.assignment = undefined;
       }
       if (raw.status !== undefined) {
         if (!['todo', 'blocked'].includes(String(raw.status))) throw new ServiceError('VALIDATION', '只能手动移到待办或受阻；完成需要验收', 422);
@@ -228,8 +244,37 @@ export class WorkbenchService {
     const task = getTask(root, id);
     if (!['todo', 'blocked'].includes(task.status) || task.owner) throw new ServiceError('WRONG_STATE', '任务当前不可启动', 409);
     const project = root.projects[task.projectId];
+    if (!project) throw new ServiceError('VALIDATION', '请先设置有效项目', 422);
+
+    // P0-1:小队任务——创建 SquadExecution,启动第一步的 Agent
+    if (task.assignment?.kind === 'squad') {
+      const squadsRoot = root as unknown as { squads?: Record<string, { id: string; name: string; steps: Array<{ agentId: string; responsibility: string }> }> };
+      const squad = squadsRoot.squads?.[task.assignment.id];
+      if (!squad || squad.steps.length < 2) throw new ServiceError('VALIDATION', '小队不存在或步骤不足', 422);
+      const firstAgent = root.agents[squad.steps[0].agentId];
+      if (!firstAgent) throw new ServiceError('VALIDATION', '小队第一步 Agent 不存在', 422);
+      if (!this.allowedModels().includes(firstAgent.model)) throw new ServiceError('VALIDATION', '第一步 Agent 模型不在允许列表', 422);
+      // 创建 SquadExecution(幂等:同任务同小队已有活跃执行则 409)
+      return this.store.mutate((mutRoot) => {
+        const execRoot = mutRoot as unknown as { squadExecutions?: Record<string, { id: string; taskId: string; state: string }> };
+        if (!execRoot.squadExecutions) execRoot.squadExecutions = {};
+        const existing = Object.values(execRoot.squadExecutions).find((e) => e.taskId === id && e.state !== 'completed');
+        if (existing) throw new ServiceError('WRONG_STATE', '该任务已有进行中的小队执行', 409);
+        const now = Date.now();
+        const execution = { id: newId('se'), taskId: id, squadId: task.assignment!.id,
+          steps: structuredClone(squad.steps), currentStep: 0, state: 'running', runIds: [], createdAt: now, updatedAt: now };
+        execRoot.squadExecutions[execution.id] = execution;
+        return this.dispatch.start({ actorScope: 'workbench', idempotencyKey, targetType: 'workbench_task',
+          projectId: project.id, nodeId: task.id, ws: project.root, model: firstAgent.model,
+          toolAllow: firstAgent.toolAllow,
+          agentProfile: { id: firstAgent.id, name: firstAgent.name, instructions: firstAgent.instructions,
+            revision: firstAgent.revision, toolAllow: firstAgent.toolAllow } });
+      });
+    }
+
+    // 单 Agent 任务(现有路径)
     const agent = task.assignment?.kind === 'agent' ? root.agents[task.assignment.id] : undefined;
-    if (!project || !agent) throw new ServiceError('VALIDATION', '请先设置有效项目和执行者', 422);
+    if (!agent) throw new ServiceError('VALIDATION', '请先设置有效执行者或小队', 422);
     if (canonicalProjectRoot(project.root).toLowerCase() !== project.root.toLowerCase()) {
       throw new ServiceError('WRONG_STATE', '项目工作区路径已变化，请重新核查项目', 409);
     }
@@ -254,4 +299,58 @@ export class WorkbenchService {
   }
   legacy() { return this.dispatchStore.all().filter((d) => d.targetType === 'traj_node').sort((a, b) => b.createdAt - a.createdAt).map(publicRun); }
   models() { return { allowed: this.allowedModels(), default: this.defaultModel() }; }
+
+  /**
+   * P0-1:小队编排接续——检查 running 小队执行,如果当前步的 Run 已完成则启动下一步。
+   * 由调度器周期调用或 dispatch end 事件后调用。
+   */
+  async continueSquadExecutions(): Promise<string[]> {
+    const started: string[] = [];
+    const root = this.snapshot();
+    const execRoot = root as unknown as { squadExecutions?: Record<string, {
+      id: string; taskId: string; squadId: string; steps: Array<{ agentId: string; responsibility: string }>;
+      currentStep: number; state: string; runIds: string[]; createdAt: number; updatedAt: number;
+    }> };
+    const executions = Object.values(execRoot.squadExecutions ?? {}).filter((e) => e.state === 'running');
+    for (const exec of executions) {
+      const task = root.tasks[exec.taskId];
+      if (!task) continue;
+      // 检查任务是否有活跃的派发(如果任务是 in_progress 且有 owner,当前步仍在执行)
+      if (task.owner) continue;
+      // 如果任务不在 in_progress,说明上一步已结束
+      if (!['in_progress', 'in_review', 'blocked'].includes(task.status)) continue;
+      // in_review 或 blocked 说明小队执行已由 finalize 处理,不需要接续
+      if (task.status !== 'in_progress') continue;
+
+      // 任务回到 in_progress 且无 owner → 上一步成功,需要接续下一步
+      if (exec.currentStep < exec.steps.length - 1) {
+        const nextAgentId = exec.steps[exec.currentStep + 1].agentId;
+        const nextAgent = root.agents[nextAgentId];
+        if (!nextAgent) continue;
+        const project = root.projects[task.projectId];
+        if (!project) continue;
+
+        // 推进步骤并启动下一步
+        const startResult = await this.dispatch.start({
+          actorScope: 'workbench', idempotencyKey: `squad:${exec.id}:step:${exec.currentStep + 1}:${Date.now()}`,
+          targetType: 'workbench_task', projectId: project.id, nodeId: task.id, ws: project.root,
+          model: nextAgent.model, toolAllow: nextAgent.toolAllow,
+          agentProfile: { id: nextAgent.id, name: nextAgent.name, instructions: nextAgent.instructions,
+            revision: nextAgent.revision, toolAllow: nextAgent.toolAllow },
+        });
+        // 更新执行状态
+        await this.store.mutate((mutRoot) => {
+          const mExecRoot = mutRoot as unknown as { squadExecutions?: Record<string, { currentStep: number; runIds: string[]; updatedAt: number }> };
+          const mExec = mExecRoot.squadExecutions?.[exec.id];
+          if (mExec) {
+            mExec.currentStep += 1;
+            mExec.runIds.push(startResult.dispatchId);
+            mExec.updatedAt = Date.now();
+          }
+        });
+        started.push(startResult.dispatchId);
+      }
+    }
+    return started;
+  }
 }

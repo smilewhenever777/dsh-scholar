@@ -72,7 +72,27 @@ export class WorkbenchTargetAdapter implements TargetAdapter {
         task.revision += 1;
         return { ok: false, code: 'SUPERSEDED', detail: '任务已被接管或目标已变化' };
       }
-      task.status = input.outcome === 'done' ? 'in_review' : input.outcome === 'aborted' ? 'todo' : 'blocked';
+      // P0-1:小队感知状态转移——中间步骤 done 保持 in_progress(不是 in_review);
+      // 最后一步 done 才进入 in_review;失败/取消照旧
+      const isSquadTask = task.assignment?.kind === 'squad';
+      let nextStatus: string;
+      if (input.outcome === 'done' && isSquadTask) {
+        // 检查是否还有后续步骤
+        const execRoot = root as unknown as { squadExecutions?: Record<string, { taskId: string; currentStep: number; steps: unknown[]; state: string }> };
+        const exec = Object.values(execRoot.squadExecutions ?? {}).find((e) => e.taskId === task.id && e.state === 'running');
+        if (exec && exec.currentStep < exec.steps.length - 1) {
+          nextStatus = 'in_progress'; // 中间步骤成功 → 保持执行中,等待接续
+        } else {
+          nextStatus = 'in_review'; // 最后一步成功 → 待验收
+        }
+      } else if (input.outcome === 'done') {
+        nextStatus = 'in_review';
+      } else if (input.outcome === 'aborted') {
+        nextStatus = 'todo';
+      } else {
+        nextStatus = 'blocked';
+      }
+      task.status = nextStatus as typeof task.status;
       task.owner = undefined;
       task.revision += 1;
       task.updatedAt = Date.now();

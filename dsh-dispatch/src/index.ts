@@ -166,6 +166,15 @@ export function apply(ctx: Context): void {
       });
     }, 5_000);
     t.unref?.();
+
+    // P0-1:小队接续调度——每 30s 检查待接续的小队执行
+    const squadTimer = setInterval(() => {
+      if (!workbenchInstance) return;
+      void workbenchInstance.continueSquadExecutions().then((started) => {
+        if (started.length) journal('squad/continued', { count: started.length, dispatchIds: started });
+      }).catch(() => undefined);
+    }, 30_000);
+    squadTimer.unref?.();
   });
 
   // 卸载:释放运行时订阅、调度器与写入者锁
