@@ -227,12 +227,16 @@ export class WorkbenchStore {
   /** 读快照(只读,不克隆;调用方不修改)。 */
   snapshot(): WorkbenchRoot | null { return this.root; }
 
-  /** 串行变更;fn 在锁内执行,可修改 root 并在完成后自动持久化。 */
+  /** 串行变更;P1-2:fn 在克隆上执行,成功后才替换内存并持久化——被拒修改不会写入磁盘。 */
   async mutate<T>(fn: (root: WorkbenchRoot) => T): Promise<T> {
     if (this.fault.readOnly || !this.root) throw new ServiceError('STORE_READONLY', this.fault.reason ?? '工作台只读', 503);
     const run = async (): Promise<T> => {
-      const out = fn(this.root!);
-      this.persist(this.root!);
+      // 克隆候选根:fn 内的任何修改只发生在候选上;抛错时丢弃,不影响真实 root
+      const candidate = structuredClone(this.root!) as WorkbenchRoot;
+      const out = fn(candidate);
+      // fn 成功:候选成为新真实根,持久化(含备份+原子替换)
+      this.root = candidate;
+      this.persist(candidate);
       return out;
     };
     const next = this.chain.then(run, run);

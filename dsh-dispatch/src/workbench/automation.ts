@@ -147,34 +147,59 @@ export class AutomationService {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
   }
 
-  /** 单次调度检查:找到到期的启用规则,逐个尝试触发。 */
+  /** 单次调度检查:找到到期的启用规则;停机期间过期的先记 missed_offline 再推进游标。 */
   async tick(): Promise<void> {
     if (this.store.fault.readOnly) return;
     const now = Date.now();
-    const rules = this.list().filter((r) => r.enabled && r.nextTriggerAt && r.nextTriggerAt <= now);
+    const rules = this.list().filter((r) => r.enabled && r.nextTriggerAt);
     for (const rule of rules) {
-      await this.tryTrigger(rule.id, rule.nextTriggerAt!);
+      if (rule.nextTriggerAt! <= now) {
+        // P0-4:停机不补跑——过期的计划时刻只记审计,不执行;推进游标到未来
+        const missedMs = now - rule.nextTriggerAt!;
+        if (missedMs > 120_000) { // 超过 2 分钟视为停机错过
+          await this.recordMissedOffline(rule, rule.nextTriggerAt!, missedMs);
+          await this.advanceCursor(rule.id);
+          continue;
+        }
+        await this.tryTrigger(rule.id, rule.nextTriggerAt!);
+      }
     }
   }
 
-  /** 尝试触发一条规则(幂等:同 (ruleId, scheduledAt) 不重复)。 */
-  async tryTrigger(ruleId: string, scheduledAt: number): Promise<TriggerAttempt> {
-    const rule = this.root().automationRules?.[ruleId];
-    if (!rule) throw new ServiceError('NOT_FOUND', `规则 ${ruleId} 不存在`, 404);
-
-    // 幂等检查:同 (ruleId, scheduledAt) 已有记录
-    const existing = Object.values(this.root().triggerAttempts ?? {})
-      .find((a) => a.ruleId === ruleId && a.scheduledAt === scheduledAt);
-    if (existing) return existing;
-
-    // 先持久 attempt(planned),再启动
-    const attempt = await this.recordAttempt(rule, scheduledAt, 'planned');
+  /** 尝试触发一条规则(P0-5:原子去重——检查+创建在同一 store.mutate 内)。 */
+  async tryTrigger(ruleId: string, scheduledAt: number): Promise<TriggerAttempt | null> {
+    // P0-5:原子检查+创建——同 (ruleId, scheduledAt) 的并发调用只有一个成功
+    const attemptOrExisting = await this.store.mutate((root) => {
+      const autoRoot = root as never as AutomationStore;
+      const rule = autoRoot.automationRules?.[ruleId];
+      if (!rule) return { error: 'not_found' as const };
+      // 原子检查:同键已有记录 → 直接返回(不创建新的)
+      const existing = Object.values(autoRoot.triggerAttempts ?? {})
+        .find((a) => a.ruleId === ruleId && a.scheduledAt === scheduledAt);
+      if (existing) return { existing };
+      // 创建新 attempt(planned)——在同一次原子操作内
+      const attempt: TriggerAttempt = {
+        id: newId('ta'), ruleId, ruleName: rule.name,
+        scheduledAt, result: 'planned', at: Date.now(),
+      };
+      if (!autoRoot.triggerAttempts) autoRoot.triggerAttempts = {};
+      autoRoot.triggerAttempts[attempt.id] = attempt;
+      // 限制数量
+      const all = Object.values(autoRoot.triggerAttempts).sort((a, b) => a.at - b.at);
+      while (all.length > this.maxAttempts) delete autoRoot.triggerAttempts[all.shift()!.id];
+      return { attempt };
+    });
+    if ('error' in attemptOrExisting) throw new ServiceError('NOT_FOUND', `规则 ${ruleId} 不存在`, 404);
+    if ('existing' in attemptOrExisting) return attemptOrExisting.existing ?? null;
+    const attempt = attemptOrExisting.attempt;
+    const rule = this.root().automationRules?.[ruleId]!;
     try {
       if (this.isSlotBusy()) {
         await this.updateAttempt(attempt.id, { result: 'skipped_busy', reason: '全局执行槽被占用' });
         return { ...attempt, result: 'skipped_busy', reason: '全局执行槽被占用' };
       }
-      const { taskId, dispatchId } = await this.startTask(rule.template, `automation:${rule.id}`);
+      // P0-5:确定性幂等键(含 scheduledAt,重试可定位)——替代 Date.now()
+      const { taskId, dispatchId } = await this.startTask(rule.template, `automation:${rule.id}:${scheduledAt}`);
       await this.updateAttempt(attempt.id, { result: 'started', taskId, dispatchId });
       return { ...attempt, result: 'started', taskId, dispatchId };
     } catch (e) {
@@ -183,6 +208,21 @@ export class AutomationService {
     } finally {
       await this.advanceCursor(ruleId);
     }
+  }
+
+  /** P0-4:停机错过审计(不执行,只记录时间范围)。 */
+  private async recordMissedOffline(rule: AutomationRule, scheduledAt: number, missedMs: number): Promise<void> {
+    await this.store.mutate((root) => {
+      const autoRoot = root as never as AutomationStore;
+      if (!autoRoot.triggerAttempts) autoRoot.triggerAttempts = {};
+      const attempt: TriggerAttempt = {
+        id: newId('ta'), ruleId: rule.id, ruleName: rule.name,
+        scheduledAt, result: 'missed_offline',
+        reason: `停机错过 ${Math.round(missedMs / 60000)} 分钟(不补跑)`,
+        at: Date.now(),
+      };
+      autoRoot.triggerAttempts[attempt.id] = attempt;
+    });
   }
 
   private async recordAttempt(rule: AutomationRule, scheduledAt: number, result: TriggerResult): Promise<TriggerAttempt> {
@@ -218,32 +258,51 @@ export class AutomationService {
     });
   }
 
-  /** 计算下次触发时间(简化版 cron:支持通配、步进、指定小时)。 */
+  /** P0-4:全字段 cron(分 时 日 月 周)逐分钟搜索;支持通配、步进、精确值和逗号多值。 */
   private computeNextTrigger(cron: string, from: number): number {
     const parts = cron.trim().split(/\s+/);
-    if (parts.length !== 5) return from + 3600_000; // fallback 1h
-    const [, hourPart] = parts;
-    // 简化:只支持 hourly 和 daily
-    const next = new Date(from);
-    if (hourPart === '*') {
-      next.setMinutes(0, 0, 0);
-      next.setHours(next.getHours() + 1);
-    } else if (hourPart.startsWith('*/')) {
-      const interval = Number(hourPart.slice(2)) || 1;
-      next.setMinutes(0, 0, 0);
-      next.setHours(next.getHours() + interval);
-    } else {
-      // daily at specific hour
-      const hour = Number(hourPart) || 9;
-      next.setHours(hour, 0, 0, 0);
-      if (next.getTime() <= from) next.setDate(next.getDate() + 1);
+    if (parts.length !== 5) return from + 3600_000;
+    const [minPart, hourPart, domPart, monPart, dowPart] = parts;
+    const next = new Date(from + 60_000);
+    next.setSeconds(0, 0);
+    for (let i = 0; i < 1440; i++) {
+      if (this.cronFieldMatches(minPart, next.getMinutes())
+        && this.cronFieldMatches(hourPart, next.getHours())
+        && this.cronFieldMatches(domPart, next.getDate())
+        && this.cronFieldMatches(monPart, next.getMonth() + 1)
+        && this.cronFieldMatches(dowPart, next.getDay())) {
+        return next.getTime();
+      }
+      next.setMinutes(next.getMinutes() + 1);
     }
-    return next.getTime();
+    return from + 3600_000;
   }
 
+  private cronFieldMatches(part: string, value: number): boolean {
+    if (part === '*') return true;
+    if (part.startsWith('*/')) {
+      const step = Number(part.slice(2));
+      return step > 0 && value % step === 0;
+    }
+    return part.split(',').some((p) => Number(p.trim()) === value);
+  }
+
+  /** P0-4:全字段校验(含范围检查和逗号多值)。 */
   private isValidCron(cron: string): boolean {
     const parts = cron.trim().split(/\s+/);
     if (parts.length !== 5) return false;
-    return parts.every((p) => /^(\*|\d+|\*\/\d+)$/.test(p));
+    const ranges = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
+    return parts.every((p, i) => {
+      const [min, max] = ranges[i];
+      if (p === '*') return true;
+      if (p.startsWith('*/')) {
+        const step = Number(p.slice(2));
+        return Number.isInteger(step) && step > 0;
+      }
+      return p.split(',').every((v) => {
+        const n = Number(v.trim());
+        return Number.isInteger(n) && n >= min && n <= max;
+      });
+    });
   }
 }

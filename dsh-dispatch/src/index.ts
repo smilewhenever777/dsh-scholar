@@ -119,33 +119,42 @@ export function apply(ctx: Context): void {
     console.log(`[dsh-dispatch] 执行内核就绪(backend=${target.kind}, model=${policy.defaultModel})`);
     return svc;
   })();
+  // P0-3:单例服务——宿主 ready 时创建一次,路由只读取引用
+  let squadInstance: import('./workbench/squad.js').SquadService | null = null;
+  let automationInstance: import('./workbench/automation.js').AutomationService | null = null;
+
   registerWorkbenchRoutes(ctx, async () => {
     const dispatch = await servicePromise;
     if (!dispatch || !workbenchInstance) return null;
-    const { SquadService } = await import('./workbench/squad.js');
-    const { AutomationService } = await import('./workbench/automation.js');
-    const squad = new SquadService(workbenchStore);
-    const automation = new AutomationService(
-      workbenchStore,
-      async (template, source) => {
-        // 创建任务并启动(经 workbench service 保证原子性)
-        const task = await workbenchInstance!.createTask({
-          projectId: template.projectId, title: template.title,
-          description: template.description, acceptanceCriteria: template.acceptanceCriteria,
-          assigneeId: template.assigneeId,
-        });
-        const result = await workbenchInstance!.start(task.id, { idempotencyKey: `auto-${source}-${Date.now()}` });
-        return { taskId: task.id, dispatchId: result.dispatchId };
-      },
-      () => {
-        try {
-          const all = (dispatch as { list?: (ws?: string) => Array<Record<string, unknown>> }).list?.() ?? [];
-          return all.some((d) => String(d.phase ?? '') !== 'finished');
-        } catch { return false; }
-      },
-    );
-    automation.start();
-    return { workbench: workbenchInstance, squad, automation, dispatch };
+    // 单例:首次请求时创建,后续复用(不重复 start 调度器)
+    if (!squadInstance) {
+      const { SquadService } = await import('./workbench/squad.js');
+      squadInstance = new SquadService(workbenchStore);
+    }
+    if (!automationInstance) {
+      const { AutomationService } = await import('./workbench/automation.js');
+      automationInstance = new AutomationService(
+        workbenchStore,
+        async (template, source) => {
+          const task = await workbenchInstance!.createTask({
+            projectId: template.projectId, title: template.title,
+            description: template.description, acceptanceCriteria: template.acceptanceCriteria,
+            assigneeId: template.assigneeId,
+          });
+          const result = await workbenchInstance!.start(task.id, { idempotencyKey: `auto-${source}` });
+          return { taskId: task.id, dispatchId: result.dispatchId };
+        },
+        () => {
+          try {
+            const all = (dispatch as { list?: (ws?: string) => Array<Record<string, unknown>> }).list?.() ?? [];
+            return all.some((d) => String(d.phase ?? '') !== 'finished');
+          } catch { return false; }
+        },
+      );
+      automationInstance.start(); // 仅首次启动
+      console.log('[dsh-dispatch] 自动化调度器已启动(单例)');
+    }
+    return { workbench: workbenchInstance, squad: squadInstance, automation: automationInstance, dispatch };
   });
 
   // §7.1:启动对账(初始退避 ~5s;只扫描,不重放业务任务)
@@ -159,10 +168,11 @@ export function apply(ctx: Context): void {
     t.unref?.();
   });
 
-  // 卸载:释放运行时订阅与写入者锁
+  // 卸载:释放运行时订阅、调度器与写入者锁
   try {
     (ctx as unknown as { on?: (ev: string, fn: () => void) => void }).on?.('dispose', () => {
       service?.dispose();
+      automationInstance?.stop(); // P0-3:dispose 时停止调度器
       workbenchStore.dispose();
       journal('service/dispose', {});
     });
