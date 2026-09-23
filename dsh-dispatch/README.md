@@ -35,6 +35,15 @@ npm run smoke
 > 设计全文见仓库根 `DISPATCH-DESIGN-REVISED.md`(r2);P0 运行时实测结论见
 > [docs/runtime-capabilities.md](docs/runtime-capabilities.md)。
 
+## v0.9.0 方案阶段 A–D(2026-09-23)
+
+| 阶段 | 交付 |
+|---|---|
+| A 任务/Run 阅读 | 活动流重组(评论/交付/决定主线+进度收起);「关键事件」筛选;工具摘要行;顺序切换 |
+| B 数据升级 | schema v2(assignment 多态);Project goal/description/archived;Agent displayDescription;写前备份 |
+| C 固定小队 | Squad/SquadExecution;步骤快照;中间步自动接续/失败暂停;REST + 客户端 UI |
+| D 定时自动化 | AutomationRule/TriggerAttempt;30s 调度器;(ruleId,scheduledAt) 幂等;忙跳过;REST + 客户端 UI |
+
 ## v0.6.0 UI/UX 优化(2026-09-23,四波)
 
 | 波次 | 内容 |
