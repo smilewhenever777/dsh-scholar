@@ -6,6 +6,7 @@ import { SessionId } from '@deepseek-ai/dsh-session';
 import type { WorkbenchService } from './service.js';
 import type { DispatchService } from '../service.js';
 import { ServiceError } from '../types.js';
+import { workerPreviewFile } from '../workerfs.js';
 
 function send(res: ServerResponse, status: number, data: unknown): void {
   res.statusCode = status;
@@ -80,6 +81,18 @@ export function presentEvent(event: { seq: number; type: string; time: number; d
   return null;
 }
 
+/** 只预览本次 Run 明确提交的交付物，不把工作区读取权限扩展给预览接口。 */
+export function previewRunEvidence(run: ReturnType<WorkbenchService['runDetail']>, ref: string) {
+  if (run.targetType !== 'workbench_task') throw new ServiceError('NOT_FOUND', '该执行记录没有工作台交付', 404);
+  if (!ref) throw new ServiceError('VALIDATION', '缺少文件引用', 422);
+  if (!run.report?.evidence.some((item) => item.ref === ref)) throw new ServiceError('NOT_FOUND', '文件不在本次执行的交付物中', 404);
+  const root = run.targetRef.canonicalRoot;
+  if (!root) throw new ServiceError('WRONG_STATE', '该执行没有记录工作区根', 409);
+  const result = workerPreviewFile(root, ref);
+  if (result.error) throw new ServiceError('NOT_FOUND', result.error, 404);
+  return result;
+}
+
 export function registerWorkbenchRoutes(ctx: Context, getServices: () => Promise<{ workbench: WorkbenchService; dispatch: DispatchService } | null>): void {
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix', path: '/dispatch/workbench',
@@ -145,18 +158,11 @@ export function registerWorkbenchRoutes(ctx: Context, getServices: () => Promise
           const nextCursor = page.at(-1)?.seq ?? (owned.at(-1)?.seq ?? after);
           return send(res, 200, { events: page, nextCursor, hasMore: events.length > limit });
         }
-        // P0-3:交付物安全预览——按 Run 的工作区根校验路径,只读,大小限制(评审 §4.5)
+        // 交付物预览:Run 证据白名单 + 工作区实路径边界 + 类型/大小限制。
         if (area === 'runs' && id && action === 'preview' && method === 'GET') {
           const run = workbench.runDetail(id);
-          if (run.targetType !== 'workbench_task') throw new ServiceError('NOT_FOUND', '该执行记录没有工作台交付', 404);
           const ref = String(url.searchParams.get('ref') ?? '');
-          if (!ref) throw new ServiceError('VALIDATION', '缺少文件引用', 422);
-          const root = run.targetRef.canonicalRoot;
-          if (!root) throw new ServiceError('WRONG_STATE', '该执行没有记录工作区根', 409);
-          const { workerReadFile } = await import('../workerfs.js');
-          const result = workerReadFile(root, ref);
-          if (result.error) throw new ServiceError('NOT_FOUND', result.error, 404);
-          return send(res, 200, { path: result.path, size: result.size, truncated: result.truncated, content: result.content ?? '' });
+          return send(res, 200, previewRunEvidence(run, ref));
         }
         send(res, 404, { error: '工作台路径不存在' });
       } catch (e) {

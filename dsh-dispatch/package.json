@@ -1,6 +1,6 @@
 {
   "name": "dsh-dispatch",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "DSH 独立 AI 团队工作台与受控任务派发引擎",
   "license": "MIT",
   "type": "module",

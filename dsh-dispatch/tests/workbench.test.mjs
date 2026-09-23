@@ -12,7 +12,7 @@ import { MockRuntime } from '../dist/runtime.js';
 import { DispatchService } from '../dist/service.js';
 import { defaultPolicyConfig } from '../dist/policy.js';
 import { childToolFilter } from '../dist/policy.js';
-import { guardLocal, presentEvent } from '../dist/workbench/routes.js';
+import { guardLocal, presentEvent, previewRunEvidence } from '../dist/workbench/routes.js';
 import { assertRejects, sleep } from './util.mjs';
 
 async function harness() {
@@ -88,6 +88,26 @@ test('Run 完成进入人工验收；退回后再次运行保留首次记录，�
     assert.equal(reopened.status, 'todo');
     const revised = await h.workbench.updateTask(task.id, { expectedRevision: reopened.revision, acceptanceCriteria: '新验收标准' });
     assert.equal(revised.acceptanceCriteria, '新验收标准');
+  } finally { h.dispose(); }
+});
+
+test('交付物预览仅允许当前 Run 报告中的文件，并识别 HTML、图片和 PDF', async () => {
+  const h = await harness();
+  try {
+    writeFileSync(join(h.ws, 'page.html'), '<!doctype html><h1>可视交付</h1>');
+    writeFileSync(join(h.ws, 'private.txt'), '工作区内其他文件');
+    writeFileSync(join(h.ws, 'plot.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/+XcAAAAASUVORK5CYII=', 'base64'));
+    writeFileSync(join(h.ws, 'paper.pdf'), '%PDF-1.4\n%%EOF');
+    const started = await h.workbench.start(h.task.id, { idempotencyKey: 'preview' });
+    const child = h.dispatch.status(started.dispatchId).runtime.childSessionId;
+    h.runtime.emitRunStart(child, 'preview-run');
+    await h.dispatch.ingestReport(child, { outcome: 'done', summary: '文件已提交', evidence: ['page.html', 'plot.png', 'paper.pdf', '../outside.txt'] });
+    const run = h.workbench.runDetail(started.dispatchId);
+    assert.equal(previewRunEvidence(run, 'page.html').kind, 'html');
+    assert.equal(previewRunEvidence(run, 'plot.png').mime, 'image/png');
+    assert.equal(previewRunEvidence(run, 'paper.pdf').kind, 'pdf');
+    assert.throws(() => previewRunEvidence(run, 'private.txt'), (e) => e.code === 'NOT_FOUND');
+    assert.throws(() => previewRunEvidence(run, '../outside.txt'), (e) => e.code === 'NOT_FOUND');
   } finally { h.dispose(); }
 });
 

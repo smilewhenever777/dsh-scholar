@@ -1,16 +1,17 @@
 import React from 'react';
 import { DndContext, KeyboardSensor, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { api } from './api';
-import { ConfirmModal, ToastHost, showToast, type ConfirmRequest } from './feedback';
+import { ConfirmModal, ToastHost, showToast, useModalFocus, type ConfirmRequest } from './feedback';
 import { renderMarkdown, markdownCss } from './markdown';
 import { workbenchCss } from './workbench-style';
 
 type Status = 'todo' | 'in_progress' | 'in_review' | 'blocked' | 'done';
 type Page = 'overview' | 'tasks' | 'projects' | 'agents' | 'legacy';
-type Project = { id: string; title: string; root: string; revision: number };
-type Agent = { id: string; name: string; instructions: string; model: string; toolAllow: string[]; revision: number };
+type Project = { id: string; title: string; root: string; revision: number; goal?: string; description?: string; archivedAt?: number };
+type Agent = { id: string; name: string; instructions: string; model: string; toolAllow: string[]; revision: number; displayDescription?: string };
 type Timeline = { id: string; kind: string; at: number; text: string; runId?: string; actor: string };
 type Task = { id: string; projectId: string; title: string; description: string; acceptanceCriteria: string; assigneeId?: string;
+  assignment?: { kind: string; id: string };
   status: Status; revision: number; runIds: string[]; timeline: Timeline[]; timelineTotal?: number; owner?: { dispatchId: string } };
 type Run = { id: string; phase: string; createdAt: number; acceptedAt?: number; lastProgressAt?: number; endedAt?: number; runtime: { childSessionId: string; quiescence: string };
   effectiveConfig: { modelProvider: string; model: string; agentProfile?: { name: string } };
@@ -26,6 +27,8 @@ const STATUS: Status[] = ['todo', 'in_progress', 'in_review', 'blocked', 'done']
 const LABEL: Record<Status, string> = { todo: '待办', in_progress: '执行中', in_review: '待验收', blocked: '受阻', done: '已完成' };
 const TOOLS: Record<string, string> = { dispatch_read_file: '读取文件', dispatch_list_dir: '列出目录', dispatch_write_report: '写入报告', dispatch_progress: '提交进度', dispatch_report: '提交结果' };
 const EMPTY: Overview = { projects: [], agents: [], tasks: [], counts: { todo: 0, in_progress: 0, in_review: 0, blocked: 0, done: 0 }, legacyCount: 0, readOnly: false };
+/** v2:从 assignment 或旧 assigneeId 取分派 Agent id(客户端兼容读取) */
+function assigneeOf(task: Task): string | undefined { return task.assignment?.id ?? task.assigneeId; }
 const state = { open: false, listeners: new Set<() => void>() };
 function subscribe(fn: () => void) { state.listeners.add(fn); return () => { state.listeners.delete(fn); }; }
 function openSnapshot() { return state.open; }
@@ -92,7 +95,7 @@ function Column({ status, tasks, agents, onTask }: { status: Status; tasks: Task
     className={`dsh-wb-col${isOver ? ' over' : ''}${isOver && !droppable ? ' reject' : ''}`}
     aria-label={LABEL[status]} data-accepts={droppable ? 'yes' : 'no'}>
     <div className="dsh-wb-col-head"><span>{LABEL[status]}</span><em>{tasks.length}</em></div>
-    {tasks.map((task) => <TaskCard key={task.id} task={task} agent={agents.find((a) => a.id === task.assigneeId)} onTask={onTask} />)}
+    {tasks.map((task) => <TaskCard key={task.id} task={task} agent={agents.find((a) => a.id === assigneeOf(task))} onTask={onTask} />)}
     {!tasks.length && <div className="dsh-wb-col-empty" />}
   </section>;
 }
@@ -104,7 +107,7 @@ function TaskCard({ task, agent, onTask }: { task: Task; agent?: Agent; onTask: 
     : task.status === 'in_review' ? '等待人工验收'
     : task.status === 'done' ? '已完成'
     : task.status === 'blocked' ? '受阻,需处理'
-    : !task.assigneeId ? '待分派 Agent'
+    : !assigneeOf(task) ? '待分派 Agent'
     : '待手动启动';
   return <article ref={setNodeRef} className="dsh-wb-card" style={{ opacity: isDragging ? .55 : 1,
     transform: transform ? `translate3d(${transform.x}px,${transform.y}px,0)` : undefined }}>
@@ -122,6 +125,48 @@ function ExpandableText({ text, label, fold = false }: { text: string; label: st
   if (!fold && text.length <= 1800) return <div className="dsh-wb-copy">{text}</div>;
   return <details className="dsh-wb-expand"><summary>{label} · {text.length} 字 <span>{preview(text, 90)}</span></summary>
     <pre>{text}</pre></details>;
+}
+type PreviewData = { ref: string; kind: 'text' | 'html' | 'image' | 'pdf'; content?: string; base64?: string; mime?: string; size: number; truncated: boolean };
+function isolatedHtml(content: string) {
+  // 部分 HTML 交付物靠内联脚本渲染。脚本只在无同源权限的 iframe 内执行，CSP 封闭网络与嵌套内容。
+  const policy = "default-src 'none'; script-src 'unsafe-inline'; img-src data:; style-src 'unsafe-inline'; font-src data:; frame-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'";
+  // 预览不写浏览器历史；srcdoc 的不透明源也无法写入宿主 URL。
+  const previewBridge = '<script>try{history.replaceState=function(){};history.pushState=function(){}}catch(e){};addEventListener("keydown",function(e){if(e.key==="Escape")parent.postMessage({type:"dsh-dispatch-preview-escape"},"*")},true)</script>';
+  return `<!doctype html><meta http-equiv="Content-Security-Policy" content="${policy}"><meta name="referrer" content="no-referrer">${previewBridge}${content}`;
+}
+function EvidencePreview({ data, onClose }: { data: PreviewData; onClose: () => void }) {
+  const [source, setSource] = React.useState(false);
+  const ref = useModalFocus(onClose);
+  const frameRef = React.useRef<HTMLIFrameElement | null>(null);
+  React.useEffect(() => {
+    if (data.kind !== 'html') return;
+    const onMessage = (event: MessageEvent) => {
+      if (event.source === frameRef.current?.contentWindow && event.data?.type === 'dsh-dispatch-preview-escape') onClose();
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [data.kind, onClose]);
+  const mediaUrl = data.base64 && data.mime ? `data:${data.mime};base64,${data.base64}` : '';
+  return <>
+    <button type="button" className="dsh-wb-backdrop" style={{ zIndex: 114 }} aria-label="关闭预览" onClick={onClose} />
+    <div ref={ref} className="dsh-wb-modal dsh-wb-preview" role="dialog" aria-modal="true" aria-label="文件预览">
+      <div className="dsh-wb-preview-head">
+        <div><b>{data.ref.split(/[\\/]/).pop()}</b><span>{data.kind === 'html' ? 'HTML 页面' : data.kind === 'image' ? '图片' : data.kind === 'pdf' ? 'PDF 文档' : '文本文件'}</span></div>
+        <div className="dsh-wb-row">
+          {data.kind === 'html' && <button type="button" className="dsh-wb-btn" aria-pressed={source} onClick={() => setSource(!source)}>{source ? '查看页面' : '查看源码'}</button>}
+          <button type="button" className="dsh-wb-btn ghost" onClick={onClose}>关闭 ✕</button>
+        </div>
+      </div>
+      <p className="dsh-wb-muted">{data.size} 字节{data.truncated ? ' · 已截断' : ''} · {data.ref}</p>
+      {data.kind === 'html' && !source && <>
+        <p className="dsh-wb-preview-note">隔离预览：页面脚本仅在沙箱内运行；同源访问、网络请求与表单提交已禁用。</p>
+        <iframe ref={frameRef} className="dsh-wb-preview-frame" title={`${data.ref} 页面预览`} sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={isolatedHtml(data.content ?? '')} />
+      </>}
+      {data.kind === 'image' && <div className="dsh-wb-preview-media"><img src={mediaUrl} alt={data.ref.split(/[\\/]/).pop() ?? '交付物图片'} /></div>}
+      {data.kind === 'pdf' && <iframe className="dsh-wb-preview-frame" title={`${data.ref} PDF 预览`} sandbox="" referrerPolicy="no-referrer" src={mediaUrl} />}
+      {(data.kind === 'text' || source) && <div className="dsh-wb-preview-content">{data.content ?? ''}</div>}
+    </div>
+  </>;
 }
 type ActivityItem = { event: Event; result?: Event };
 function groupActivity(events: Event[]): ActivityItem[] {
@@ -189,13 +234,16 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
   const [copied, setCopied] = React.useState(-1);
   // P0-3:交付物安全预览
   const [previewLoading, setPreviewLoading] = React.useState('');
-  const [previewData, setPreviewData] = React.useState<{ ref: string; content: string; size: number; truncated: boolean } | null>(null);
+  const [previewData, setPreviewData] = React.useState<PreviewData | null>(null);
+  const closePreview = React.useCallback(() => setPreviewData(null), []);
   // P0-3:交付物安全预览(评审 §4.5)——经服务端工作区校验读取
   async function previewFile(ref: string) {
     setPreviewLoading(ref);
     try {
-      const result = await api<{ content: string; size: number; truncated: boolean }>(`${BASE}/runs/${encodeURIComponent(run.id)}/preview?ref=${encodeURIComponent(ref)}`);
-      setPreviewData({ ref, content: result.content, size: result.size, truncated: result.truncated });
+      const result = await api<Omit<PreviewData, 'ref'> & { kind?: PreviewData['kind'] }>(`${BASE}/runs/${encodeURIComponent(run.id)}/preview?ref=${encodeURIComponent(ref)}`);
+      // 已打开的旧宿主可能仍返回文本预览结构；重启后由服务端提供受限类型。
+      const kind = result.kind ?? (!result.truncated && /\.html?$/i.test(ref) ? 'html' : 'text');
+      setPreviewData({ ref, ...result, kind });
     } catch (e) { showToast(`预览失败:${errorText(e)}`, 'error'); }
     finally { setPreviewLoading(''); }
   }
@@ -290,7 +338,10 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
     </div>
     {view === 'overview' && <section className="dsh-wb-panel dsh-wb-run-content">
       {/* P0-3:报告重排(评审 §4.5)——结论→交付物→验收标准→完整报告→技术 */}
-      {run.result && <div className="dsh-wb-run-result"><b>结论</b><p>{run.result.summary}</p>
+      {run.result && <div className="dsh-wb-run-result"><b>结论</b><p>{preview(run.result.summary, 180)}</p>
+        {run.result.summary.length > 180 && (resultRepeatsReport
+          ? <p className="dsh-wb-muted">完整内容可在下方「展开完整报告」查看。</p>
+          : <ExpandableText text={run.result.summary} label="展开完整结论" fold />)}
         {run.result.kind === 'done' && <p className="dsh-wb-muted">执行完成;是否满足验收标准请对照下方交付物判断。</p>}
         {run.result.kind === 'blocked' && <p className="dsh-wb-muted">执行受阻;请查看执行过程了解原因。</p>}
         {run.result.kind === 'failed' && <p className="dsh-wb-muted">执行失败;详情见执行过程与停止原因。</p>}</div>}
@@ -345,18 +396,7 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
       {!events.length && <div className="dsh-wb-empty">暂无可显示的会话事件</div>}
       {more && <button className="dsh-wb-btn" onClick={() => void load(cursor, true)}>加载后续记录</button>}
     </section>}
-    {/* P0-3:交付物预览弹窗(只读,经服务端路径校验) */}
-    {previewData && <>
-      <button className="dsh-wb-backdrop" style={{ zIndex: 114 }} aria-label="关闭预览" onClick={() => setPreviewData(null)} />
-      <div className="dsh-wb-modal dsh-wb-preview" role="dialog" aria-modal="true" aria-label="文件预览">
-        <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}>
-          <b>{previewData.ref.split('/').pop()}</b>
-          <button className="dsh-wb-btn ghost" onClick={() => setPreviewData(null)}>关闭 ✕</button>
-        </div>
-        <p className="dsh-wb-muted">{previewData.size} 字节{previewData.truncated ? ' · 已截断' : ''} · {previewData.ref}</p>
-        <div className="dsh-wb-preview-content">{previewData.content}</div>
-      </div>
-    </>}
+    {previewData && <EvidencePreview data={previewData} onClose={closePreview} />}
   </div>;
 }
 
@@ -507,7 +547,7 @@ function Workbench() {
     if (kind === 'agent') setToolAllow((item as Agent | undefined)?.toolAllow ?? Object.keys(TOOLS));
     setForm(item ? Object.fromEntries(Object.entries(item).map(([k, v]) => [k, String(v ?? '')])) :
       kind === 'task' ? { projectId: projectId || overview.projects[0]?.id || '', title: '', description: '', acceptanceCriteria: '', assigneeId: '' } :
-      kind === 'agent' ? { name: '', instructions: '', model: models.default } : { title: '', root: '' });
+      kind === 'agent' ? { name: '', instructions: '', model: models.default, displayDescription: '' } : { title: '', root: '', goal: '', description: '' });
     setModal(kind);
   }
   async function saveModal() {
@@ -525,8 +565,8 @@ function Workbench() {
     if (missing.length) { setFormError(`请填写:${missing.join('、')}`); return; }
     const endpoint = kind === 'project' ? 'projects' : kind === 'agent' ? 'agents' : 'tasks';
     const current = editing ? (kind === 'project' ? overview.projects : kind === 'agent' ? overview.agents : overview.tasks).find((x) => x.id === editing) : undefined;
-    const body = kind === 'project' ? { title: form.title, root: form.root, expectedRevision: current?.revision } :
-      kind === 'agent' ? { name: form.name, instructions: form.instructions, model: form.model, toolAllow, expectedRevision: current?.revision } :
+    const body = kind === 'project' ? { title: form.title, root: form.root, goal: form.goal ?? '', description: form.description ?? '', expectedRevision: current?.revision } :
+      kind === 'agent' ? { name: form.name, instructions: form.instructions, model: form.model, toolAllow, displayDescription: form.displayDescription ?? '', expectedRevision: current?.revision } :
       { projectId: form.projectId, title: form.title, description: form.description, acceptanceCriteria: form.acceptanceCriteria,
         assigneeId: form.assigneeId || null, expectedRevision: current?.revision };
     const ok = await mutate(() => write(`/${endpoint}${editing ? `/${editing}` : ''}`, editing ? 'PATCH' : 'POST', body), 'modal');
@@ -564,7 +604,7 @@ function Workbench() {
     <main className="dsh-wb-main">
       <header className="dsh-wb-head"><div><div className="dsh-wb-kicker">DSH / DISPATCH</div><h1>{selected ? '任务详情' : page === 'overview' ? '工作总览' : page === 'tasks' ? '任务' : page === 'projects' ? '项目' : page === 'agents' ? 'Agent 目录' : '旧派发历史'}</h1></div>
         <div className="dsh-wb-head-actions">
-          {selected && <button className="dsh-wb-btn" onClick={() => { setTaskId(''); setDetail(null); }}>← 返回列表</button>}
+          {selected && <button className="dsh-wb-btn" onClick={() => { setTaskId(''); setDetail(null); }}>← 返回{page === 'overview' ? '总览' : '列表'}</button>}
           <button className="dsh-wb-btn" onClick={() => void refresh()}>刷新</button><button className="dsh-wb-btn ghost" onClick={() => setOpen(false)} aria-label="关闭工作台">关闭 ✕</button></div></header>
       {error && <div role="alert" className="dsh-wb-error">{error}</div>}
       {overview.readOnly && <div role="status" className="dsh-wb-error">工作台当前只读；项目、任务和历史记录仍可查看。</div>}
@@ -575,7 +615,7 @@ function Workbench() {
           <p className="dsh-wb-muted">{overview.projects.find((p) => p.id === selected.projectId)?.title} · {LABEL[selected.status]}</p>
           {selectedRun && <div className="dsh-wb-status-split">
             <span className="dsh-wb-status-chip" data-tone={selected.status}>任务:{LABEL[selected.status]}</span>
-            <span className="dsh-wb-status-chip" data-tone="run">上次执行:{runLabel(selectedRun)}</span>
+            <span className="dsh-wb-status-chip" data-tone="run">{selectedRun.id === detail?.runs.at(-1)?.id ? '上次执行' : `当前查看第 ${(detail?.runs.findIndex((run) => run.id === selectedRun.id) ?? -1) + 1} 次执行`}:{runLabel(selectedRun)}</span>
           </div>}
           {detailError && <div role="alert" className="dsh-wb-error">{detailError}</div>}
           <details className="dsh-wb-panel dsh-wb-task-brief" open={!selected.runIds.length}>
@@ -629,7 +669,7 @@ function Workbench() {
           <div className="dsh-wb-panel dsh-wb-side-card dsh-wb-side-action">
             <h3>执行</h3>
             <div className="dsh-wb-row"><select className="dsh-wb-select" aria-label="分派 Agent" disabled={!!selected.owner || busy} value={selected.assigneeId ?? ''} onChange={(e) => void mutate(() => write('/tasks/' + selected.id, 'PATCH', { expectedRevision: selected.revision, assigneeId: e.target.value || null }), 'detail')}><option value="">未分派</option>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name} · {a.model}</option>)}</select></div>
-            {['todo', 'blocked'].includes(selected.status) && !selected.owner && <button className="dsh-wb-btn primary" style={{ width: '100%', marginTop: 8 }} disabled={!selected.assigneeId || busy} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/run', 'POST', { idempotencyKey: 'ui-' + crypto.randomUUID() }), 'detail')}>手动运行</button>}
+            {['todo', 'blocked'].includes(selected.status) && !selected.owner && <button className="dsh-wb-btn primary" style={{ width: '100%', marginTop: 8 }} disabled={!assigneeOf(selected) || busy} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/run', 'POST', { idempotencyKey: 'ui-' + crypto.randomUUID() }), 'detail')}>手动运行</button>}
             {selected.owner && <p className="dsh-wb-muted" style={{ marginTop: 8 }}>执行中;目标与验收标准已锁定。取消后等待静止确认。</p>}
           </div>
           <RunHistory key={selected.id} runs={detail?.runs ?? []} selectedId={runId} onSelect={setRunId} />
@@ -641,10 +681,12 @@ function Workbench() {
           const review = overview.tasks.filter((t) => t.status === 'in_review');
           const blocked = overview.tasks.filter((t) => t.status === 'blocked');
           const running = overview.tasks.filter((t) => t.status === 'in_progress' || t.owner);
+          const ready = overview.tasks.filter((t) => t.status === 'todo' && !!assigneeOf(t) && !t.owner);
           const unassigned = overview.tasks.filter((t) => t.status === 'todo' && !t.assigneeId);
           const actionable = [...review.map((t) => ({ task: t, why: '等待人工验收', act: '去验收' })),
             ...blocked.map((t) => ({ task: t, why: '任务受阻,需查看原因', act: '查看' })),
             ...running.map((t) => ({ task: t, why: 'Agent 正在工作', act: '查看进度' })),
+            ...ready.map((t) => ({ task: t, why: '已分派 Agent,等待启动', act: '去运行' })),
             ...unassigned.map((t) => ({ task: t, why: '未分派 Agent', act: '去分派' }))];
           if (!actionable.length && !overview.projects.length) {
             return <div className="dsh-wb-panel dsh-wb-next-steps">
@@ -687,11 +729,13 @@ function Workbench() {
         {layout === 'board' ? <DndContext sensors={sensors} onDragEnd={onDragEnd}><div className="dsh-wb-board">{STATUS.filter((s) => !statusFilter || s === statusFilter).map((s) => <Column key={s} status={s} tasks={filtered.filter((t) => t.status === s)} agents={overview.agents} onTask={taskButton} />)}</div></DndContext> :
           <div className="dsh-wb-panel"><table className="dsh-wb-table"><thead><tr><th>任务</th><th>项目</th><th>执行者</th><th>状态</th><th>Run</th></tr></thead><tbody>{filtered.map((t) => <tr key={t.id}><td><button className="dsh-wb-link" onClick={() => taskButton(t.id)}>{t.title}</button></td><td>{overview.projects.find((p) => p.id === t.projectId)?.title}</td><td>{overview.agents.find((a) => a.id === t.assigneeId)?.name ?? '未分派'}</td><td>{LABEL[t.status]}</td><td>{t.runIds.length}</td></tr>)}</tbody></table>{!filtered.length && <div className="dsh-wb-empty">暂无任务</div>}</div>}</>}
       {page === 'projects' && <><button className="dsh-wb-btn primary" onClick={() => begin('project')}>新建项目</button><div style={{ height: 16 }} />
-        {overview.projects.map((p) => <div className="dsh-wb-panel" key={p.id}><div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><h2>{p.title}</h2><button className="dsh-wb-btn" onClick={() => begin('project', p.id)}>重命名</button></div><div className="dsh-wb-code">{p.root}</div><button className="dsh-wb-link" onClick={() => { setProjectId(p.id); setPage('tasks'); }}>查看 {overview.tasks.filter((t) => t.projectId === p.id).length} 个任务 →</button></div>)}</>}
+        {overview.projects.map((p) => <div className="dsh-wb-panel" key={p.id}><div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><h2>{p.title}</h2><button className="dsh-wb-btn" onClick={() => begin('project', p.id)}>重命名</button></div>{p.goal && <p style={{ margin: '6px 0 0', fontSize: 12, lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary)' }}>{p.goal}</p>}
+            <div className="dsh-wb-code">{p.root}</div><button className="dsh-wb-link" onClick={() => { setProjectId(p.id); setPage('tasks'); }}>查看 {overview.tasks.filter((t) => t.projectId === p.id).length} 个任务 →</button></div>)}</>}
       {page === 'agents' && <><button className="dsh-wb-btn primary" onClick={() => begin('agent')}>新建 Agent</button><div style={{ height: 16 }} />
         <div className="dsp-stagger">{overview.agents.map((a, i) => <div className="dsh-wb-panel" key={a.id} style={{ ['--dsp-i' as string]: String(i) }}>
           <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><h2>{a.name}</h2><button className="dsh-wb-btn" onClick={() => begin('agent', a.id)}>编辑</button></div>
-          <div className="dsh-wb-muted">模型:{a.model} · 已分派 {overview.tasks.filter((t) => t.assigneeId === a.id).length} 个任务 · 工具 {a.toolAllow.length}/{Object.keys(TOOLS).length}</div>
+          {a.displayDescription && <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }}>{a.displayDescription}</p>}
+          <div className="dsh-wb-muted">模型:{a.model} · 已分派 {overview.tasks.filter((t) => assigneeOf(t) === a.id).length} 个任务 · 工具 {a.toolAllow.length}/{Object.keys(TOOLS).length}</div>
           <ExpandableText text={a.instructions} label="展开完整工作指令" fold /></div>)}</div></>}
       {page === 'legacy' && <div className="dsh-wb-panel"><p className="dsh-wb-muted">旧 trajectory 派发仅供查看,不会自动成为已验收任务。共 {overview.legacyCount} 条。</p>
         <table className="dsh-wb-table"><thead><tr><th>目标</th><th>结果</th><th>开始</th><th>结束</th></tr></thead><tbody>{legacy.map((r) => <tr key={r.id}><td>{r.targetType === 'workbench_task' ? '工作台任务' : r.targetRef.nodeId}</td><td>{OUTCOME_LABEL[r.result?.kind ?? ''] ?? PHASE_LABEL[r.phase] ?? r.phase}</td><td>{fmt(r.createdAt)}</td><td>{fmt(r.endedAt)}</td></tr>)}</tbody></table></div>}
@@ -700,8 +744,11 @@ function Workbench() {
     {modal && <><button className="dsh-wb-backdrop" style={{ zIndex: 112 }} aria-label="关闭表单" onClick={() => setModal(null)} /><div className="dsh-wb-modal" role="dialog" aria-modal="true" aria-label={editing ? '编辑' : '新建'}>
       <h2>{editing ? '编辑' : '新建'}{modal === 'project' ? '项目' : modal === 'agent' ? ' Agent' : '任务'}</h2>
       {formError && <div role="alert" className="dsh-wb-error">{formError}</div>}
-      {modal === 'project' && <><Field autoFocus label="项目名称" value={form.title} onChange={(v) => setForm({ ...form, title: v })} />{editing ? <div className="dsh-wb-code">{form.root}</div> : <Field label="本机工作区绝对路径" hint="须位于 DSH_HOME 之外;一个路径只绑一个项目" value={form.root} onChange={(v) => setForm({ ...form, root: v })} />}</>}
-      {modal === 'agent' && <><Field autoFocus label="Agent 名称" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><div className="dsh-wb-field"><label>模型</label><select className="dsh-wb-select" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })}>{models.allowed.map((m) => <option key={m}>{m}</option>)}</select></div><div className="dsh-wb-field"><label>工作指令</label><textarea className="dsh-wb-textarea" rows={Math.min(16, Math.max(4, (form.instructions ?? '').split('\n').length))} value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} /></div><div className="dsh-wb-field"><label>受控工具权限</label><div className="dsh-wb-row">{Object.entries(TOOLS).map(([name, label]) => <label key={name} className="dsh-wb-row"><input type="checkbox" checked={toolAllow.includes(name)} onChange={(e) => setToolAllow(e.target.checked ? [...toolAllow, name] : toolAllow.filter((x) => x !== name))} />{label}</label>)}</div></div></>}
+      {modal === 'project' && <><Field autoFocus label="项目名称" value={form.title} onChange={(v) => setForm({ ...form, title: v })} />{editing ? <div className="dsh-wb-code">{form.root}</div> : <Field label="本机工作区绝对路径" hint="须位于 DSH_HOME 之外;一个路径只绑一个项目" value={form.root} onChange={(v) => setForm({ ...form, root: v })} />}
+        <div className="dsh-wb-field"><label>项目目标(可选)</label><textarea className="dsh-wb-textarea" rows={3} value={form.goal ?? ''} onChange={(e) => setForm({ ...form, goal: e.target.value })} placeholder="一段话说明这个项目要解决什么问题" /></div>
+        <div className="dsh-wb-field"><label>项目说明(可选)</label><textarea className="dsh-wb-textarea" rows={3} value={form.description ?? ''} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="方法论、分工、注意事项等" /></div></>}
+      {modal === 'agent' && <><Field autoFocus label="Agent 名称" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><div className="dsh-wb-field"><label>模型</label><select className="dsh-wb-select" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })}>{models.allowed.map((m) => <option key={m}>{m}</option>)}</select></div>
+        <div className="dsh-wb-field"><label>角色描述(可选,不注入提示词)</label><input className="dsh-wb-input" value={form.displayDescription ?? ''} onChange={(e) => setForm({ ...form, displayDescription: e.target.value })} placeholder="一句话说明这个 Agent 做什么(仅 UI 展示)" /></div><div className="dsh-wb-field"><label>工作指令</label><textarea className="dsh-wb-textarea" rows={Math.min(16, Math.max(4, (form.instructions ?? '').split('\n').length))} value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} /></div><div className="dsh-wb-field"><label>受控工具权限</label><div className="dsh-wb-row">{Object.entries(TOOLS).map(([name, label]) => <label key={name} className="dsh-wb-row"><input type="checkbox" checked={toolAllow.includes(name)} onChange={(e) => setToolAllow(e.target.checked ? [...toolAllow, name] : toolAllow.filter((x) => x !== name))} />{label}</label>)}</div></div></>}
       {modal === 'task' && <><div className="dsh-wb-field"><label>项目</label>{editing ? <div>{overview.projects.find((p) => p.id === form.projectId)?.title}</div> : <select className="dsh-wb-select" value={form.projectId} onChange={(e) => setForm({ ...form, projectId: e.target.value })}>{overview.projects.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}</select>}</div><Field autoFocus label="任务标题" value={form.title} onChange={(v) => setForm({ ...form, title: v })} /><div className="dsh-wb-field"><label>任务描述</label><textarea className="dsh-wb-textarea" rows={Math.min(10, Math.max(3, (form.description ?? '').split('\n').length))} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></div><div className="dsh-wb-field"><label>验收标准(必填)</label><textarea className="dsh-wb-textarea" rows={Math.min(10, Math.max(3, (form.acceptanceCriteria ?? '').split('\n').length))} value={form.acceptanceCriteria} onChange={(e) => setForm({ ...form, acceptanceCriteria: e.target.value })} /></div><div className="dsh-wb-field"><label>分派 Agent</label><select className="dsh-wb-select" value={form.assigneeId} onChange={(e) => setForm({ ...form, assigneeId: e.target.value })}><option value="">暂不分派</option>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select><small className="dsh-wb-field-hint">分派后需到任务详情点「手动运行」才会启动子代理。</small></div></>}
       <div className="dsh-wb-row" style={{ justifyContent: 'flex-end' }}><button className="dsh-wb-btn" onClick={() => setModal(null)}>取消</button><button className="dsh-wb-btn primary" disabled={busy} onClick={() => void saveModal()}>保存</button></div>
     </div></>}

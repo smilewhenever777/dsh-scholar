@@ -25,7 +25,7 @@ export function useModalFocus(onClose: () => void) {
       if (stack[stack.length - 1] !== handle) return;
       if (ev.key === 'Escape') { ev.stopImmediatePropagation(); ev.preventDefault(); onClose(); return; }
       if (ev.key !== 'Tab' || !ref.current) return;
-      const focusables = [...ref.current.querySelectorAll<HTMLElement>('input, textarea, select, button, [href]')].filter((el) => !(el as HTMLButtonElement).disabled);
+      const focusables = [...ref.current.querySelectorAll<HTMLElement>('input, textarea, select, button, iframe, [href]')].filter((el) => !(el as HTMLButtonElement).disabled);
       if (!focusables.length) return;
       const firstEl = focusables[0];
       const lastEl = focusables[focusables.length - 1];

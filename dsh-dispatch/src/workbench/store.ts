@@ -7,14 +7,47 @@ import { ServiceError } from '../types.js';
 export type TaskStatus = 'todo' | 'in_progress' | 'in_review' | 'blocked' | 'done';
 export type TimelineKind = 'comment' | 'progress' | 'run' | 'review';
 export interface TimelineEvent { id: string; kind: TimelineKind; at: number; text: string; runId?: string; actor: string }
-export interface Project { id: string; title: string; root: string; revision: number; createdAt: number; updatedAt: number }
-export interface AgentProfile { id: string; name: string; instructions: string; model: string; toolAllow: string[]; revision: number; createdAt: number; updatedAt: number }
+
+/** v2:分派对象——为小队预留多态,旧 assigneeId 迁移为 {kind:'agent', id} */
+export interface Assignment { kind: 'agent' | 'squad'; id: string }
+
+export interface Project {
+  id: string;
+  title: string;
+  root: string;
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+  /** v2:项目目标(一段话描述研究/工作目的) */
+  goal?: string;
+  /** v2:自由说明(方法论、成员分工等) */
+  description?: string;
+  /** v2:归档时间——非终态,仅影响列表排序和默认筛选 */
+  archivedAt?: number;
+}
+
+export interface AgentProfile {
+  id: string;
+  name: string;
+  instructions: string;
+  model: string;
+  toolAllow: string[];
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+  /** v2:展示用角色描述——不注入提示词,仅 UI 显示(阶段 B §2) */
+  displayDescription?: string;
+}
+
 export interface WorkTask {
   id: string;
   projectId: string;
   title: string;
   description: string;
   acceptanceCriteria: string;
+  /** v2:分派对象(agent 或 squad);旧 assigneeId 由迁移生成 */
+  assignment?: Assignment;
+  /** v1 兼容读取:迁移后此字段不再写入 */
   assigneeId?: string;
   status: TaskStatus;
   revision: number;
@@ -27,8 +60,9 @@ export interface WorkTask {
   owner?: { dispatchId: string; childSessionId: string; epoch: number; fingerprint: string; workerWrites: boolean; revoked?: boolean };
   operations: Record<string, { hash: string; appliedAt: number }>;
 }
+
 export interface WorkbenchRoot {
-  schemaVersion: 1;
+  schemaVersion: 2;
   revision: number;
   projects: Record<string, Project>;
   agents: Record<string, AgentProfile>;
@@ -39,9 +73,26 @@ export interface WorkbenchRoot {
 export function newId(prefix: string): string { return `${prefix}_${randomBytes(8).toString('hex')}`; }
 export function hash(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 
+/** v1→v2 迁移:assigneeId → assignment;新增字段缺省。返回迁移后的根与是否发生了变更。 */
+function migrateV1toV2(parsed: { schemaVersion: number; revision: number; projects: Record<string, Project>; agents: Record<string, AgentProfile>; tasks: Record<string, WorkTask> }): { root: WorkbenchRoot; changed: boolean } {
+  let changed = false;
+  const root: WorkbenchRoot = { ...parsed, schemaVersion: 2 };
+  for (const task of Object.values(root.tasks)) {
+    if (task.assigneeId && !task.assignment) {
+      task.assignment = { kind: 'agent', id: task.assigneeId };
+      changed = true;
+    }
+    if (!task.assigneeId && !task.assignment) {
+      // 未分派任务保持无 assignment
+    }
+  }
+  return { root, changed };
+}
+
 function parseRoot(raw: string): WorkbenchRoot {
-  const parsed = JSON.parse(raw) as WorkbenchRoot;
-  if (parsed.schemaVersion !== 1 || !Number.isSafeInteger(parsed.revision) || !parsed.projects || !parsed.agents || !parsed.tasks
+  const parsed = JSON.parse(raw) as Partial<WorkbenchRoot> & { schemaVersion: number };
+  if (![1, 2].includes(parsed.schemaVersion) || !Number.isSafeInteger(parsed.revision)
+    || !parsed.projects || !parsed.agents || !parsed.tasks
     || Array.isArray(parsed.projects) || Array.isArray(parsed.agents) || Array.isArray(parsed.tasks)
     || typeof parsed.projects !== 'object' || typeof parsed.agents !== 'object' || typeof parsed.tasks !== 'object') {
     throw new Error('schemaVersion 或集合无效');
@@ -57,7 +108,11 @@ function parseRoot(raw: string): WorkbenchRoot {
     if (!task || !['todo', 'in_progress', 'in_review', 'blocked', 'done'].includes(task.status)
       || !Array.isArray(task.runIds) || !Array.isArray(task.timeline) || !Number.isSafeInteger(task.revision)) throw new Error('任务数据无效');
   }
-  return parsed;
+  if ((parsed.schemaVersion as number) === 1) {
+    const migrated = migrateV1toV2(parsed as never);
+    return migrated.root;
+  }
+  return parsed as WorkbenchRoot;
 }
 
 export function canonicalProjectRoot(input: string, home = dshHome()): string {
@@ -102,13 +157,17 @@ export class WorkbenchStore {
     this.acquire();
     if (!existsSync(this.file)) {
       if (!this.fault.readOnly) {
-        this.root = { schemaVersion: 1, revision: 0, projects: {}, agents: {}, tasks: {} };
+        this.root = { schemaVersion: 2, revision: 0, projects: {}, agents: {}, tasks: {} };
         try { this.persist(this.root); } catch { /* fault is exposed as read-only */ }
       }
       return;
     }
     try {
       this.root = parseRoot(readFileSync(this.file, 'utf8'));
+      // 迁移后立即持久化(写前备份由 persist 内置)
+      if (this.root && !this.fault.readOnly) {
+        try { this.persist(this.root); } catch { /* 迁移写入失败保持可用,下次启动再试 */ }
+      }
     } catch (e) {
       this.fault.readOnly = true;
       this.fault.reason = `workbench.json 损坏或不可读；原件已保留: ${String(e)}`;
@@ -157,38 +216,40 @@ export class WorkbenchStore {
         renameSync(this.file, bak);
       }
       renameSync(tmp, this.file);
-      this.root = next;
     } catch (e) {
-      const bak = `${this.file}.bak`;
-      if (!existsSync(this.file) && existsSync(bak)) {
-        try { renameSync(bak, this.file); } catch { /* retain backup for manual recovery */ }
-      }
-      try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* preserve primary error */ }
-      this.fault.readOnly = true;
-      this.fault.reason = `工作台持久化失败: ${String(e)}`;
-      throw new ServiceError('STORE_READONLY', this.fault.reason, 503);
+      try { unlinkSync(tmp); } catch { /* best-effort cleanup */ }
+      if (this.root) this.fault.readOnly = true;
+      throw new ServiceError('STORE_READONLY', `workbench.json 写入失败:${String(e)}`, 503);
     }
+    this.root = next;
   }
 
+  /** 读快照(只读,不克隆;调用方不修改)。 */
   snapshot(): WorkbenchRoot | null { return this.root; }
+
+  /** 串行变更;fn 在锁内执行,可修改 root 并在完成后自动持久化。 */
   async mutate<T>(fn: (root: WorkbenchRoot) => T): Promise<T> {
-    if (!this.root || this.fault.readOnly) throw new ServiceError('STORE_READONLY', this.fault.reason ?? '工作台只读', 503);
-    const run = async () => {
-      const root = structuredClone(this.root!);
-      const result = fn(root);
-      this.persist(root);
-      return result;
+    if (this.fault.readOnly || !this.root) throw new ServiceError('STORE_READONLY', this.fault.reason ?? '工作台只读', 503);
+    const run = async (): Promise<T> => {
+      const out = fn(this.root!);
+      this.persist(this.root!);
+      return out;
     };
     const next = this.chain.then(run, run);
     this.chain = next.catch(() => undefined);
     return next;
   }
+
+  /** fn 内修改 root 后调用,触发持久化(含备份与原子替换)。 */
+  commit(): void {
+    if (!this.root) throw new ServiceError('STORE_READONLY', 'store 未初始化', 503);
+    this.persist(this.root);
+  }
+
   dispose(): void {
-    if (!this.ownsLock) return;
-    try {
-      const info = JSON.parse(readFileSync(this.lockFile, 'utf8')) as { bootId?: string };
-      if (info.bootId === this.bootId) unlinkSync(this.lockFile);
-    } catch { /* do not remove someone else's lock */ }
-    this.ownsLock = false;
+    if (this.ownsLock) {
+      try { unlinkSync(this.lockFile); } catch { /* best-effort */ }
+      this.ownsLock = false;
+    }
   }
 }

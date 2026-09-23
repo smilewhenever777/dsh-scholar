@@ -72,12 +72,15 @@ export class WorkbenchService {
   async createProject(raw: Record<string, unknown>): Promise<Project> {
     const title = required(raw.title, '项目名称', 120);
     const rootPath = canonicalProjectRoot(required(raw.root, '工作区路径', 2000));
+    const goal = optional(raw.goal, 2000);
+    const description = optional(raw.description, 8000);
     return this.store.mutate((root) => {
       if (Object.values(root.projects).some((p) => p.root.toLowerCase() === rootPath.toLowerCase())) {
         throw new ServiceError('VALIDATION', '该工作区已有项目', 409);
       }
       const now = Date.now();
-      const project: Project = { id: newId('p'), title, root: rootPath, revision: 1, createdAt: now, updatedAt: now };
+      const project: Project = { id: newId('p'), title, root: rootPath, revision: 1, createdAt: now, updatedAt: now,
+        ...(goal ? { goal } : {}), ...(description ? { description } : {}) };
       root.projects[project.id] = project;
       return project;
     });
@@ -89,6 +92,11 @@ export class WorkbenchService {
       expectRevision(project.revision, raw.expectedRevision);
       const title = required(raw.title, '项目名称', 120);
       project.title = title;
+      // v2:可选更新 goal/description/archived
+      if (raw.goal !== undefined) project.goal = optional(raw.goal, 2000) ?? '';
+      if (raw.description !== undefined) project.description = optional(raw.description, 8000) ?? '';
+      if (raw.archived === true && !project.archivedAt) project.archivedAt = Date.now();
+      if (raw.archived === false && project.archivedAt) project.archivedAt = undefined;
       project.revision += 1;
       project.updatedAt = Date.now();
       return project;
@@ -99,10 +107,12 @@ export class WorkbenchService {
     const instructions = optional(raw.instructions, 12000);
     const model = typeof raw.model === 'string' ? raw.model : this.defaultModel();
     const tools = toolAllow(raw.toolAllow);
+    const displayDescription = optional(raw.displayDescription, 500);
     if (!this.allowedModels().includes(model)) throw new ServiceError('VALIDATION', '模型不在允许列表', 422);
     return this.store.mutate((root) => {
       const now = Date.now();
-      const agent: AgentProfile = { id: newId('a'), name, instructions, model, toolAllow: tools, revision: 1, createdAt: now, updatedAt: now };
+      const agent: AgentProfile = { id: newId('a'), name, instructions, model, toolAllow: tools, revision: 1, createdAt: now, updatedAt: now,
+        ...(displayDescription ? { displayDescription } : {}) };
       root.agents[agent.id] = agent;
       return agent;
     });
@@ -112,6 +122,7 @@ export class WorkbenchService {
     const instructions = optional(raw.instructions, 12000);
     const model = required(raw.model, '模型', 200);
     const tools = toolAllow(raw.toolAllow);
+    const displayDescription = optional(raw.displayDescription, 500);
     if (!this.allowedModels().includes(model)) throw new ServiceError('VALIDATION', '模型不在允许列表', 422);
     return this.store.mutate((root) => {
       const agent = root.agents[id];
@@ -121,6 +132,7 @@ export class WorkbenchService {
       agent.instructions = instructions;
       agent.model = model;
       agent.toolAllow = tools;
+      if (raw.displayDescription !== undefined) agent.displayDescription = displayDescription ?? '';
       agent.revision += 1;
       agent.updatedAt = Date.now();
       return agent;
@@ -136,7 +148,8 @@ export class WorkbenchService {
       if (!root.projects[projectId]) throw new ServiceError('NOT_FOUND', '项目不存在', 404);
       if (assigneeId && !root.agents[assigneeId]) throw new ServiceError('NOT_FOUND', '执行者不存在', 404);
       const now = Date.now();
-      const task: WorkTask = { id: newId('t'), projectId, title, description, acceptanceCriteria, assigneeId,
+      const task: WorkTask = { id: newId('t'), projectId, title, description, acceptanceCriteria,
+        assignment: assigneeId ? { kind: 'agent', id: assigneeId } : undefined,
         status: 'todo', revision: 1, contentVersion: 1, createdAt: now, updatedAt: now,
         leaseEpoch: 0, runIds: [], timeline: [], operations: {} };
       root.tasks[task.id] = task;
@@ -158,7 +171,7 @@ export class WorkbenchService {
       if (raw.assigneeId !== undefined) {
         const assignee = raw.assigneeId === null || raw.assigneeId === '' ? undefined : String(raw.assigneeId);
         if (assignee && !root.agents[assignee]) throw new ServiceError('NOT_FOUND', '执行者不存在', 404);
-        task.assigneeId = assignee;
+        task.assignment = assignee ? { kind: 'agent', id: assignee } : undefined;
       }
       if (raw.status !== undefined) {
         if (!['todo', 'blocked'].includes(String(raw.status))) throw new ServiceError('VALIDATION', '只能手动移到待办或受阻；完成需要验收', 422);
@@ -215,7 +228,7 @@ export class WorkbenchService {
     const task = getTask(root, id);
     if (!['todo', 'blocked'].includes(task.status) || task.owner) throw new ServiceError('WRONG_STATE', '任务当前不可启动', 409);
     const project = root.projects[task.projectId];
-    const agent = task.assigneeId ? root.agents[task.assigneeId] : undefined;
+    const agent = task.assignment?.kind === 'agent' ? root.agents[task.assignment.id] : undefined;
     if (!project || !agent) throw new ServiceError('VALIDATION', '请先设置有效项目和执行者', 422);
     if (canonicalProjectRoot(project.root).toLowerCase() !== project.root.toLowerCase()) {
       throw new ServiceError('WRONG_STATE', '项目工作区路径已变化，请重新核查项目', 409);

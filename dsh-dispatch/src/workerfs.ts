@@ -6,8 +6,8 @@
  *  - 授权由 service 层 worker 门控承担(每次调用重查,冷恢复不缓存)。
  * 这是"受控入口",不是文件系统隔离的替代——不向子代理提供任意 shell/通用文件工具。
  */
-import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { join, sep } from 'node:path';
+import { closeSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { extname, join } from 'node:path';
 import { homedir } from 'node:os';
 
 export const WORKER_FS_LIMITS = {
@@ -110,6 +110,77 @@ export function workerReadFile(wsRoot: string, target: string): ReadResult {
     binary: false,
     content: buf.toString('utf8'),
   };
+}
+
+export interface PreviewResult {
+  path: string;
+  size: number;
+  truncated: boolean;
+  kind: 'text' | 'html' | 'image' | 'pdf';
+  mime?: string;
+  content?: string;
+  base64?: string;
+  error?: string;
+}
+
+const MAX_PREVIEW_MEDIA_BYTES = 8 * 1024 * 1024;
+
+/** 浏览器预览只接受具有匹配文件头的常见图片和 PDF，SVG 始终按文本处理。 */
+function previewMediaType(head: Buffer): { kind: 'image' | 'pdf'; mime: string } | null {
+  if (head.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return { kind: 'image', mime: 'image/png' };
+  if (head.subarray(0, 3).equals(Buffer.from([255, 216, 255]))) return { kind: 'image', mime: 'image/jpeg' };
+  if (head.subarray(0, 6).toString('ascii') === 'GIF87a' || head.subarray(0, 6).toString('ascii') === 'GIF89a') return { kind: 'image', mime: 'image/gif' };
+  if (head.subarray(0, 4).toString('ascii') === 'RIFF' && head.subarray(8, 12).toString('ascii') === 'WEBP') return { kind: 'image', mime: 'image/webp' };
+  if (head.subarray(0, 5).toString('ascii') === '%PDF-') return { kind: 'pdf', mime: 'application/pdf' };
+  return null;
+}
+
+export function workerPreviewFile(wsRoot: string, target: string): PreviewResult {
+  const abs = resolveInsideWs(wsRoot, target);
+  if (!abs) return { path: target, size: 0, truncated: false, kind: 'text', error: '路径越界:仅允许工作区内文件' };
+  const real = guardRealPath(wsRoot, abs);
+  if (!real) return { path: abs, size: 0, truncated: false, kind: 'text', error: '实路径越界(符号链接/敏感目录)或文件不存在' };
+  let size: number;
+  let head: Buffer;
+  try {
+    const st = statSync(real);
+    if (!st.isFile()) return { path: abs, size: 0, truncated: false, kind: 'text', error: '不是普通文件' };
+    size = st.size;
+    const fd = openSync(real, 'r');
+    try {
+      head = Buffer.alloc(Math.min(size, 16));
+      readSync(fd, head, 0, head.length, 0);
+    } finally { closeSync(fd); }
+  } catch {
+    return { path: abs, size: 0, truncated: false, kind: 'text', error: '文件不存在或不可访问' };
+  }
+  const media = previewMediaType(head);
+  if (media) {
+    if (size > MAX_PREVIEW_MEDIA_BYTES) return { path: abs, size, truncated: false, kind: media.kind, error: '文件过大,无法在线预览(上限 8 MB)' };
+    try {
+      const fd = openSync(real, 'r');
+      try {
+        const current = fstatSync(fd);
+        if (!current.isFile() || current.size !== size || current.size > MAX_PREVIEW_MEDIA_BYTES) {
+          return { path: abs, size, truncated: false, kind: media.kind, error: '文件在读取时发生变化' };
+        }
+        const bytes = Buffer.alloc(size);
+        let offset = 0;
+        while (offset < size) {
+          const n = readSync(fd, bytes, offset, size - offset, offset);
+          if (!n) return { path: abs, size, truncated: false, kind: media.kind, error: '文件在读取时发生变化' };
+          offset += n;
+        }
+        if (previewMediaType(bytes.subarray(0, 16))?.mime !== media.mime) {
+          return { path: abs, size, truncated: false, kind: media.kind, error: '文件在读取时发生变化' };
+        }
+        return { path: abs, size, truncated: false, ...media, base64: bytes.toString('base64') };
+      } finally { closeSync(fd); }
+    } catch { return { path: abs, size, truncated: false, kind: media.kind, error: '文件不可访问' }; }
+  }
+  const text = workerReadFile(wsRoot, target);
+  const kind = !text.truncated && /\.html?$/i.test(extname(target)) ? 'html' : 'text';
+  return { path: text.path, size: text.size, truncated: text.truncated, kind, content: text.content, error: text.error };
 }
 
 export interface ListResult {
