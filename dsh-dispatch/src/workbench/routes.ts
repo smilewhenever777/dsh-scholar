@@ -5,6 +5,7 @@ import type {} from '@deepseek-ai/dsh-session-query';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { WorkbenchService } from './service.js';
 import type { SquadService } from './squad.js';
+import type { AutomationService } from './automation.js';
 import type { DispatchService } from '../service.js';
 import { ServiceError } from '../types.js';
 import { workerPreviewFile } from '../workerfs.js';
@@ -94,7 +95,7 @@ export function previewRunEvidence(run: ReturnType<WorkbenchService['runDetail']
   return result;
 }
 
-export function registerWorkbenchRoutes(ctx: Context, getServices: () => Promise<{ workbench: WorkbenchService; squad?: SquadService; dispatch: DispatchService } | null>): void {
+export function registerWorkbenchRoutes(ctx: Context, getServices: () => Promise<{ workbench: WorkbenchService; squad?: SquadService; automation?: AutomationService; dispatch: DispatchService } | null>): void {
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix', path: '/dispatch/workbench',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -102,7 +103,7 @@ export function registerWorkbenchRoutes(ctx: Context, getServices: () => Promise
         if (!guardLocal(req, res)) return;
         const services = await getServices();
         if (!services) return send(res, 503, { code: 'STORE_READONLY', error: '工作台不可用' });
-        const { workbench, dispatch, squad } = services;
+        const { workbench, dispatch, squad, automation } = services;
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const path = url.pathname.replace(/^\/dispatch\/workbench\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
         const method = req.method ?? 'GET';
@@ -172,6 +173,11 @@ export function registerWorkbenchRoutes(ctx: Context, getServices: () => Promise
         if (area === 'squads' && id && method === 'PATCH') return send(res, 200, squad!.update(id, body));
         if (area === 'squads' && id && method === 'DELETE') { const ok = await squad!.delete(id); return send(res, ok ? 200 : 404, ok ? { deleted: true } : { error: '不存在' }); }
         if (area === 'squad-executions' && method === 'GET') return send(res, 200, { executions: squad?.listExecutions() ?? [] });
+        // 阶段D:自动化规则 CRUD + 尝试记录
+        if (area === 'automations' && !id && method === 'GET') return send(res, 200, { rules: automation?.list() ?? [], attempts: automation?.attempts() ?? [] });
+        if (area === 'automations' && !id && method === 'POST') return send(res, 201, automation!.create(body));
+        if (area === 'automations' && id && method === 'PATCH') return send(res, 200, automation!.update(id, body));
+        if (area === 'automations' && id && method === 'DELETE') { const ok = await automation!.delete(id); return send(res, ok ? 200 : 404, ok ? { deleted: true } : { error: '不存在' }); }
         send(res, 404, { error: '工作台路径不存在' });
       } catch (e) {
         if (e instanceof ServiceError) return send(res, e.httpStatus, { code: e.code, error: e.message });
