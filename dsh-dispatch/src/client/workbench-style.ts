@@ -244,3 +244,15 @@ export const workbenchCss = `
 }
 @media print { .dsh-wb-nav,.dsh-wb-head-actions { display: none; } }
 `;
+
+/* ---------- Wave 3:对话时间线与自动跟随 ---------- */
+.dsh-wb-activity-scroll { position: relative; max-height: min(72vh, 900px); overflow-y: auto; scroll-behavior: smooth; }
+.dsh-wb-chat { display: flex; gap: 10px; margin-bottom: 10px; animation: dsp-slide-up var(--dsp-dur) var(--dsp-ease); }
+.dsh-wb-chat-avatar { flex: none; width: 26px; height: 26px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 12px; color: white; background: linear-gradient(160deg, color-mix(in srgb, var(--dsp-accent, #4d6bfe) 80%, white), var(--dsp-accent, #4d6bfe)); margin-top: 2px; }
+.dsh-wb-chat-body { flex: 1; min-width: 0; border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.2)); border-radius: 4px 12px 12px 12px; background: var(--dsw-alias-bg-layer-1, rgba(127,127,127,.05)); padding: 9px 13px 10px; }
+.dsh-wb-chat.error .dsh-wb-chat-body { border-color: color-mix(in srgb, var(--dsp-bad, #e5484d) 40%, transparent); }
+.dsh-wb-chat-meta { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.dsh-wb-chat-meta b { font-size: 10.5px; font-weight: 700; color: color-mix(in srgb, var(--dsp-accent, #4d6bfe) 55%, white); letter-spacing: .02em; }
+.dsh-wb-chat-meta time { font-size: 10px; color: var(--dsw-alias-label-caption, #8f9aa8); margin-left: auto; font-variant-numeric: tabular-nums; }
+.dsh-wb-chat-text { font-size: 12px; color: var(--dsw-alias-label-primary); }
+.dsh-wb-new-events { position: sticky; bottom: 12px; left: 50%; transform: translateX(-50%); display: block; margin: 0 auto; border: 1px solid color-mix(in srgb, var(--dsp-accent, #4d6bfe) 55%, transparent); background: color-mix(in srgb, var(--dsp-accent, #4d6bfe) 18%, var(--dsw-alias-bg-base, #161616)); color: color-mix(in srgb, var(--dsp-accent, #4d6bfe) 75%, white); border-radius: 999px; padding: 5px 14px; font-size: 11px; font-weight: 650; box-shadow: 0 6px 18px rgba(0,0,0,.3); }

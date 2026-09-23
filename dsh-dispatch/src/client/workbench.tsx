@@ -2,6 +2,7 @@ import React from 'react';
 import { DndContext, KeyboardSensor, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { api } from './api';
 import { ConfirmModal, ToastHost, showToast, type ConfirmRequest } from './feedback';
+import { renderMarkdown, markdownCss } from './markdown';
 import { workbenchCss } from './workbench-style';
 
 type Status = 'todo' | 'in_progress' | 'in_review' | 'blocked' | 'done';
@@ -126,11 +127,22 @@ function groupActivity(events: Event[]): ActivityItem[] {
 function ActivityCard({ item }: { item: ActivityItem }) {
   const { event, result } = item;
   const kind = event.kind === 'assistant' ? 'agent' : event.kind === 'tool_call' ? 'tool' : 'system';
+  // Wave 3:Agent 消息按对话气泡排版(头像 chip + 气泡);markdown 受限渲染
+  if (kind === 'agent') {
+    return <article className={'dsh-wb-chat' + (event.error ? ' error' : '')}>
+      <span className="dsh-wb-chat-avatar" aria-hidden>◈</span>
+      <div className="dsh-wb-chat-body">
+        <div className="dsh-wb-chat-meta"><b>{eventLabel(event)}</b><time>{fmt(event.at)}</time></div>
+        {event.text && event.text.length > 1800
+          ? <ExpandableText text={event.text} label="展开完整消息" />
+          : <div className="dsh-wb-chat-text">{renderMarkdown(event.text ?? '')}</div>}
+      </div>
+    </article>;
+  }
   return <article className={'dsh-wb-activity ' + kind + (event.error || result?.error ? ' error' : '')}>
     <div className="dsh-wb-activity-head"><span className="dsh-wb-activity-kind">{eventLabel(event)}</span><time>{fmt(event.at)}</time>
       {result?.error && <strong>工具报错</strong>}</div>
-    {event.kind === 'assistant' ? <ExpandableText text={event.text ?? ''} label="展开 Agent 消息" /> :
-      event.kind === 'tool_call' ? <>
+    {event.kind === 'tool_call' ? <>
         <ExpandableText text={event.text ?? ''} label="查看调用参数" fold />
         {result ? <ExpandableText text={result.text ?? ''} label={result.error ? '查看错误结果' : '查看工具结果'} fold /> :
           <div className="dsh-wb-muted">等待工具返回</div>}</> :
@@ -147,6 +159,34 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
   const [view, setView] = React.useState<'overview' | 'activity' | 'raw'>('overview');
   const [filter, setFilter] = React.useState<'all' | 'agent' | 'tool' | 'error'>('all');
   const [copied, setCopied] = React.useState(-1);
+  // Wave 3:自动滚动跟随——用户滚到底部附近时新事件自动滚入;离开底部显示「N 条新事件」浮标
+  const scrollerRef = React.useRef<HTMLDivElement | null>(null);
+  const [follow, setFollow] = React.useState(true);
+  const [pendingNew, setPendingNew] = React.useState(0);
+  const prevCountRef = React.useRef(0);
+  const scroller = scrollerRef.current;
+  const atBottom = !scroller || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
+  React.useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+      setFollow(bottom);
+      if (bottom) setPendingNew(0);
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [view]);
+  React.useEffect(() => {
+    if (events.length > prevCountRef.current && prevCountRef.current > 0 && !follow) {
+      setPendingNew((n) => n + (events.length - prevCountRef.current));
+    }
+    prevCountRef.current = events.length;
+    if (follow) {
+      const el = scrollerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  }, [events, follow]);
   async function copyEvidence(index: number, ref: string) {
     try { await navigator.clipboard.writeText(evidencePath(run, ref)); setCopied(index); }
     catch { setCopied(-2); }
@@ -229,8 +269,8 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
         {(run.cancel || run.phase === 'reconciling') && <div>静止确认：{run.runtime.quiescence}</div>}
       </details>
     </section>}
-    {view === 'activity' && <section className="dsh-wb-panel dsh-wb-run-content">
-      <div className="dsh-wb-run-section-head"><div><h3>执行过程</h3><p>Agent 消息与工具调用分开展示；调用参数和结果默认收起。</p></div>
+    {view === 'activity' && <section className="dsh-wb-panel dsh-wb-run-content dsh-wb-activity-scroll" ref={scrollerRef}>
+      <div className="dsh-wb-run-section-head"><div><h3>执行过程</h3><p>Agent 消息按对话排版;工具调用卡片可展开参数与结果。</p></div>
         <span>{activity.length} 条活动</span></div>
       <div className="dsh-wb-filter" role="group" aria-label="筛选执行活动">
         {([['all', '全部'], ['agent', 'Agent 消息'], ['tool', '工具调用'], ['error', '错误']] as const).map(([key, label]) =>
@@ -238,8 +278,11 @@ function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }
       </div>
       {error && <div className="dsh-wb-error">{error}</div>}
       {shown.length ? shown.map((item) => <ActivityCard key={item.event.seq} item={item} />) :
-        <div className="dsh-wb-empty">{events.length ? '这个筛选条件下没有记录。' : '尚无可显示的活动；运行中会自动刷新。'}</div>}
+        <div className="dsh-wb-empty">{events.length ? '这个筛选条件下没有记录。' : '尚无可显示的活动;运行中会自动刷新。'}</div>}
       {more && <button className="dsh-wb-btn" onClick={() => void load(cursor, true)}>加载后续记录</button>}
+      {!follow && pendingNew > 0 && <button type="button" className="dsh-wb-new-events"
+        onClick={() => { const el = scrollerRef.current; if (el) el.scrollTop = el.scrollHeight; setFollow(true); setPendingNew(0); }}>
+        ↓ {pendingNew} 条新事件</button>}
     </section>}
     {view === 'raw' && <section className="dsh-wb-panel dsh-wb-run-content">
       <div className="dsh-wb-run-section-head"><div><h3>原始记录</h3><p>仅包含本次子会话的可见消息与工具事件，按事件序号排列。</p></div><span>{events.length} 条事件</span></div>
@@ -436,7 +479,7 @@ function Workbench() {
   function onDragEnd(event: DragEndEvent) { if (event.over) moveTask(String(event.active.id), String(event.over.id) as Status); }
   const taskButton = (id: string) => { setDetail(null); setDetailError(''); setTaskId(id); setRunId(''); };
   const counts = overview.counts;
-  return <div className="dsh-wb" data-dsh-plugin="dsh-dispatch" data-dsh-part="workbench"><style>{workbenchCss}</style>
+  return <div className="dsh-wb" data-dsh-plugin="dsh-dispatch" data-dsh-part="workbench"><style>{workbenchCss}{markdownCss}</style>
     <ToastHost />
     <nav className="dsh-wb-nav" aria-label="工作台导航">
       <div className="dsh-wb-brand"><small>DSH DISPATCH</small>AI 团队工作台</div>
