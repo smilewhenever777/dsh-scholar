@@ -209,3 +209,36 @@ test('旧派发根格式 v2 升级留备份，旧记录保持原样', async () =
     store.dispose();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('跨工作区并行:不同工作区两任务同时运行;同工作区第三任务仍互斥;完成后各自验收', async () => {
+  const h = await harness();
+  try {
+    mkdirSync(join(h.dir, 'ws-b'));
+    const projectB = await h.workbench.createProject({ title: '并行项目', root: join(h.dir, 'ws-b') });
+    const taskB = await h.workbench.createTask({ projectId: projectB.id, title: '并行任务B', description: '', acceptanceCriteria: '完成B', assigneeId: h.agent.id });
+    const taskC = await h.workbench.createTask({ projectId: h.project.id, title: '同工作区任务C', description: '', acceptanceCriteria: '完成C', assigneeId: h.agent.id });
+
+    const a = await h.workbench.start(h.task.id, { idempotencyKey: 'par-a' });
+    const b = await h.workbench.start(taskB.id, { idempotencyKey: 'par-b' });
+    assert.equal(h.workbench.taskDetail(h.task.id).task.status, 'in_progress');
+    assert.equal(h.workbench.taskDetail(taskB.id).task.status, 'in_progress', '不同工作区应可并行');
+    // 同工作区(项目A)的第三任务 → WORKSPACE_OCCUPIED(容量未满也互斥)
+    await assertRejects(() => h.workbench.start(taskC.id, { idempotencyKey: 'par-c' }), 'WORKSPACE_OCCUPIED');
+    // 容量信息随 overview 暴露
+    const ov = h.workbench.overview();
+    assert.equal(ov.concurrency.active, 2);
+    assert.ok(ov.concurrency.max >= 2);
+
+    // 双双完成,各自进入验收
+    for (const [run, summary] of [[a, 'A完成'], [b, 'B完成']]) {
+      const child = h.dispatch.status(run.dispatchId).runtime.childSessionId;
+      h.runtime.emitRunStart(child, `run-${run.dispatchId}`);
+      await h.dispatch.ingestReport(child, { outcome: 'done', summary, evidence: [] });
+      h.runtime.emitRunEnd(child, `run-${run.dispatchId}`, 'completed');
+    }
+    await sleep(150);
+    assert.equal(h.workbench.taskDetail(h.task.id).task.status, 'in_review');
+    assert.equal(h.workbench.taskDetail(taskB.id).task.status, 'in_review');
+    assert.equal(h.workbench.overview().concurrency.active, 0, '终态释放并发占用');
+  } finally { h.dispose(); }
+});

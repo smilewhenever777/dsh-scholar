@@ -50,9 +50,11 @@ export async function makeHarness(opts = {}) {
   await store.init();
   const runtime = new MockRuntime();
   const target = new InMemoryTargetAdapter();
-  target.upsertNode(makeTask(opts.task));
-  if (opts.taskB) target.upsertNode(opts.taskB);
-  const config = { ...defaultPolicyConfig(), maxWallMs: opts.maxWallMs ?? 2 * 3600_000 };
+    target.upsertNode(makeTask(opts.task));
+    if (opts.taskB) target.upsertNode(opts.taskB);
+    if (opts.taskC) target.upsertNode(opts.taskC);
+  const config = { ...defaultPolicyConfig(), maxWallMs: opts.maxWallMs ?? 2 * 3600_000,
+    ...(opts.maxConcurrentDispatches ? { maxConcurrentDispatches: opts.maxConcurrentDispatches } : {}) };
   const service = new DispatchService({ store, runtime, target, config });
   return {
     dir,

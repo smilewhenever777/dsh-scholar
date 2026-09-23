@@ -62,6 +62,7 @@ export class WorkbenchService {
     for (const task of tasks) counts[task.status] += 1;
     return { projects: Object.values(root.projects), agents: Object.values(root.agents), tasks, counts,
       legacyCount: this.dispatchStore.all().filter((d) => d.targetType === 'traj_node').length,
+      concurrency: (this.dispatch as unknown as { concurrency?: () => { active: number; max: number } }).concurrency?.() ?? { active: 0, max: 1 },
       readOnly: this.store.fault.readOnly, revision: root.revision };
   }
   private withRuns(task: WorkTask): WorkTask {

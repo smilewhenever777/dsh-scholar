@@ -44,6 +44,8 @@ const ConfigSchema = z.object({
   /** `provider/model` 允许列表;空 = 仅默认模型 */
   allowedModels: z.array(z.string()).default([]),
   maxWallMinutes: z.number().default(120),
+  /** 全局并发上限:不同(非重叠)工作区可并行,重叠工作区互斥;默认 3 */
+  maxConcurrentDispatches: z.number().min(1).default(3),
 });
 
 interface DispatchConfig {
@@ -52,6 +54,7 @@ interface DispatchConfig {
   model: string;
   allowedModels: string[];
   maxWallMinutes: number;
+  maxConcurrentDispatches: number;
 }
 
 function readConfig(scope: { get: () => unknown }): DispatchConfig {
@@ -62,6 +65,7 @@ function readConfig(scope: { get: () => unknown }): DispatchConfig {
     model: cfg.model?.trim() || 'glm-5.3',
     allowedModels: Array.isArray(cfg.allowedModels) ? cfg.allowedModels.filter((x) => typeof x === 'string' && x) : [],
     maxWallMinutes: Number(cfg.maxWallMinutes) > 0 ? Number(cfg.maxWallMinutes) : 120,
+    maxConcurrentDispatches: Number(cfg.maxConcurrentDispatches) >= 1 ? Math.floor(Number(cfg.maxConcurrentDispatches)) : 3,
   };
 }
 
@@ -77,6 +81,7 @@ export function apply(ctx: Context): void {
       activePolicy.allowedModels = cfg.allowedModels.length ? cfg.allowedModels : [`${cfg.modelProvider}/${cfg.model}`];
       activePolicy.defaultModel = `${cfg.modelProvider}/${cfg.model}`;
       activePolicy.maxWallMs = cfg.maxWallMinutes * 60_000;
+      activePolicy.maxConcurrentDispatches = cfg.maxConcurrentDispatches;
     }
   }));
 
@@ -105,6 +110,7 @@ export function apply(ctx: Context): void {
       defaultModel: `${cfg.modelProvider}/${cfg.model}`,
       maxWallMs: cfg.maxWallMinutes * 60_000,
       maxPromptBytes: 256 * 1024,
+      maxConcurrentDispatches: cfg.maxConcurrentDispatches,
     };
     activePolicy = policy;
     const svc = new DispatchService({ store, runtime: runtimeAdapter, target, config: policy });
@@ -146,8 +152,9 @@ export function apply(ctx: Context): void {
         },
         () => {
           try {
-            const all = (dispatch as { list?: (ws?: string) => Array<Record<string, unknown>> }).list?.() ?? [];
-            return all.some((d) => String(d.phase ?? '') !== 'finished');
+            // 容量感知(跨工作区并行):仅当全局并发满时算忙;
+            // 规则自身工作区被占时 start 会以 WORKSPACE_OCCUPIED 失败并记入 attempts
+            return !dispatch.hasCapacity();
           } catch { return false; }
         },
       );

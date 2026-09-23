@@ -1,7 +1,8 @@
 /**
  * 派发编排服务(P1 执行内核)。
  * 落实 §2.2 启动十步、§2.5 慢操作不入锁、§7.4 取消流程(P0 修订:静止确认)、
- * §7.6 预算、§7.1-7.2 重启对账、§5.2 工具摄取幂等、§9.4 单执行槽。
+ * §7.6 预算、§7.1-7.2 重启对账、§5.2 工具摄取幂等、§9.4 执行槽
+ * (v2 修订:全局并发上限可配,跨工作区并行,重叠工作区互斥)。
  *
  * 状态真相在 store(reducer 归约);service 只决定副作用与事件顺序。
  */
@@ -58,6 +59,12 @@ function rid(prefix: string): string {
 
 function canonicalRoot(ws: string): string {
   return ws.replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase();
+}
+
+/** 工作区重叠判定(并发前提:不能只比较字符串相等——父子目录同样会互相写脏,
+ * 任一方落在对方之内即互斥。入参须先过 canonicalRoot)。 */
+function rootsOverlap(a: string, b: string): boolean {
+  return a === b || a.startsWith(b + '/') || b.startsWith(a + '/');
 }
 
 function assertValidWs(ws: string): string {
@@ -196,11 +203,13 @@ export class DispatchService {
       if (occ.nodeKeys.has(idemNodeKey(raw.projectId, raw.nodeId))) {
         throw new ServiceError('NODE_OCCUPIED', '该节点已有进行中的派发', 409);
       }
-      if (occ.workspaceRoots.has(root0)) {
-        throw new ServiceError('WORKSPACE_OCCUPIED', '该工作区已有进行中的派发', 409);
+      if (occ.workspaceRoots.has(root0)
+        || [...occ.workspaceRoots].some((r) => rootsOverlap(r, root0))) {
+        throw new ServiceError('WORKSPACE_OCCUPIED', '该工作区(或其父/子目录)已有进行中的派发', 409);
       }
-      if (occ.activeAttempts >= 1) {
-        throw new ServiceError('CAPACITY_EXCEEDED', 'v1 全局单执行槽已占用', 409);
+      const cap = Math.max(1, this.config.maxConcurrentDispatches || 1);
+      if (occ.activeAttempts >= cap) {
+        throw new ServiceError('CAPACITY_EXCEEDED', `全局并发已达上限(${cap});不同工作区的任务可并行,重叠工作区互斥`, 409);
       }
       const now = Date.now();
       const [modelProvider, modelName] = model.split('/');
@@ -785,9 +794,20 @@ export class DispatchService {
     return rec;
   }
 
+  /** 容量与占用(客户端展示/自动化调度用;跨工作区并行语义)。 */
+  concurrency(): { active: number; max: number } {
+    const max = Math.max(1, this.config.maxConcurrentDispatches || 1);
+    return { active: this.store.occupancy().activeAttempts, max };
+  }
+
+  /** 容量查询:全局并发是否还有空位。 */
+  hasCapacity(): boolean {
+    const { active, max } = this.concurrency();
+    return active < max;
+  }
+
   /** §8.3:可否操作由服务端判定,客户端只按此渲染按钮。 */
-  list(ws?: string): Array<Record<string, unknown>> {
-    const root = ws ? canonicalRoot(ws) : null;
+  list(ws?: string): Array<Record<string, unknown>> {    const root = ws ? canonicalRoot(ws) : null;
     return this.store.all()
       .filter((d) => !root || d.targetRef.canonicalRoot === root)
       .sort((a, b) => b.createdAt - a.createdAt)

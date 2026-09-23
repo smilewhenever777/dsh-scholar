@@ -36,19 +36,48 @@ test('T03:同节点不同键 → NODE_OCCUPIED', async () => {
 });
 
 test('T04:不同节点/工作区争执行槽与工作区占用', async () => {
-  const h = await makeHarness({ taskB: makeTask({ nodeId: 'n2' }) });
+  const h = await makeHarness({ taskB: makeTask({ nodeId: 'n2' }), taskC: makeTask({ nodeId: 'n3' }), maxConcurrentDispatches: 2 });
   try {
     await h.service.start(baseReq({ idempotencyKey: 'k1' }));
-    // 不同节点 + 不同工作区 → 全局单执行槽
+    // 不同节点 + 不同工作区 → 并行放行(上限 2,占用 1)
+    const b = await h.service.start(baseReq({ idempotencyKey: 'k2', nodeId: 'n2', ws: WS_B }));
+    assert.notEqual(h.service.status(b.dispatchId).phase, 'finished');
+    // 不同节点 + 同工作区 → 工作区占用(容量未满也互斥)
     await assertRejects(
-      () => h.service.start(baseReq({ idempotencyKey: 'k2', nodeId: 'n2', ws: WS_B })),
-      'CAPACITY_EXCEEDED',
-    );
-    // 不同节点 + 同工作区 → 工作区占用(单槽下先命中)
-    await assertRejects(
-      () => h.service.start(baseReq({ idempotencyKey: 'k3', nodeId: 'n2' })),
+      () => h.service.start(baseReq({ idempotencyKey: 'k3', nodeId: 'n3' })),
       'WORKSPACE_OCCUPIED',
     );
+    // 容量满(2/2)→ 并发上限
+    await assertRejects(
+      () => h.service.start(baseReq({ idempotencyKey: 'k4', nodeId: 'n3', ws: 'D:/lab/ws-c' })),
+      'CAPACITY_EXCEEDED',
+    );
+  } finally { h.dispose(); }
+});
+
+test('T04b:工作区父子目录重叠与大小写 → 仍 WORKSPACE_OCCUPIED', async () => {
+  const h = await makeHarness({ taskB: makeTask({ nodeId: 'n2' }) });
+  try {
+    await h.service.start(baseReq({ idempotencyKey: 'k1' })); // D:/lab/ws-a
+    // 子目录与父目录互相覆盖写 → 互斥
+    await assertRejects(
+      () => h.service.start(baseReq({ idempotencyKey: 'k2', nodeId: 'n2', ws: 'D:/lab/ws-a/sub' })),
+      'WORKSPACE_OCCUPIED',
+    );
+    // 大小写不敏感(Windows 语义,canonicalRoot 已小写化)
+    await assertRejects(
+      () => h.service.start(baseReq({ idempotencyKey: 'k3', nodeId: 'n2', ws: 'D:/LAB/WS-A' })),
+      'WORKSPACE_OCCUPIED',
+    );
+    // 反向:先占子目录,父目录同样互斥
+    const h2 = await makeHarness({ taskB: makeTask({ nodeId: 'n2' }) });
+    try {
+      await h2.service.start(baseReq({ idempotencyKey: 'k1', ws: 'D:/lab/ws-a/sub' }));
+      await assertRejects(
+        () => h2.service.start(baseReq({ idempotencyKey: 'k2', nodeId: 'n2', ws: 'D:/lab/ws-a' })),
+        'WORKSPACE_OCCUPIED',
+      );
+    } finally { h2.dispose(); }
   } finally { h.dispose(); }
 });
 

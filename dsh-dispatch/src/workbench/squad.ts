@@ -4,10 +4,10 @@
  * 产品规则:
  * - 小队 = 2+ 有序步骤,每步绑定一个 Agent + 职责说明
  * - 分派给小队的任务仍需手动启动;每步产生独立 Run
- * - 中间步骤成功 → 自动接续下一步(仅在槽空闲时);最后一步成功 → in_review
+ * - 中间步骤成功 → 自动接续下一步(槽有空位即接续);最后一步成功 → in_review
  * - 任一步骤失败/受阻 → 任务 blocked,停在当前步
  * - 恢复:重跑失败步骤(新 Run),绝不改写旧 Run
- * - 全部步骤共享现有单执行槽
+ * - 全部步骤共享全局并发配额(跨工作区可与其他任务并行)
  */
 import { ServiceError } from '../types.js';
 import type { WorkbenchStore, WorkTask, AgentProfile } from './store.js';

@@ -32,6 +32,8 @@ export interface PolicyConfig {
   maxWallMs: number;
   /** 单任务快照/正文尺寸上限(字节)——超限明确拒绝,不静默截断(§6.3/T28)。 */
   maxPromptBytes: number;
+  /** 全局并发上限(跨工作区并行;同一/重叠工作区仍然互斥)。≥1。 */
+  maxConcurrentDispatches: number;
 }
 
 export function defaultPolicyConfig(): PolicyConfig {
@@ -40,6 +42,7 @@ export function defaultPolicyConfig(): PolicyConfig {
     defaultModel: 'glm/glm-5.3',
     maxWallMs: 2 * 60 * 60 * 1000,
     maxPromptBytes: 256 * 1024,
+    maxConcurrentDispatches: 3,
   };
 }
 

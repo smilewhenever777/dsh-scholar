@@ -23,7 +23,7 @@ type Run = { id: string; phase: string; createdAt: number; acceptedAt?: number; 
   report?: { outcome: string; summary: string; evidence: ({ kind: string; ref: string; summary?: string } | string)[]; nextHint?: string };
   result?: { kind: string; reasonCode: string; summary: string }; writeback: { state: string; lastErrorCode?: string };
   targetRef: { nodeId: string; canonicalRoot?: string }; targetType: string; cancel?: { reason: string } };
-type Overview = { projects: Project[]; agents: Agent[]; tasks: Task[]; counts: Record<Status, number>; legacyCount: number; readOnly: boolean; revision?: number; squads?: Squad[] };
+type Overview = { projects: Project[]; agents: Agent[]; tasks: Task[]; counts: Record<Status, number>; legacyCount: number; concurrency?: { active: number; max: number }; readOnly: boolean; revision?: number; squads?: Squad[] };
 type Event = { seq: number; at: number; kind: string; text?: string; name?: string; error?: boolean; interrupted?: boolean };
 type Models = { allowed: string[]; default: string };
 
@@ -659,7 +659,7 @@ function Workbench() {
       <div className="dsh-wb-brand"><small>DSH DISPATCH</small>AI 团队工作台</div>
       {([['overview', '◫', '总览'], ['tasks', '▤', '任务'], ['projects', '⊀', '项目'], ['agents', '◈', 'Agent 目录'], ['squads', '☰', '小队'], ['automations', '⏱', '自动化'], ['legacy', '⧖', '旧派发历史']] as const).map(([key, ico, title]) =>
         <button className={`dsh-wb-navbtn${page === key ? ' active' : ''}`} key={key} onClick={() => setPage(key)}><span className="dsp-nav-ico" aria-hidden>{ico}</span><span>{title}</span></button>)}
-      <div className="dsh-wb-navfoot">同一时间运行一个任务;<br />完成后由你验收归档。</div>
+      <div className="dsh-wb-navfoot">并行 {overview.concurrency?.max ?? 1} 个任务(不同工作区);<br />进行中 {overview.concurrency?.active ?? 0}/{overview.concurrency?.max ?? 1};完成后由你验收归档。</div>
     </nav>
     <main className="dsh-wb-main">
       <header className="dsh-wb-head"><div><div className="dsh-wb-kicker">DSH / DISPATCH</div><h1>{selected ? '任务详情' : page === 'overview' ? '工作总览' : page === 'tasks' ? '任务' : page === 'projects' ? '项目' : page === 'agents' ? 'Agent 目录' : page === 'squads' ? '小队' : page === 'automations' ? '自动化' : '旧派发历史'}</h1></div>
