@@ -85,25 +85,35 @@ export function WorkbenchTrigger({ wide }: { wide?: boolean }) {
 }
 
 function Column({ status, tasks, agents, onTask }: { status: Status; tasks: Task[]; agents: Agent[]; onTask: (id: string) => void }) {
-  // 全列可放置:不接受的目标在 onDragEnd 里校验并给出明确提示(拖入无反馈的静默失败更差)
-  const droppable = status !== 'in_progress';
+  // P1-3:全列可悬停;不可放置列在 CSS data-accepts="no" 中视觉标灰+拖入提示
   const { setNodeRef, isOver } = useDroppable({ id: status });
-  return <section ref={setNodeRef} className={`dsh-wb-col${isOver ? ' over' : ''}`} aria-label={LABEL[status]} data-accepts={droppable ? 'yes' : 'no'}>
+  const droppable = status === 'todo' || status === 'blocked';
+  return <section ref={setNodeRef}
+    className={`dsh-wb-col${isOver ? ' over' : ''}${isOver && !droppable ? ' reject' : ''}`}
+    aria-label={LABEL[status]} data-accepts={droppable ? 'yes' : 'no'}>
     <div className="dsh-wb-col-head"><span>{LABEL[status]}</span><em>{tasks.length}</em></div>
     {tasks.map((task) => <TaskCard key={task.id} task={task} agent={agents.find((a) => a.id === task.assigneeId)} onTask={onTask} />)}
+    {!tasks.length && <div className="dsh-wb-col-empty" />}
   </section>;
 }
 function TaskCard({ task, agent, onTask }: { task: Task; agent?: Agent; onTask: (id: string) => void }) {
   const movable = (task.status === 'todo' || task.status === 'blocked') && !task.owner;
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id, disabled: !movable });
+  // P1-3:卡片「下一步」提示(评审 §4.2.3)
+  const nextStep = task.owner ? 'Agent 执行中'
+    : task.status === 'in_review' ? '等待人工验收'
+    : task.status === 'done' ? '已完成'
+    : task.status === 'blocked' ? '受阻,需处理'
+    : !task.assigneeId ? '待分派 Agent'
+    : '待手动启动';
   return <article ref={setNodeRef} className="dsh-wb-card" style={{ opacity: isDragging ? .55 : 1,
     transform: transform ? `translate3d(${transform.x}px,${transform.y}px,0)` : undefined }}>
     <div className="dsh-wb-row"><button className="dsh-wb-card-title" onClick={() => onTask(task.id)}>{task.title}</button>
       {task.owner && <span className="dsh-wb-card-live" title="执行中" aria-label="执行中" />}
       {movable && <button type="button" className="dsh-wb-drag" title="拖动任务;也可在详情中使用状态选择"
         {...attributes} {...listeners}>⠿</button>}</div>
-    <div className="dsh-wb-muted">{agent?.name ?? '未分派'} · {task.runIds.length} 次执行</div>
-    {task.description && <div className="dsh-wb-card-desc">{preview(task.description, 64)}</div>}
+    <div className="dsh-wb-card-next" data-tone={task.status === 'in_review' ? 'review' : task.owner ? 'run' : task.status === 'blocked' ? 'blocked' : 'idle'}>{nextStep}</div>
+    {task.description && <div className="dsh-wb-card-desc">{preview(task.description, 56)}</div>}
   </article>;
 }
 
@@ -497,7 +507,13 @@ function Workbench() {
       { projectId: form.projectId, title: form.title, description: form.description, acceptanceCriteria: form.acceptanceCriteria,
         assigneeId: form.assigneeId || null, expectedRevision: current?.revision };
     const ok = await mutate(() => write(`/${endpoint}${editing ? `/${editing}` : ''}`, editing ? 'PATCH' : 'POST', body), 'modal');
-    if (ok) { setModal(null); if (kind === 'task' && taskId) void refreshDetail(taskId); }
+    if (ok) {
+      setModal(null);
+      if (kind === 'task' && taskId) void refreshDetail(taskId);
+      // P2:保存后明确下一步(评审 §4.6)
+      if (kind === 'task' && !editing) showToast(form.assigneeId ? '任务已创建 → 到详情点「手动运行」启动' : '任务已创建 → 先分派 Agent,再手动运行', 'info');
+      else if (kind === 'project' && !editing) showToast('项目已创建 → 下一步建 Agent 或直接建任务', 'info');
+    }
   }
   function moveTask(id: string, status: Status) {
     const task = overview.tasks.find((t) => t.id === id);
@@ -576,7 +592,7 @@ function Workbench() {
         <button className={`dsh-wb-btn${layout === 'board' ? ' primary' : ''}`} onClick={() => setLayout('board')}>看板</button><button className={`dsh-wb-btn${layout === 'list' ? ' primary' : ''}`} onClick={() => setLayout('list')}>列表</button>
         <button className="dsh-wb-btn primary" disabled={!overview.projects.length} onClick={() => begin('task')}>新建任务</button></div>
         {project && <p className="dsh-wb-muted">工作区：{project.root}</p>}
-        {layout === 'board' ? <DndContext sensors={sensors} onDragEnd={onDragEnd}><div className="dsh-wb-board">{STATUS.map((s) => <Column key={s} status={s} tasks={filtered.filter((t) => t.status === s)} agents={overview.agents} onTask={taskButton} />)}</div></DndContext> :
+        {layout === 'board' ? <DndContext sensors={sensors} onDragEnd={onDragEnd}><div className="dsh-wb-board">{STATUS.filter((s) => !statusFilter || s === statusFilter).map((s) => <Column key={s} status={s} tasks={filtered.filter((t) => t.status === s)} agents={overview.agents} onTask={taskButton} />)}</div></DndContext> :
           <div className="dsh-wb-panel"><table className="dsh-wb-table"><thead><tr><th>任务</th><th>项目</th><th>执行者</th><th>状态</th><th>Run</th></tr></thead><tbody>{filtered.map((t) => <tr key={t.id}><td><button className="dsh-wb-link" onClick={() => taskButton(t.id)}>{t.title}</button></td><td>{overview.projects.find((p) => p.id === t.projectId)?.title}</td><td>{overview.agents.find((a) => a.id === t.assigneeId)?.name ?? '未分派'}</td><td>{LABEL[t.status]}</td><td>{t.runIds.length}</td></tr>)}</tbody></table>{!filtered.length && <div className="dsh-wb-empty">暂无任务</div>}</div>}</>}
       {page === 'projects' && <><button className="dsh-wb-btn primary" onClick={() => begin('project')}>新建项目</button><div style={{ height: 16 }} />
         {overview.projects.map((p) => <div className="dsh-wb-panel" key={p.id}><div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><h2>{p.title}</h2><button className="dsh-wb-btn" onClick={() => begin('project', p.id)}>重命名</button></div><div className="dsh-wb-code">{p.root}</div><button className="dsh-wb-link" onClick={() => { setProjectId(p.id); setPage('tasks'); }}>查看 {overview.tasks.filter((t) => t.projectId === p.id).length} 个任务 →</button></div>)}</>}
@@ -645,7 +661,7 @@ function Workbench() {
       {formError && <div role="alert" className="dsh-wb-error">{formError}</div>}
       {modal === 'project' && <><Field autoFocus label="项目名称" value={form.title} onChange={(v) => setForm({ ...form, title: v })} />{editing ? <div className="dsh-wb-code">{form.root}</div> : <Field label="本机工作区绝对路径" hint="须位于 DSH_HOME 之外;一个路径只绑一个项目" value={form.root} onChange={(v) => setForm({ ...form, root: v })} />}</>}
       {modal === 'agent' && <><Field autoFocus label="Agent 名称" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><div className="dsh-wb-field"><label>模型</label><select className="dsh-wb-select" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })}>{models.allowed.map((m) => <option key={m}>{m}</option>)}</select></div><div className="dsh-wb-field"><label>工作指令</label><textarea className="dsh-wb-textarea" rows={Math.min(16, Math.max(4, (form.instructions ?? '').split('\n').length))} value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} /></div><div className="dsh-wb-field"><label>受控工具权限</label><div className="dsh-wb-row">{Object.entries(TOOLS).map(([name, label]) => <label key={name} className="dsh-wb-row"><input type="checkbox" checked={toolAllow.includes(name)} onChange={(e) => setToolAllow(e.target.checked ? [...toolAllow, name] : toolAllow.filter((x) => x !== name))} />{label}</label>)}</div></div></>}
-      {modal === 'task' && <><div className="dsh-wb-field"><label>项目</label>{editing ? <div>{overview.projects.find((p) => p.id === form.projectId)?.title}</div> : <select className="dsh-wb-select" value={form.projectId} onChange={(e) => setForm({ ...form, projectId: e.target.value })}>{overview.projects.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}</select>}</div><Field autoFocus label="任务标题" value={form.title} onChange={(v) => setForm({ ...form, title: v })} /><div className="dsh-wb-field"><label>任务描述</label><textarea className="dsh-wb-textarea" rows={Math.min(10, Math.max(3, (form.description ?? '').split('\n').length))} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></div><div className="dsh-wb-field"><label>验收标准(必填)</label><textarea className="dsh-wb-textarea" rows={Math.min(10, Math.max(3, (form.acceptanceCriteria ?? '').split('\n').length))} value={form.acceptanceCriteria} onChange={(e) => setForm({ ...form, acceptanceCriteria: e.target.value })} /></div><div className="dsh-wb-field"><label>分派 Agent（不会自动运行）</label><select className="dsh-wb-select" value={form.assigneeId} onChange={(e) => setForm({ ...form, assigneeId: e.target.value })}><option value="">暂不分派</option>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div></>}
+      {modal === 'task' && <><div className="dsh-wb-field"><label>项目</label>{editing ? <div>{overview.projects.find((p) => p.id === form.projectId)?.title}</div> : <select className="dsh-wb-select" value={form.projectId} onChange={(e) => setForm({ ...form, projectId: e.target.value })}>{overview.projects.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}</select>}</div><Field autoFocus label="任务标题" value={form.title} onChange={(v) => setForm({ ...form, title: v })} /><div className="dsh-wb-field"><label>任务描述</label><textarea className="dsh-wb-textarea" rows={Math.min(10, Math.max(3, (form.description ?? '').split('\n').length))} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></div><div className="dsh-wb-field"><label>验收标准(必填)</label><textarea className="dsh-wb-textarea" rows={Math.min(10, Math.max(3, (form.acceptanceCriteria ?? '').split('\n').length))} value={form.acceptanceCriteria} onChange={(e) => setForm({ ...form, acceptanceCriteria: e.target.value })} /></div><div className="dsh-wb-field"><label>分派 Agent</label><select className="dsh-wb-select" value={form.assigneeId} onChange={(e) => setForm({ ...form, assigneeId: e.target.value })}><option value="">暂不分派</option>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select><small className="dsh-wb-field-hint">分派后需到任务详情点「手动运行」才会启动子代理。</small></div></>}
       <div className="dsh-wb-row" style={{ justifyContent: 'flex-end' }}><button className="dsh-wb-btn" onClick={() => setModal(null)}>取消</button><button className="dsh-wb-btn primary" disabled={busy} onClick={() => void saveModal()}>保存</button></div>
     </div></>}
     {confirmReq && <ConfirmModal {...confirmReq} />}

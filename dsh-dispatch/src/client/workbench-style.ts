@@ -275,4 +275,15 @@ export const workbenchCss = `
 .dsh-wb-preview { z-index: 115; display: flex; flex-direction: column; gap: 8px; width: min(720px, calc(100vw - 40px)); }
 .dsh-wb-preview-content { max-height: 60vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.65 ui-monospace, Consolas, monospace; padding: 12px; border-radius: 8px; background: color-mix(in srgb, black 14%, transparent); border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.18)); }
 
+/* ---------- P1-3:看板拖放视觉反馈+卡片下一步 ---------- */
+.dsh-wb-col.reject { border-color: color-mix(in srgb, var(--dsp-bad) 50%, transparent); background: color-mix(in srgb, var(--dsp-bad) 5%, transparent); }
+.dsh-wb-col[data-accepts="no"] { border-style: dashed; opacity: .68; }
+.dsh-wb-col[data-accepts="no"] .dsh-wb-col-head span:after { content: ' · 流程控制'; font-size: 9px; font-weight: 400; color: var(--dsw-alias-label-caption); margin-left: 4px; }
+.dsh-wb-col-empty { min-height: 40px; }
+.dsh-wb-card-next { font-size: 10px; font-weight: 650; margin-top: 5px; display: inline-flex; align-items: center; gap: 4px; border-radius: 4px; padding: 2px 6px; }
+.dsh-wb-card-next[data-tone='run'] { color: var(--dsp-accent); background: color-mix(in srgb, var(--dsp-accent) 10%, transparent); }
+.dsh-wb-card-next[data-tone='review'] { color: var(--dsp-warn); background: color-mix(in srgb, var(--dsp-warn) 10%, transparent); }
+.dsh-wb-card-next[data-tone='blocked'] { color: var(--dsp-bad); background: color-mix(in srgb, var(--dsp-bad) 10%, transparent); }
+.dsh-wb-card-next[data-tone='idle'] { color: var(--dsw-alias-label-caption); background: var(--dsw-alias-bg-layer-1, rgba(127,127,127,.06)); }
+
 `;
