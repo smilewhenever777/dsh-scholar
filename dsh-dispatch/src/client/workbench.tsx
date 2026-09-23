@@ -153,7 +153,7 @@ function ActivityCard({ item }: { item: ActivityItem }) {
   if (kind === 'tool') {
     const toolName = TOOLS[event.name ?? ''] ?? event.name ?? '工具调用';
     let target = '';
-    try { const args = JSON.parse(event.text ?? '{}'); target = args.path ?? args.filename ?? args.ref ?? args.sequence != null ? `seq=${args.sequence}` : ''; } catch { target = preview(event.text ?? '', 40); }
+    try { const args = JSON.parse(event.text ?? '{}'); target = args.path ?? args.filename ?? args.ref ?? (args.sequence != null ? `seq=${args.sequence}` : '') ?? ''; } catch { target = preview(event.text ?? '', 40); }
     const status = result?.error ? 'err' : result ? 'ok' : 'wait';
     const statusLabel = result?.error ? '失败' : result ? '成功' : '…';
     return <article className="dsh-wb-activity tool">
