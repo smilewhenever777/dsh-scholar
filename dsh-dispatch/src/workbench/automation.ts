@@ -61,7 +61,7 @@ export class AutomationService {
 
   constructor(
     private readonly store: WorkbenchStore,
-    private readonly startTask: (template: AutomationRule['template'], source: string) => Promise<{ taskId: string; dispatchId: string }>,
+    private readonly startTask: (template: AutomationRule['template'], source: string, ruleName: string) => Promise<{ taskId: string; dispatchId: string }>,
     private readonly isSlotBusy: () => boolean,
   ) {}
 
@@ -92,7 +92,8 @@ export class AutomationService {
       const now = Date.now();
       const rule: AutomationRule = {
         id: newId('ar'),
-        name, cron, timezone, template, enabled: raw.enabled !== false,
+        name, cron, timezone, template,
+        enabled: raw.enabled === true, // 默认禁用:创建后由用户显式启用,防止模板有误即自动开跑
         revision: 1, createdAt: now, updatedAt: now,
       };
       rule.nextTriggerAt = this.computeNextTrigger(cron, now);
@@ -199,7 +200,7 @@ export class AutomationService {
         return { ...attempt, result: 'skipped_busy', reason: '全局执行槽被占用' };
       }
       // P0-5:确定性幂等键(含 scheduledAt,重试可定位)——替代 Date.now()
-      const { taskId, dispatchId } = await this.startTask(rule.template, `automation:${rule.id}:${scheduledAt}`);
+      const { taskId, dispatchId } = await this.startTask(rule.template, `automation:${rule.id}:${scheduledAt}`, rule.name);
       await this.updateAttempt(attempt.id, { result: 'started', taskId, dispatchId });
       return { ...attempt, result: 'started', taskId, dispatchId };
     } catch (e) {
@@ -258,24 +259,36 @@ export class AutomationService {
     });
   }
 
-  /** P0-4:全字段 cron(分 时 日 月 周)逐分钟搜索;支持通配、步进、精确值和逗号多值。 */
+  /** P0-4/P0-2:全字段 cron(分 时 日 月 周)两段式搜索——先按天推进(400 天窗口,
+   *  覆盖周级/月级规则),再在天内按小时×分钟匹配;日 与 周 同时受限时按 Vixie
+   *  cron 语义取 OR。窗口内无匹配(如 2 月 30 日)返回 0 表示永不调度,
+   *  绝不回退到 from+1h(旧回退会让周/月级规则每小时触发一次)。 */
   private computeNextTrigger(cron: string, from: number): number {
     const parts = cron.trim().split(/\s+/);
-    if (parts.length !== 5) return from + 3600_000;
+    if (parts.length !== 5) return 0;
     const [minPart, hourPart, domPart, monPart, dowPart] = parts;
-    const next = new Date(from + 60_000);
-    next.setSeconds(0, 0);
-    for (let i = 0; i < 1440; i++) {
-      if (this.cronFieldMatches(minPart, next.getMinutes())
-        && this.cronFieldMatches(hourPart, next.getHours())
-        && this.cronFieldMatches(domPart, next.getDate())
-        && this.cronFieldMatches(monPart, next.getMonth() + 1)
-        && this.cronFieldMatches(dowPart, next.getDay())) {
-        return next.getTime();
+    const domAll = domPart === '*';
+    const dowAll = dowPart === '*';
+    const day = new Date(from + 60_000);
+    day.setHours(0, 0, 0, 0);
+    for (let d = 0; d < 400; d++) {
+      const monOk = this.cronFieldMatches(monPart, day.getMonth() + 1);
+      const domOk = this.cronFieldMatches(domPart, day.getDate());
+      const dowOk = this.cronFieldMatches(dowPart, day.getDay());
+      const dayOk = monOk && (domAll || dowAll ? domOk && dowOk : domOk || dowOk);
+      if (dayOk) {
+        for (let h = 0; h < 24; h++) {
+          if (!this.cronFieldMatches(hourPart, h)) continue;
+          for (let m = 0; m < 60; m++) {
+            if (!this.cronFieldMatches(minPart, m)) continue;
+            const t = new Date(day.getFullYear(), day.getMonth(), day.getDate(), h, m).getTime();
+            if (t > from) return t;
+          }
+        }
       }
-      next.setMinutes(next.getMinutes() + 1);
+      day.setDate(day.getDate() + 1);
     }
-    return from + 3600_000;
+    return 0;
   }
 
   private cronFieldMatches(part: string, value: number): boolean {

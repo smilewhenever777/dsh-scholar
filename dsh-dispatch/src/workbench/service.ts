@@ -157,10 +157,12 @@ export class WorkbenchService {
         }
       }
       const now = Date.now();
+      const sourceNote = typeof raw.sourceNote === 'string' && raw.sourceNote.trim() ? raw.sourceNote.slice(0, 200) : '';
       const task: WorkTask = { id: newId('t'), projectId, title, description, acceptanceCriteria,
         assignment,
         status: 'todo', revision: 1, contentVersion: 1, createdAt: now, updatedAt: now,
-        leaseEpoch: 0, runIds: [], timeline: [], operations: {} };
+        leaseEpoch: 0, runIds: [], operations: {},
+        timeline: sourceNote ? [{ id: newId('ev'), kind: 'comment', at: now, text: sourceNote, actor: 'system' }] : [] };
       root.tasks[task.id] = task;
       return task;
     });
@@ -254,22 +256,42 @@ export class WorkbenchService {
       const firstAgent = root.agents[squad.steps[0].agentId];
       if (!firstAgent) throw new ServiceError('VALIDATION', '小队第一步 Agent 不存在', 422);
       if (!this.allowedModels().includes(firstAgent.model)) throw new ServiceError('VALIDATION', '第一步 Agent 模型不在允许列表', 422);
-      // 创建 SquadExecution(幂等:同任务同小队已有活跃执行则 409)
-      return this.store.mutate((mutRoot) => {
+      // P0-5:执行记录在独立 mutate 中原子创建(查重+写入同一事务);
+      // dispatch.start 必须放在 mutate 外——旧写法把 Promise 传进 mutate,候选根
+      // 先于启动结果持久化,启动失败会留下 running 孤儿 exec,任务从此永久 409。
+      const execId = await this.store.mutate((mutRoot) => {
         const execRoot = mutRoot as unknown as { squadExecutions?: Record<string, { id: string; taskId: string; state: string }> };
         if (!execRoot.squadExecutions) execRoot.squadExecutions = {};
-        const existing = Object.values(execRoot.squadExecutions).find((e) => e.taskId === id && e.state !== 'completed');
-        if (existing) throw new ServiceError('WRONG_STATE', '该任务已有进行中的小队执行', 409);
+        // 仅 running 视为活跃:paused_failed/aborted/completed 是终态,重跑创建新执行
+        const active = Object.values(execRoot.squadExecutions).find((e) => e.taskId === id && e.state === 'running');
+        if (active) throw new ServiceError('WRONG_STATE', '该任务已有进行中的小队执行', 409);
         const now = Date.now();
         const execution = { id: newId('se'), taskId: id, squadId: task.assignment!.id,
           steps: structuredClone(squad.steps), currentStep: 0, state: 'running', runIds: [], createdAt: now, updatedAt: now };
         execRoot.squadExecutions[execution.id] = execution;
-        return this.dispatch.start({ actorScope: 'workbench', idempotencyKey, targetType: 'workbench_task',
+        return execution.id;
+      });
+      let startResult: Awaited<ReturnType<typeof this.dispatch.start>>;
+      try {
+        startResult = await this.dispatch.start({ actorScope: 'workbench', idempotencyKey, targetType: 'workbench_task',
           projectId: project.id, nodeId: task.id, ws: project.root, model: firstAgent.model,
           toolAllow: firstAgent.toolAllow,
           agentProfile: { id: firstAgent.id, name: firstAgent.name, instructions: firstAgent.instructions,
             revision: firstAgent.revision, toolAllow: firstAgent.toolAllow } });
+      } catch (e) {
+        // 补偿事务:启动失败回滚执行记录(仅在未登记 run 时),避免孤儿 exec 锁死任务
+        await this.store.mutate((mutRoot) => {
+          const execRoot = mutRoot as unknown as { squadExecutions?: Record<string, { runIds: string[] }> };
+          const exec = execRoot.squadExecutions?.[execId];
+          if (exec && exec.runIds.length === 0) delete execRoot.squadExecutions![execId];
+        }).catch(() => undefined);
+        throw e;
+      }
+      await this.store.mutate((mutRoot) => {
+        const exec = (mutRoot as unknown as { squadExecutions?: Record<string, { runIds: string[]; updatedAt: number }> }).squadExecutions?.[execId];
+        if (exec) { exec.runIds.push(startResult.dispatchId); exec.updatedAt = Date.now(); }
       });
+      return startResult;
     }
 
     // 单 Agent 任务(现有路径)
@@ -303,13 +325,25 @@ export class WorkbenchService {
   /**
    * P0-1:小队编排接续——检查 running 小队执行,如果当前步的 Run 已完成则启动下一步。
    * 由调度器周期调用或 dispatch end 事件后调用。
+   * P0-3:接续目标(下一步 Agent/项目)缺失时落终态 paused_failed + 任务 blocked,
+   * 避免 exec 永久卡 running(小队删不掉、任务锁死)。
    */
+  private squadContinuing = false;
   async continueSquadExecutions(): Promise<string[]> {
+    if (this.squadContinuing) return []; // 上一轮未结束(30s 内未完成),跳过防双发
+    this.squadContinuing = true;
+    try {
+      return await this.continueSquadExecutionsInner();
+    } finally {
+      this.squadContinuing = false;
+    }
+  }
+  private async continueSquadExecutionsInner(): Promise<string[]> {
     const started: string[] = [];
     const root = this.snapshot();
     const execRoot = root as unknown as { squadExecutions?: Record<string, {
       id: string; taskId: string; squadId: string; steps: Array<{ agentId: string; responsibility: string }>;
-      currentStep: number; state: string; runIds: string[]; createdAt: number; updatedAt: number;
+      currentStep: number; state: string; runIds: string[]; createdAt: number; updatedAt: number; pauseReason?: string;
     }> };
     const executions = Object.values(execRoot.squadExecutions ?? {}).filter((e) => e.state === 'running');
     for (const exec of executions) {
@@ -317,38 +351,59 @@ export class WorkbenchService {
       if (!task) continue;
       // 检查任务是否有活跃的派发(如果任务是 in_progress 且有 owner,当前步仍在执行)
       if (task.owner) continue;
-      // 如果任务不在 in_progress,说明上一步已结束
-      if (!['in_progress', 'in_review', 'blocked'].includes(task.status)) continue;
-      // in_review 或 blocked 说明小队执行已由 finalize 处理,不需要接续
+      // in_review 或 blocked 说明小队执行已由 finalize 写终态,不需要接续
       if (task.status !== 'in_progress') continue;
 
       // 任务回到 in_progress 且无 owner → 上一步成功,需要接续下一步
       if (exec.currentStep < exec.steps.length - 1) {
-        const nextAgentId = exec.steps[exec.currentStep + 1].agentId;
-        const nextAgent = root.agents[nextAgentId];
-        if (!nextAgent) continue;
+        const nextStep = exec.steps[exec.currentStep + 1];
+        const nextAgent = root.agents[nextStep.agentId];
         const project = root.projects[task.projectId];
-        if (!project) continue;
+        if (!nextAgent || !project) {
+          // P0-3:接续目标缺失 → 终态 + 任务 blocked,用户可修复后重跑(新执行)
+          await this.store.mutate((mutRoot) => {
+            const mExecRoot = mutRoot as unknown as { squadExecutions?: Record<string, { state: string; pauseReason?: string; updatedAt: number }> };
+            const mExec = mExecRoot.squadExecutions?.[exec.id];
+            if (mExec) {
+              mExec.state = 'paused_failed';
+              mExec.pauseReason = `步骤 ${exec.currentStep + 2} 无法接续:${!nextAgent ? 'Agent 不存在' : '项目不存在'}`;
+              mExec.updatedAt = Date.now();
+            }
+            const mTask = mutRoot.tasks[exec.taskId];
+            if (mTask && mTask.status === 'in_progress' && !mTask.owner) {
+              mTask.status = 'blocked';
+              mTask.revision += 1;
+              mTask.updatedAt = Date.now();
+              mTask.timeline.push({ id: newId('ev'), kind: 'run', at: Date.now(),
+                text: `小队接续中断:${!nextAgent ? '下一步 Agent 不存在' : '项目不存在'},任务退回 blocked`, actor: 'system' });
+            }
+          });
+          continue;
+        }
 
-        // 推进步骤并启动下一步
-        const startResult = await this.dispatch.start({
-          actorScope: 'workbench', idempotencyKey: `squad:${exec.id}:step:${exec.currentStep + 1}:${Date.now()}`,
-          targetType: 'workbench_task', projectId: project.id, nodeId: task.id, ws: project.root,
-          model: nextAgent.model, toolAllow: nextAgent.toolAllow,
-          agentProfile: { id: nextAgent.id, name: nextAgent.name, instructions: nextAgent.instructions,
-            revision: nextAgent.revision, toolAllow: nextAgent.toolAllow },
-        });
-        // 更新执行状态
-        await this.store.mutate((mutRoot) => {
-          const mExecRoot = mutRoot as unknown as { squadExecutions?: Record<string, { currentStep: number; runIds: string[]; updatedAt: number }> };
-          const mExec = mExecRoot.squadExecutions?.[exec.id];
-          if (mExec) {
-            mExec.currentStep += 1;
-            mExec.runIds.push(startResult.dispatchId);
-            mExec.updatedAt = Date.now();
-          }
-        });
-        started.push(startResult.dispatchId);
+        try {
+          // 推进步骤并启动下一步
+          const startResult = await this.dispatch.start({
+            actorScope: 'workbench', idempotencyKey: `squad:${exec.id}:step:${exec.currentStep + 1}:${Date.now()}`,
+            targetType: 'workbench_task', projectId: project.id, nodeId: task.id, ws: project.root,
+            model: nextAgent.model, toolAllow: nextAgent.toolAllow,
+            agentProfile: { id: nextAgent.id, name: nextAgent.name, instructions: nextAgent.instructions,
+              revision: nextAgent.revision, toolAllow: nextAgent.toolAllow },
+          });
+          // 更新执行状态
+          await this.store.mutate((mutRoot) => {
+            const mExecRoot = mutRoot as unknown as { squadExecutions?: Record<string, { currentStep: number; runIds: string[]; updatedAt: number }> };
+            const mExec = mExecRoot.squadExecutions?.[exec.id];
+            if (mExec) {
+              mExec.currentStep += 1;
+              mExec.runIds.push(startResult.dispatchId);
+              mExec.updatedAt = Date.now();
+            }
+          });
+          started.push(startResult.dispatchId);
+        } catch {
+          // 启动失败(如全局槽被占):exec 保持 running,任务无 owner,下个周期自动重试
+        }
       }
     }
     return started;

@@ -31,7 +31,14 @@ export class WorkbenchTargetAdapter implements TargetAdapter {
       if (!task || task.projectId !== input.ref.projectId) return { ok: false, code: 'NOT_FOUND', detail: '任务不存在' };
       if (task.owner?.dispatchId === input.dispatchId) return { ok: true, epoch: task.owner.epoch, taskFingerprint: task.owner.fingerprint };
       if (task.owner) return { ok: false, code: 'NODE_OCCUPIED', detail: '任务已有运行中执行' };
-      if (!['todo', 'blocked'].includes(task.status)) return { ok: false, code: 'TASK_CHANGED', detail: `任务状态 ${task.status} 不能启动` };
+      // 小队步骤交接:上一步 finalize 后任务停在 in_progress 且无 owner,
+      // 此时 running 执行的存在即为接续凭证,放行下一步领取(指纹校验仍兜底内容变更)
+      const squadHandoff = task.assignment?.kind === 'squad' && task.status === 'in_progress'
+        && Object.values((root as unknown as { squadExecutions?: Record<string, { taskId: string; state: string }> }).squadExecutions ?? {})
+          .some((e) => e.taskId === task.id && e.state === 'running');
+      if (!['todo', 'blocked'].includes(task.status) && !squadHandoff) {
+        return { ok: false, code: 'TASK_CHANGED', detail: `任务状态 ${task.status} 不能启动` };
+      }
       const fp = fingerprint(task);
       if (fp !== input.expectedFingerprint) return { ok: false, code: 'TASK_CHANGED', detail: '任务目标在领取前已变化' };
       task.leaseEpoch = (task.leaseEpoch || 0) + 1;
@@ -72,31 +79,40 @@ export class WorkbenchTargetAdapter implements TargetAdapter {
         task.revision += 1;
         return { ok: false, code: 'SUPERSEDED', detail: '任务已被接管或目标已变化' };
       }
-      // P0-1:小队感知状态转移——中间步骤 done 保持 in_progress(不是 in_review);
-      // 最后一步 done 才进入 in_review;失败/取消照旧
+      // P0-1/P0-3:小队感知状态转移,并把终态写回 squadExecutions——
+      // 中间步骤 done 保持 in_progress(exec 仍 running,由 30s 接续定时器推进);
+      // 最后一步 done → in_review + exec completed;失败 → blocked + paused_failed;
+      // 取消 → todo + aborted。不写回终态会导致小队永远无法删除、任务永久 409。
       const isSquadTask = task.assignment?.kind === 'squad';
+      const execRoot = root as unknown as { squadExecutions?: Record<string, {
+        taskId: string; currentStep: number; steps: unknown[]; state: string; pauseReason?: string; updatedAt: number;
+      }> };
+      const exec = isSquadTask
+        ? Object.values(execRoot.squadExecutions ?? {}).find((e) => e.taskId === task.id && e.state === 'running')
+        : undefined;
+      const at = Date.now();
       let nextStatus: string;
-      if (input.outcome === 'done' && isSquadTask) {
-        // 检查是否还有后续步骤
-        const execRoot = root as unknown as { squadExecutions?: Record<string, { taskId: string; currentStep: number; steps: unknown[]; state: string }> };
-        const exec = Object.values(execRoot.squadExecutions ?? {}).find((e) => e.taskId === task.id && e.state === 'running');
-        if (exec && exec.currentStep < exec.steps.length - 1) {
+      if (input.outcome === 'done' && exec) {
+        if (exec.currentStep < exec.steps.length - 1) {
           nextStatus = 'in_progress'; // 中间步骤成功 → 保持执行中,等待接续
         } else {
           nextStatus = 'in_review'; // 最后一步成功 → 待验收
+          exec.state = 'completed';
+          exec.updatedAt = at;
         }
       } else if (input.outcome === 'done') {
         nextStatus = 'in_review';
       } else if (input.outcome === 'aborted') {
         nextStatus = 'todo';
+        if (exec) { exec.state = 'aborted'; exec.pauseReason = `步骤 ${exec.currentStep + 1} 被取消`; exec.updatedAt = at; }
       } else {
         nextStatus = 'blocked';
+        if (exec) { exec.state = 'paused_failed'; exec.pauseReason = `步骤 ${exec.currentStep + 1} ${input.outcome}:${input.reasonCode}`; exec.updatedAt = at; }
       }
       task.status = nextStatus as typeof task.status;
       task.owner = undefined;
       task.revision += 1;
-      task.updatedAt = Date.now();
-      const at = Date.now();
+      task.updatedAt = at;
       task.operations[input.operationId] = { hash: hash(input), appliedAt: at };
       task.timeline.push({ id: newId('ev'), kind: 'run', at, text: input.summary.slice(0, 2000), runId: input.dispatchId, actor: 'agent' });
       return { ok: true, detail: '任务状态已同步', receipt: { operationId: input.operationId, appliedAt: at } };

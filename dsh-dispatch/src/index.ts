@@ -119,14 +119,13 @@ export function apply(ctx: Context): void {
     console.log(`[dsh-dispatch] 执行内核就绪(backend=${target.kind}, model=${policy.defaultModel})`);
     return svc;
   })();
-  // P0-3:单例服务——宿主 ready 时创建一次,路由只读取引用
+  // P0-3/P1:单例服务——内核就绪即创建并启动调度器;不等首个 HTTP 请求,
+  // 否则宿主重启后无人打开工作台时,已启用的自动化规则永远不触发。
   let squadInstance: import('./workbench/squad.js').SquadService | null = null;
   let automationInstance: import('./workbench/automation.js').AutomationService | null = null;
-
-  registerWorkbenchRoutes(ctx, async () => {
+  const ensureSideServices = async () => {
     const dispatch = await servicePromise;
     if (!dispatch || !workbenchInstance) return null;
-    // 单例:首次请求时创建,后续复用(不重复 start 调度器)
     if (!squadInstance) {
       const { SquadService } = await import('./workbench/squad.js');
       squadInstance = new SquadService(workbenchStore);
@@ -135,11 +134,12 @@ export function apply(ctx: Context): void {
       const { AutomationService } = await import('./workbench/automation.js');
       automationInstance = new AutomationService(
         workbenchStore,
-        async (template, source) => {
+        async (template, source, ruleName) => {
           const task = await workbenchInstance!.createTask({
             projectId: template.projectId, title: template.title,
             description: template.description, acceptanceCriteria: template.acceptanceCriteria,
             assigneeId: template.assigneeId,
+            sourceNote: `自动化规则「${ruleName}」定时创建`,
           });
           const result = await workbenchInstance!.start(task.id, { idempotencyKey: `auto-${source}` });
           return { taskId: task.id, dispatchId: result.dispatchId };
@@ -151,11 +151,13 @@ export function apply(ctx: Context): void {
           } catch { return false; }
         },
       );
-      automationInstance.start(); // 仅首次启动
-      console.log('[dsh-dispatch] 自动化调度器已启动(单例)');
+      automationInstance.start();
+      console.log('[dsh-dispatch] 自动化调度器已启动(随内核就绪)');
     }
     return { workbench: workbenchInstance, squad: squadInstance, automation: automationInstance, dispatch };
-  });
+  };
+  registerWorkbenchRoutes(ctx, ensureSideServices);
+  void ensureSideServices().catch(() => undefined);
 
   // §7.1:启动对账(初始退避 ~5s;只扫描,不重放业务任务)
   void servicePromise.then((svc) => {

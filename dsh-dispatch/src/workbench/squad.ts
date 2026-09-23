@@ -35,8 +35,8 @@ export interface SquadExecution {
   /** 启动时的步骤快照(小队配置后续修改不影响已启动的执行) */
   steps: SquadStep[];
   currentStep: number;
-  /** running=某步在执行;paused_busy=槽被占;paused_failed=某步失败;completed=全部完成 */
-  state: 'running' | 'paused_busy' | 'paused_failed' | 'completed';
+  /** running=某步在执行;paused_failed=某步失败;completed=全部完成;aborted=被取消 */
+  state: 'running' | 'paused_failed' | 'completed' | 'aborted';
   runIds: string[];
   pauseReason?: string;
   createdAt: number;
@@ -45,12 +45,14 @@ export interface SquadExecution {
 
 export interface SquadStore {
   squads: Record<string, Squad>;
-  executions: Record<string, SquadExecution>;
+  /** 活执行集合:由 WorkbenchService.start() 创建、WorkbenchTargetAdapter.finalize() 写终态 */
+  squadExecutions: Record<string, SquadExecution>;
 }
 
 /**
- * 小队管理:CRUD + 执行编排。
- * 与 WorkbenchStore 共享同一 JSON 文件(在 root 上追加 squads/executions 集合)。
+ * 小队管理:CRUD。与 WorkbenchStore 共享同一 JSON 文件。
+ * 执行编排在 WorkbenchService.start()/continueSquadExecutions() 与 target.finalize()——
+ * 本服务只负责定义与查询,不再持有执行状态机(旧 createExecution/onRunFinished 已删)。
  */
 export class SquadService {
   constructor(private readonly store: WorkbenchStore) {}
@@ -58,11 +60,6 @@ export class SquadService {
   private root() {
     const root = this.store.snapshot();
     if (!root) throw new ServiceError('STORE_READONLY', '工作台不可用', 503);
-    // 延迟初始化 squads/executions(v2 存储上追加)
-    if (!(root as never as SquadStore).squads) {
-      (root as never as SquadStore).squads = {};
-      (root as never as SquadStore).executions = {};
-    }
     return root as never as SquadStore & { tasks: Record<string, WorkTask>; agents: Record<string, AgentProfile> };
   }
 
@@ -82,7 +79,7 @@ export class SquadService {
     if (steps.length < 2) throw new ServiceError('VALIDATION', '小队至少需要 2 个步骤', 422);
     return this.store.mutate((root) => {
       const squadRoot = root as never as SquadStore;
-      if (!squadRoot.squads) { squadRoot.squads = {}; squadRoot.executions = {}; }
+      if (!squadRoot.squads) { squadRoot.squads = {}; squadRoot.squadExecutions = {}; }
       const validated = this.validateSteps(steps, root as never as { agents: Record<string, AgentProfile> });
       const now = Date.now();
       const squad: Squad = { id: newId('sq'), name, description, steps: validated, revision: 1, createdAt: now, updatedAt: now };
@@ -118,8 +115,8 @@ export class SquadService {
     return this.store.mutate((root) => {
       const squadRoot = root as never as SquadStore;
       if (!squadRoot.squads?.[id]) return false;
-      // 有活跃执行时不可删除
-      const active = Object.values(squadRoot.executions ?? {}).find((e) => e.squadId === id && e.state === 'running');
+      // 有活跃执行时不可删除(读活集合 squadExecutions)
+      const active = Object.values(squadRoot.squadExecutions ?? {}).find((e) => e.squadId === id && e.state === 'running');
       if (active) throw new ServiceError('WRONG_STATE', '小队有正在执行的步骤,不可删除', 409);
       delete squadRoot.squads[id];
       return true;
@@ -136,77 +133,16 @@ export class SquadService {
     });
   }
 
-  /* ---------- 执行编排 ---------- */
+  /* ---------- 执行查询 ---------- */
 
-  /** 创建执行并返回第一步的启动参数。 */
-  async createExecution(taskId: string, squadId: string): Promise<{ execution: SquadExecution; firstAgent: AgentProfile; stepIndex: number }> {
-    return this.store.mutate((root) => {
-      const squadRoot = root as never as SquadStore;
-      if (!squadRoot.squads || !squadRoot.executions) { squadRoot.squads = {}; squadRoot.executions = {}; }
-      const task = root.tasks[taskId];
-      if (!task) throw new ServiceError('NOT_FOUND', `任务 ${taskId} 不存在`, 404);
-      const squad = squadRoot.squads[squadId];
-      if (!squad) throw new ServiceError('NOT_FOUND', `小队 ${squadId} 不存在`, 404);
-      if (task.owner) throw new ServiceError('WRONG_STATE', '任务已在执行中', 409);
-      // 已有活跃小队执行时不可重复启动
-      const existing = Object.values(squadRoot.executions).find((e) => e.taskId === taskId && e.state !== 'completed');
-      if (existing) throw new ServiceError('WRONG_STATE', '该任务已有进行中的小队执行', 409);
-
-      const now = Date.now();
-      const execution: SquadExecution = {
-        id: newId('se'),
-        taskId,
-        squadId,
-        steps: structuredClone(squad.steps), // 快照:后续配置修改不影响
-        currentStep: 0,
-        state: 'running',
-        runIds: [],
-        createdAt: now,
-        updatedAt: now,
-      };
-      squadRoot.executions[execution.id] = execution;
-      const firstAgent = root.agents[squad.steps[0].agentId];
-      if (!firstAgent) throw new ServiceError('VALIDATION', '第一步 Agent 不存在', 422);
-      return { execution, firstAgent, stepIndex: 0 };
-    });
-  }
-
-  /** 某步 Run 结束后:记录并决定是否接续下一步。返回 nextAgent(如果应接续)或 null。 */
-  async onRunFinished(executionId: string, runId: string, outcome: 'done' | 'failed' | 'blocked' | 'aborted'): Promise<{ nextAgent: AgentProfile | null; execution: SquadExecution | null }> {
-    return this.store.mutate((root) => {
-      const squadRoot = root as never as SquadStore;
-      const execution = squadRoot.executions?.[executionId];
-      if (!execution) return { nextAgent: null, execution: null as never };
-      execution.runIds.push(runId);
-      execution.updatedAt = Date.now();
-
-      if (outcome === 'done') {
-        if (execution.currentStep < execution.steps.length - 1) {
-          // 中间步骤成功 → 接续
-          execution.currentStep += 1;
-          execution.state = 'running';
-          const nextAgent = root.agents[execution.steps[execution.currentStep].agentId];
-          return { nextAgent: nextAgent ?? null, execution };
-        }
-        // 最后一步成功 → 完成
-        execution.state = 'completed';
-        return { nextAgent: null, execution };
-      }
-
-      // 失败/受阻/取消 → 停在当前步
-      execution.state = outcome === 'aborted' ? 'paused_busy' : 'paused_failed';
-      execution.pauseReason = `步骤 ${execution.currentStep + 1} ${outcome}`;
-      return { nextAgent: null, execution };
-    });
-  }
-
-  /** 获取任务的活跃小队执行。 */
+  /** 任务的活跃(运行中)小队执行。 */
   activeExecutionForTask(taskId: string): SquadExecution | null {
-    const root = this.root();
-    return Object.values(root.executions ?? {}).find((e) => e.taskId === taskId && e.state !== 'completed') ?? null;
+    return Object.values(this.root().squadExecutions ?? {})
+      .find((e) => e.taskId === taskId && e.state === 'running') ?? null;
   }
 
+  /** 全部执行记录(读活集合 squadExecutions——旧版误读从未写入的 executions,永远返回空)。 */
   listExecutions(): SquadExecution[] {
-    return Object.values(this.root().executions ?? {}).sort((a, b) => b.createdAt - a.createdAt);
+    return Object.values(this.root().squadExecutions ?? {}).sort((a, b) => b.createdAt - a.createdAt);
   }
 }

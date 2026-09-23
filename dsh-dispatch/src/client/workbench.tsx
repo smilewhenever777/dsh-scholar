@@ -552,11 +552,16 @@ function Workbench() {
     }
     setBusy(true);
     if (scope === 'modal') setFormError(''); else if (scope === 'detail') setDetailError(''); else setError('');
-    try { await action(); await refresh(); if (taskId) await refreshDetail(taskId); return true; }
+    // P0-1:保存后同步刷新 squads/automations(否则新建不出现、启停不更新)
+    const refreshCollections = () => {
+      void api<{ squads: Squad[] }>(`${BASE}/squads`).then((r) => setSquads(r.squads ?? [])).catch(() => undefined);
+      void api<{ rules: AutomationRule[]; attempts: TriggerAttempt[] }>(`${BASE}/automations`).then((r) => { setAutoRules(r.rules ?? []); setAutoAttempts(r.attempts ?? []); }).catch(() => undefined);
+    };
+    try { await action(); await refresh(); refreshCollections(); if (taskId) await refreshDetail(taskId); return true; }
     catch (e) {
       const text = friendlyError(e);
       if (scope === 'modal') setFormError(text); else if (scope === 'detail') setDetailError(text); else showToast(text, 'error');
-      await refresh(); if (taskId) await refreshDetail(taskId);
+      await refresh(); refreshCollections(); if (taskId) await refreshDetail(taskId);
       return false;
     }
     finally { setBusy(false); }
@@ -570,6 +575,10 @@ function Workbench() {
       ? { name: (item as { name?: string })?.name ?? '', cron: (item as { cron?: string })?.cron ?? '0 9 * * *', timezone: (item as { timezone?: string })?.timezone ?? 'Asia/Shanghai', ...(item as { template?: Record<string, string> })?.template ?? {} }
       : kind === 'squad'
       ? { ...Object.fromEntries(Object.entries(item).map(([k, v]) => [k, String(v ?? '')])), steps: (item as unknown as Squad).steps.map((s) => `${s.agentId}|${s.responsibility}`).join('\n') }
+      : kind === 'task'
+      // P0-4:v2 任务——assignment 对象映射回 assigneeId,不 String() 化
+      ? { ...Object.fromEntries(Object.entries(item).filter(([k]) => k !== 'assignment' && k !== 'owner' && k !== 'operations' && k !== 'timeline' && k !== 'runIds').map(([k, v]) => [k, String(v ?? '')])),
+          assigneeId: (item as Task).assignment?.id ?? (item as Task).assigneeId ?? '' }
       : Object.fromEntries(Object.entries(item).map(([k, v]) => [k, String(v ?? '')]))) :
       kind === 'task' ? { projectId: projectId || overview.projects[0]?.id || '', title: '', description: '', acceptanceCriteria: '', assigneeId: '' } :
       kind === 'agent' ? { name: '', instructions: '', model: models.default, displayDescription: '' } :
@@ -582,7 +591,7 @@ function Workbench() {
     const kind = modal;
     // 客户端必填校验:失败留在 modal 内展示,不打扰后端
     const missing: string[] = [];
-    if (!form.title?.trim() && kind !== 'agent') missing.push(kind === 'task' ? '任务标题' : '项目名称');
+    if (!form.title?.trim() && !['agent', 'squad', 'automation'].includes(kind)) missing.push(kind === 'task' ? '任务标题' : '项目名称');
     if (kind === 'project' && !editing && !form.root?.trim()) missing.push('本机工作区绝对路径');
     if (kind === 'agent' && !form.name?.trim()) missing.push('Agent 名称');
     if (kind === 'squad') {
@@ -626,6 +635,7 @@ function Workbench() {
       // P2:保存后明确下一步(评审 §4.6)
       if (kind === 'task' && !editing) showToast(form.assigneeId ? '任务已创建 → 到详情点「手动运行」启动' : '任务已创建 → 先分派 Agent,再手动运行', 'info');
       else if (kind === 'project' && !editing) showToast('项目已创建 → 下一步建 Agent 或直接建任务', 'info');
+      else if (kind === 'automation' && !editing) showToast('规则已创建(默认禁用)→ 确认模板无误后点「启用」开始调度', 'info');
     }
   }
   function moveTask(id: string, status: Status) {
@@ -706,8 +716,8 @@ function Workbench() {
             <h3>任务属性</h3>
             <dl className="dsh-wb-side-dl">
               <dt>项目</dt><dd>{overview.projects.find((p) => p.id === selected.projectId)?.title ?? '—'}</dd>
-              <dt>执行者</dt><dd>{overview.agents.find((a) => a.id === selected.assigneeId)?.name ?? '未分派'}</dd>
-              {selected.assigneeId && <dt>模型</dt>}{selected.assigneeId && <dd>{overview.agents.find((a) => a.id === selected.assigneeId)?.model ?? '—'}</dd>}
+              <dt>执行者</dt><dd>{overview.agents.find((a) => a.id === assigneeOf(selected))?.name ?? (squads.find((s) => s.id === assigneeOf(selected)) ? `☰ ${squads.find((s) => s.id === assigneeOf(selected))!.name}` : '未分派')}</dd>
+              {assigneeOf(selected) && <dt>模型</dt>}{assigneeOf(selected) && <dd>{overview.agents.find((a) => a.id === assigneeOf(selected))?.model ?? (squads.find((s) => s.id === assigneeOf(selected)) ? `${squads.find((s) => s.id === assigneeOf(selected))!.steps.length} 步小队` : '—')}</dd>}
               <dt>执行次数</dt><dd>{selected.runIds.length}</dd>
             </dl>
             <div className="dsh-wb-row" style={{ marginTop: 10 }}>
@@ -718,7 +728,7 @@ function Workbench() {
           </div>
           <div className="dsh-wb-panel dsh-wb-side-card dsh-wb-side-action">
             <h3>执行</h3>
-            <div className="dsh-wb-row"><select className="dsh-wb-select" aria-label="分派 Agent" disabled={!!selected.owner || busy} value={selected.assigneeId ?? ''} onChange={(e) => void mutate(() => write('/tasks/' + selected.id, 'PATCH', { expectedRevision: selected.revision, assigneeId: e.target.value || null }), 'detail')}><option value="">未分派</option>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name} · {a.model}</option>)}</select></div>
+            <div className="dsh-wb-row"><select className="dsh-wb-select" aria-label="分派 Agent 或小队" disabled={!!selected.owner || busy} value={assigneeOf(selected) ?? ''} onChange={(e) => void mutate(() => write('/tasks/' + selected.id, 'PATCH', { expectedRevision: selected.revision, assigneeId: e.target.value || null }), 'detail')}><option value="">未分派</option>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name} · {a.model}</option>)}{squads.length > 0 && <optgroup label="小队">{squads.map((sq) => <option key={sq.id} value={sq.id}>☰ {sq.name}({sq.steps.length}步)</option>)}</optgroup>}</select></div>
             {['todo', 'blocked'].includes(selected.status) && !selected.owner && <button className="dsh-wb-btn primary" style={{ width: '100%', marginTop: 8 }} disabled={!assigneeOf(selected) || busy} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/run', 'POST', { idempotencyKey: 'ui-' + crypto.randomUUID() }), 'detail')}>手动运行</button>}
             {selected.owner && <p className="dsh-wb-muted" style={{ marginTop: 8 }}>执行中;目标与验收标准已锁定。取消后等待静止确认。</p>}
           </div>
