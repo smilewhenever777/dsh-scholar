@@ -122,7 +122,8 @@ try{
  await page.getByRole('button',{name:'重试',exact:true}).click();await flush();
  check('UX03-card-retry-label-and-draft',await page.locator('input:not([type=file])').last().inputValue()==='关联重试保留草稿',{});
  // Keyboard rating is an actual focusable radio group.
- await page.getByRole('radio',{name:'2 / 5',exact:true}).focus();await page.keyboard.press('End');await page.waitForFunction(()=>window.audit.papers.A.importance===5);
+ await page.getByRole('radio',{name:'2 / 5',exact:true}).focus();await page.keyboard.press('End');
+ await page.waitForFunction(()=>window.audit.papers.A.importance===5&&document.querySelector('[role="radio"][aria-label="5 / 5"]')?.getAttribute('aria-checked')==='true');
  check('UX03-rating-keyboard',await page.getByRole('radio',{name:'5 / 5',exact:true}).getAttribute('aria-checked')==='true',{});
  // A details-level failure is visible inside the modal, not behind its backdrop.
  await go('books');await page.getByText('合成 Idea',{exact:true}).first().click();await page.getByRole('dialog').waitFor();
