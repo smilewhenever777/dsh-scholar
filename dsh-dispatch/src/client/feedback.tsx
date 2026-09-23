@@ -25,7 +25,7 @@ export function useModalFocus(onClose: () => void) {
       if (stack[stack.length - 1] !== handle) return;
       if (ev.key === 'Escape') { ev.stopImmediatePropagation(); ev.preventDefault(); onClose(); return; }
       if (ev.key !== 'Tab' || !ref.current) return;
-      const focusables = [...ref.current.querySelectorAll<HTMLElement>('input, textarea, select, button, [href]')].filter((el) => !el.disabled);
+      const focusables = [...ref.current.querySelectorAll<HTMLElement>('input, textarea, select, button, [href]')].filter((el) => !(el as HTMLButtonElement).disabled);
       if (!focusables.length) return;
       const firstEl = focusables[0];
       const lastEl = focusables[focusables.length - 1];
@@ -36,7 +36,7 @@ export function useModalFocus(onClose: () => void) {
       if (stack[stack.length - 1] !== handle || !ref.current) return;
       if (ev.target instanceof Node && ref.current.contains(ev.target)) return;
       // 焦点逃逸到背景:拉回弹窗内
-      const focusables = [...ref.current.querySelectorAll<HTMLElement>('input, textarea, select, button')].filter((el) => !el.disabled);
+      const focusables = [...ref.current.querySelectorAll<HTMLElement>('input, textarea, select, button')].filter((el) => !(el as HTMLButtonElement).disabled);
       (focusables[0] ?? ref.current).focus();
     };
     document.addEventListener('keydown', keydown, true);
