@@ -6,7 +6,7 @@ import { renderMarkdown, markdownCss } from './markdown';
 import { workbenchCss } from './workbench-style';
 
 type Status = 'todo' | 'in_progress' | 'in_review' | 'blocked' | 'done';
-type Page = 'overview' | 'tasks' | 'projects' | 'agents' | 'squads' | 'legacy';
+type Page = 'overview' | 'tasks' | 'projects' | 'agents' | 'squads' | 'automations' | 'legacy';
 type Project = { id: string; title: string; root: string; revision: number; goal?: string; description?: string; archivedAt?: number };
 type Agent = { id: string; name: string; instructions: string; model: string; toolAllow: string[]; revision: number; displayDescription?: string };
 type Timeline = { id: string; kind: string; at: number; text: string; runId?: string; actor: string };
@@ -15,6 +15,8 @@ type Task = { id: string; projectId: string; title: string; description: string;
   status: Status; revision: number; runIds: string[]; timeline: Timeline[]; timelineTotal?: number; owner?: { dispatchId: string } };
 type SquadStep = { agentId: string; responsibility: string };
 type Squad = { id: string; name: string; description: string; steps: SquadStep[]; revision: number; createdAt: number; updatedAt: number };
+type AutomationRule = { id: string; name: string; enabled: boolean; cron: string; timezone: string; template: { projectId: string; title: string; description: string; acceptanceCriteria: string; assigneeId: string }; nextTriggerAt?: number; revision: number };
+type TriggerAttempt = { id: string; ruleId: string; ruleName: string; scheduledAt: number; result: string; reason?: string; taskId?: string; at: number };
 type SquadExecution = { id: string; taskId: string; squadId: string; steps: SquadStep[]; currentStep: number; state: string; runIds: string[]; pauseReason?: string; createdAt: number };
 type Run = { id: string; phase: string; createdAt: number; acceptedAt?: number; lastProgressAt?: number; endedAt?: number; runtime: { childSessionId: string; quiescence: string };
   effectiveConfig: { modelProvider: string; model: string; agentProfile?: { name: string } };
@@ -476,13 +478,15 @@ function Workbench() {
   const [models, setModels] = React.useState<Models>({ allowed: [], default: '' });
   const [legacy, setLegacy] = React.useState<Run[]>([]);
   const [squads, setSquads] = React.useState<Squad[]>([]);
+  const [autoRules, setAutoRules] = React.useState<AutomationRule[]>([]);
+  const [autoAttempts, setAutoAttempts] = React.useState<TriggerAttempt[]>([]);
   const [projectId, setProjectId] = React.useState('');
   const [layout, setLayout] = React.useState<'board' | 'list'>('board');
   const [statusFilter, setStatusFilter] = React.useState<Status | ''>('');
   const [taskId, setTaskId] = React.useState('');
   const [detail, setDetail] = React.useState<{ task: Task; runs: Run[] } | null>(null);
   const [runId, setRunId] = React.useState('');
-  const [modal, setModal] = React.useState<'project' | 'agent' | 'task' | 'squad' | null>(null);
+  const [modal, setModal] = React.useState<'project' | 'agent' | 'task' | 'squad' | 'automation' | null>(null);
   const [editing, setEditing] = React.useState<string | null>(null);
   const [form, setForm] = React.useState<Record<string, string>>({});
   const [toolAllow, setToolAllow] = React.useState<string[]>(Object.keys(TOOLS));
@@ -522,7 +526,8 @@ function Workbench() {
     catch (e) { setError(errorText(e)); }
   }, []);
   React.useEffect(() => {
-    void refresh(); void api<{ squads: Squad[] }>(`${BASE}/squads`).then((r) => setSquads(r.squads)).catch(() => undefined);
+    void refresh(); void api<{ rules: AutomationRule[]; attempts: TriggerAttempt[] }>(`${BASE}/automations`).then((r) => { setAutoRules(r.rules ?? []); setAutoAttempts(r.attempts ?? []); }).catch(() => undefined);
+    void api<{ squads: Squad[] }>(`${BASE}/squads`).then((r) => setSquads(r.squads)).catch(() => undefined);
     void api<Models>(`${BASE}/models`).then(setModels).catch((e) => setError(errorText(e)));
     const timer = setInterval(() => { if (!document.hidden) void refresh(); }, 5000);
     return () => clearInterval(timer);
@@ -557,16 +562,19 @@ function Workbench() {
     finally { setBusy(false); }
   }
   function begin(kind: 'project' | 'agent' | 'task' | 'squad', id?: string) {
-    const item = kind === 'project' ? overview.projects.find((p) => p.id === id) : kind === 'agent' ? overview.agents.find((a) => a.id === id) : kind === 'squad' ? squads.find((s) => s.id === id) : overview.tasks.find((t) => t.id === id);
+    const item = kind === 'project' ? overview.projects.find((p) => p.id === id) : kind === 'agent' ? overview.agents.find((a) => a.id === id) : kind === 'squad' ? squads.find((s) => s.id === id) : kind === 'automation' ? autoRules.find((r) => r.id === id) as unknown as Record<string, unknown> : overview.tasks.find((t) => t.id === id);
     setEditing(id ?? null);
     setFormError('');
     if (kind === 'agent') setToolAllow((item as Agent | undefined)?.toolAllow ?? Object.keys(TOOLS));
-    setForm(item ? (kind === 'squad'
+    setForm(item ? (kind === 'automation'
+      ? { name: (item as { name?: string })?.name ?? '', cron: (item as { cron?: string })?.cron ?? '0 9 * * *', timezone: (item as { timezone?: string })?.timezone ?? 'Asia/Shanghai', ...(item as { template?: Record<string, string> })?.template ?? {} }
+      : kind === 'squad'
       ? { ...Object.fromEntries(Object.entries(item).map(([k, v]) => [k, String(v ?? '')])), steps: (item as unknown as Squad).steps.map((s) => `${s.agentId}|${s.responsibility}`).join('\n') }
       : Object.fromEntries(Object.entries(item).map(([k, v]) => [k, String(v ?? '')]))) :
       kind === 'task' ? { projectId: projectId || overview.projects[0]?.id || '', title: '', description: '', acceptanceCriteria: '', assigneeId: '' } :
       kind === 'agent' ? { name: '', instructions: '', model: models.default, displayDescription: '' } :
-      kind === 'squad' ? { name: '', description: '', steps: '' } : { title: '', root: '', goal: '', description: '' });
+      kind === 'squad' ? { name: '', description: '', steps: '' } :
+      kind === 'automation' ? { name: '', cron: '0 9 * * *', timezone: 'Asia/Shanghai', projectId: overview.projects[0]?.id ?? '', title: '', description: '', acceptanceCriteria: '', assigneeId: overview.agents[0]?.id ?? '' } : { title: '', root: '', goal: '', description: '' });
     setModal(kind);
   }
   async function saveModal() {
@@ -581,15 +589,27 @@ function Workbench() {
       if (!form.name?.trim()) missing.push('小队名称');
       if ((form.steps ?? '').split('\n').filter(Boolean).length < 2) missing.push('至少 2 个步骤');
     }
+    if (kind === 'automation') {
+      if (!form.name?.trim()) missing.push('规则名称');
+      if (!form.cron?.trim()) missing.push('cron 表达式');
+      if (!form.title?.trim()) missing.push('任务标题');
+      if (!form.acceptanceCriteria?.trim()) missing.push('验收标准');
+      if (!form.assigneeId) missing.push('分派 Agent');
+    }
     if (kind === 'task') {
       if (!form.acceptanceCriteria?.trim()) missing.push('验收标准');
       if (!form.projectId) missing.push('所属项目');
     }
     if (missing.length) { setFormError(`请填写:${missing.join('、')}`); return; }
-    const endpoint = kind === 'project' ? 'projects' : kind === 'agent' ? 'agents' : kind === 'squad' ? 'squads' : 'tasks';
+    const endpoint = kind === 'project' ? 'projects' : kind === 'agent' ? 'agents' : kind === 'squad' ? 'squads' : kind === 'automation' ? 'automations' : 'tasks';
     const current = editing ? (kind === 'project' ? overview.projects : kind === 'agent' ? overview.agents : overview.tasks).find((x) => x.id === editing) : undefined;
     const body = kind === 'project' ? { title: form.title, root: form.root, goal: form.goal ?? '', description: form.description ?? '', expectedRevision: current?.revision } :
       kind === 'agent' ? { name: form.name, instructions: form.instructions, model: form.model, toolAllow, displayDescription: form.displayDescription ?? '', expectedRevision: current?.revision } :
+      kind === 'automation' ? (() => ({
+        name: form.name, cron: form.cron, timezone: form.timezone ?? 'Asia/Shanghai',
+        template: { projectId: form.projectId, title: form.title, description: form.description ?? '', acceptanceCriteria: form.acceptanceCriteria, assigneeId: form.assigneeId },
+        expectedRevision: current?.revision,
+      }))() :
       kind === 'squad' ? (() => {
         const steps = (form.steps ?? '').split('\n').filter(Boolean).map((line) => {
           const [agentId, ...resp] = line.split('|');
@@ -627,12 +647,12 @@ function Workbench() {
     <ToastHost />
     <nav className="dsh-wb-nav" aria-label="工作台导航">
       <div className="dsh-wb-brand"><small>DSH DISPATCH</small>AI 团队工作台</div>
-      {([['overview', '◫', '总览'], ['tasks', '▤', '任务'], ['projects', '⊀', '项目'], ['agents', '◈', 'Agent 目录'], ['squads', '☰', '小队'], ['legacy', '⧖', '旧派发历史']] as const).map(([key, ico, title]) =>
+      {([['overview', '◫', '总览'], ['tasks', '▤', '任务'], ['projects', '⊀', '项目'], ['agents', '◈', 'Agent 目录'], ['squads', '☰', '小队'], ['automations', '⏱', '自动化'], ['legacy', '⧖', '旧派发历史']] as const).map(([key, ico, title]) =>
         <button className={`dsh-wb-navbtn${page === key ? ' active' : ''}`} key={key} onClick={() => setPage(key)}><span className="dsp-nav-ico" aria-hidden>{ico}</span><span>{title}</span></button>)}
       <div className="dsh-wb-navfoot">同一时间运行一个任务;<br />完成后由你验收归档。</div>
     </nav>
     <main className="dsh-wb-main">
-      <header className="dsh-wb-head"><div><div className="dsh-wb-kicker">DSH / DISPATCH</div><h1>{selected ? '任务详情' : page === 'overview' ? '工作总览' : page === 'tasks' ? '任务' : page === 'projects' ? '项目' : page === 'agents' ? 'Agent 目录' : page === 'squads' ? '小队' : '旧派发历史'}</h1></div>
+      <header className="dsh-wb-head"><div><div className="dsh-wb-kicker">DSH / DISPATCH</div><h1>{selected ? '任务详情' : page === 'overview' ? '工作总览' : page === 'tasks' ? '任务' : page === 'projects' ? '项目' : page === 'agents' ? 'Agent 目录' : page === 'squads' ? '小队' : page === 'automations' ? '自动化' : '旧派发历史'}</h1></div>
         <div className="dsh-wb-head-actions">
           {selected && <button className="dsh-wb-btn" onClick={() => { setTaskId(''); setDetail(null); }}>← 返回{page === 'overview' ? '总览' : '列表'}</button>}
           <button className="dsh-wb-btn" onClick={() => void refresh()}>刷新</button><button className="dsh-wb-btn ghost" onClick={() => setOpen(false)} aria-label="关闭工作台">关闭 ✕</button></div></header>
@@ -774,6 +794,21 @@ function Workbench() {
     <div className="dsh-wb-muted">{sq.steps.length} 步:{sq.steps.map((s, j) => `${j + 1}.${s.responsibility || overview.agents.find(a => a.id === s.agentId)?.name || '?'}`).join(' → ')}</div>
   </div>)}</div>
   {!squads.length && <div className="dsh-wb-empty">暂无小队。创建 2+ 步骤的 Agent 序列来自动化多步工作流。</div>}</>}
+      {page === 'automations' && <><button className="dsh-wb-btn primary" onClick={() => begin('automation')}>新建规则</button><div style={{ height: 16 }} />
+  {autoRules.length ? autoRules.map((rule) => <div className="dsh-wb-panel" key={rule.id}>
+    <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}>
+      <h2>{rule.name}</h2>
+      <div className="dsh-wb-row">
+        <button className={`dsh-wb-btn ${rule.enabled ? 'danger' : 'primary'}`} onClick={() => void mutate(() => write(`/automations/${rule.id}`, 'PATCH', { expectedRevision: rule.revision, enabled: !rule.enabled }), 'page')}>{rule.enabled ? '禁用' : '启用'}</button>
+        <button className="dsh-wb-btn" onClick={() => begin('automation', rule.id)}>编辑</button>
+      </div>
+    </div>
+    <div className="dsh-wb-muted">{rule.cron} · 下次:{fmt(rule.nextTriggerAt)} · {rule.enabled ? '✅ 已启用' : '⛔ 已禁用'}</div>
+    <div className="dsh-wb-muted">任务模板:{rule.template.title} → {overview.agents.find(a => a.id === rule.template.assigneeId)?.name ?? '?'}</div>
+  </div>) : <div className="dsh-wb-empty">暂无自动化规则。创建定时规则来自动生成并运行任务。</div>}
+  {autoAttempts.length > 0 && <div className="dsh-wb-panel"><h3>最近触发</h3>
+    <table className="dsh-wb-table"><thead><tr><th>规则</th><th>计划时间</th><th>结果</th><th>原因/任务</th></tr></thead>
+    <tbody>{autoAttempts.slice(0, 10).map((a) => <tr key={a.id}><td>{a.ruleName}</td><td>{fmt(a.scheduledAt)}</td><td>{a.result}</td><td>{a.reason ?? a.taskId ?? ''}</td></tr>)}</tbody></table></div>}</>}
       {page === 'legacy' && <div className="dsh-wb-panel"><p className="dsh-wb-muted">旧 trajectory 派发仅供查看,不会自动成为已验收任务。共 {overview.legacyCount} 条。</p>
         <table className="dsh-wb-table"><thead><tr><th>目标</th><th>结果</th><th>开始</th><th>结束</th></tr></thead><tbody>{legacy.map((r) => <tr key={r.id}><td>{r.targetType === 'workbench_task' ? '工作台任务' : r.targetRef.nodeId}</td><td>{OUTCOME_LABEL[r.result?.kind ?? ''] ?? PHASE_LABEL[r.phase] ?? r.phase}</td><td>{fmt(r.createdAt)}</td><td>{fmt(r.endedAt)}</td></tr>)}</tbody></table></div>}
       </>}
@@ -807,6 +842,14 @@ function Workbench() {
     })}
     <button type="button" className="dsh-wb-btn" onClick={() => setForm({ ...form, steps: (form.steps ? form.steps + '\n' : '') + (overview.agents[0]?.id ?? '') + '|' })}>+ 添加步骤</button>
   </div></>}
+      {modal === 'automation' && <><Field autoFocus label="规则名称" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
+  <div className="dsh-wb-field"><label>cron 表达式(分 时 日 月 周)</label><input className="dsh-wb-input" value={form.cron ?? ''} onChange={(e) => setForm({ ...form, cron: e.target.value })} placeholder="0 9 * * *(每天9点)或 0 */2 * * *(每2小时)" /></div>
+  <div className="dsh-wb-field"><label>时区</label><input className="dsh-wb-input" value={form.timezone ?? 'Asia/Shanghai'} onChange={(e) => setForm({ ...form, timezone: e.target.value })} /></div>
+  <div className="dsh-wb-field"><label>任务模板 · 项目</label><select className="dsh-wb-select" value={form.projectId ?? ''} onChange={(e) => setForm({ ...form, projectId: e.target.value })}>{overview.projects.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}</select></div>
+  <Field label="任务标题" value={form.title} onChange={(v) => setForm({ ...form, title: v })} />
+  <div className="dsh-wb-field"><label>任务描述</label><textarea className="dsh-wb-textarea" rows={3} value={form.description ?? ''} onChange={(e) => setForm({ ...form, description: e.target.value })} /></div>
+  <div className="dsh-wb-field"><label>验收标准</label><textarea className="dsh-wb-textarea" rows={2} value={form.acceptanceCriteria ?? ''} onChange={(e) => setForm({ ...form, acceptanceCriteria: e.target.value })} /></div>
+  <div className="dsh-wb-field"><label>分派 Agent</label><select className="dsh-wb-select" value={form.assigneeId ?? ''} onChange={(e) => setForm({ ...form, assigneeId: e.target.value })}>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div></>}
       {modal === 'task' && <><div className="dsh-wb-field"><label>项目</label>{editing ? <div>{overview.projects.find((p) => p.id === form.projectId)?.title}</div> : <select className="dsh-wb-select" value={form.projectId} onChange={(e) => setForm({ ...form, projectId: e.target.value })}>{overview.projects.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}</select>}</div><Field autoFocus label="任务标题" value={form.title} onChange={(v) => setForm({ ...form, title: v })} /><div className="dsh-wb-field"><label>任务描述</label><textarea className="dsh-wb-textarea" rows={Math.min(10, Math.max(3, (form.description ?? '').split('\n').length))} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></div><div className="dsh-wb-field"><label>验收标准(必填)</label><textarea className="dsh-wb-textarea" rows={Math.min(10, Math.max(3, (form.acceptanceCriteria ?? '').split('\n').length))} value={form.acceptanceCriteria} onChange={(e) => setForm({ ...form, acceptanceCriteria: e.target.value })} /></div><div className="dsh-wb-field"><label>分派 Agent</label><select className="dsh-wb-select" value={form.assigneeId} onChange={(e) => setForm({ ...form, assigneeId: e.target.value })}><option value="">暂不分派</option>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}{squads.length > 0 && <optgroup label="小队">{squads.map((sq) => <option key={sq.id} value={sq.id}>☰ {sq.name}({sq.steps.length}步)</option>)}</optgroup>}</select><small className="dsh-wb-field-hint">分派后需到任务详情点「手动运行」才会启动子代理。</small></div></>}
       <div className="dsh-wb-row" style={{ justifyContent: 'flex-end' }}><button className="dsh-wb-btn" onClick={() => setModal(null)}>取消</button><button className="dsh-wb-btn primary" disabled={busy} onClick={() => void saveModal()}>保存</button></div>
     </div></>}
