@@ -1,14 +1,15 @@
 /**
- * 官方右侧 Sidebar 的「任务派发」页签(P4,guide order 63)。
+ * 官方右侧 Sidebar 的「任务派发」页签(P4,guide order 63;Wave 1 交互修复)。
  *
- * 布局照 r2 §8:进行中卡片(标题/状态文案/耗时/取消/接管/核验/解除)+ 历史折叠区 +
- * 点节点标题深链跳 trajectory;详情按 §8.3 展示快照/执行者/模型/时间/报告/证据/
- * 停止原因/节点同步/安全占用。轮询 §8.4:页签可见时约 10s,页面隐藏时暂停
- * (宿主对账独立继续)。全部文本按纯文本渲染(§8.4 安全渲染)。
+ * - 工作台摘要 + 打开入口;旧 trajectory 派发:进行中卡片 + 历史折叠
+ * - Wave 1 修复:Btn 提升到模块层(轮询不再卸载重建按钮)、详情展开期间跟随刷新、
+ *   alert/prompt 换成 toast/ConfirmModal、执行者显示模型而非裸会话 ID 片段
+ * - 轮询 §8.4:页签可见时约 10s,页面隐藏暂停(宿主对账独立);纯文本安全渲染
  */
 import React from 'react';
 import { api } from './api';
 import { openWorkbench } from './workbench';
+import { ConfirmModal, ToastHost, showToast, type ConfirmRequest } from './feedback';
 
 const NS = 'dsh-dispatch';
 const TAB_ID = 'dsh-dispatch';
@@ -89,51 +90,18 @@ const PHASE_COLOR: Record<string, string> = {
   queued: 'var(--dsw-alias-state-business-primary, #4d6bfe)',
   starting: 'var(--dsw-alias-state-business-primary, #4d6bfe)',
   preparing: 'var(--dsw-alias-label-caption, #8f8f8f)',
-  settling: 'var(--dsw-alias-state-warning-primary, #e5a100)',
-  cancelling: 'var(--dsw-alias-state-warning-primary, #e5a100)',
-  reconciling: 'var(--dsw-alias-state-warning-primary, #e5a100)',
+  settling: 'var(--dsw-alias-state-warn-primary, #f5a524)',
+  cancelling: 'var(--dsw-alias-state-warn-primary, #f5a524)',
+  reconciling: 'var(--dsw-alias-state-warn-primary, #f5a524)',
 };
 
-function post(t: TFunc, path: string, body: unknown, refresh: () => void, done?: (msg: string) => void) {
-  api(path, { method: 'POST', body: JSON.stringify(body) })
-    .then(() => { refresh(); done?.(''); })
-    .catch((e) => { window.alert(String(e instanceof Error ? e.message : e)); void t; });
-}
-
-function DispatchCard({ t, d, refresh }: { t: TFunc; d: ListEntry; refresh: () => void }) {
-  const [open, setOpen] = React.useState(false);
-  const [detail, setDetail] = React.useState<StatusDetail | null>(null);
-  const kind = d.phase === 'finished' ? d.result?.split('/')[0] : d.phase;
-  const dotColor = d.phase === 'finished'
-    ? (kind === 'done' ? 'var(--dsw-alias-state-success-primary, #30a46c)' : kind === 'blocked' ? 'var(--dsw-alias-state-danger-primary, #e5484d)' : 'var(--dsw-alias-label-dimmed, #6f6f6f)')
-    : (PHASE_COLOR[d.phase] ?? 'var(--dsw-alias-label-caption)');
-
-  const loadDetail = () => {
-    setOpen((v) => !v);
-    if (!detail) api<StatusDetail>(`/dispatch/status/${encodeURIComponent(d.id)}`).then(setDetail).catch(() => setDetail(null));
-  };
-
-  const Btn = ({ act, label, primary }: { act: string; label: string; primary?: boolean }) => (
+/** Wave 1:提升到模块层——轮询 setList 重渲染不再卸载重建按钮(焦点/点击不再丢失)。 */
+function CardBtn({ act, label, primary, onAction }: { act: string; label: string; primary?: boolean; onAction: (act: string) => void }) {
+  return (
     <button
       type="button"
       className="dsh-dispatch-press"
-      onClick={() => {
-        if (act === 'detail') {
-          loadDetail();
-        } else if (act === 'cancel') {
-          post(t, '/dispatch/cancel', { dispatchId: d.id, by: 'ui', reason: '用户取消' }, refresh);
-        } else if (act === 'takeover') {
-          const reason = window.prompt(t('confirm.takeover'), 'manual') ?? '';
-          if (reason === '') return;
-          post(t, '/dispatch/takeover', { dispatchId: d.id, actor: 'ui', reason }, refresh);
-        } else if (act === 'reconcile') {
-          post(t, '/dispatch/reconcile', {}, refresh);
-        } else if (act === 'resolve') {
-          const evidence = window.prompt(t('confirm.resolve'), '已人工核查会话与进程') ?? '';
-          if (evidence === '') return;
-          post(t, '/dispatch/resolve', { dispatchId: d.id, operator: 'ui', evidence }, refresh);
-        }
-      }}
+      onClick={() => onAction(act)}
       style={{
         flex: 'none', height: 20, padding: '0 8px', borderRadius: 5, cursor: 'pointer', fontSize: 10.5,
         border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.28))',
@@ -142,6 +110,47 @@ function DispatchCard({ t, d, refresh }: { t: TFunc; d: ListEntry; refresh: () =
       }}
     >{label}</button>
   );
+}
+
+function DispatchCard({ t, d, refreshTick, refresh }: { t: TFunc; d: ListEntry; refreshTick: number; refresh: () => void }) {
+  const [open, setOpen] = React.useState(false);
+  const [detail, setDetail] = React.useState<StatusDetail | null>(null);
+  const kind = d.phase === 'finished' ? d.result?.split('/')[0] : d.phase;
+  const dotColor = d.phase === 'finished'
+    ? (kind === 'done' ? 'var(--dsw-alias-state-success-primary, #30a46c)' : kind === 'blocked' ? 'var(--dsw-alias-state-danger-primary, #e5484d)' : 'var(--dsw-alias-label-dimmed, #6f6f6f)')
+    : (PHASE_COLOR[d.phase] ?? 'var(--dsw-alias-label-caption)');
+
+  // Wave 1:详情展开期间跟随面板轮询刷新(不再是一次性快照)
+  React.useEffect(() => {
+    if (!open) return;
+    api<StatusDetail>(`/dispatch/status/${encodeURIComponent(d.id)}`)
+      .then(setDetail)
+      .catch(() => undefined);
+  }, [open, d.id, refreshTick]);
+
+  const onAction = (act: string) => {
+    if (act === 'detail') {
+      setOpen((v) => !v);
+      return;
+    }
+    if (act === 'cancel') {
+      api('/dispatch/cancel', { method: 'POST', body: JSON.stringify({ dispatchId: d.id, by: 'ui', reason: '用户取消' }) })
+        .then(() => { showToast('取消请求已受理;完成以静止确认为准。', 'info'); refresh(); })
+        .catch((e) => showToast(String(e instanceof Error ? e.message : e), 'error'));
+      return;
+    }
+    if (act === 'reconcile') {
+      api('/dispatch/reconcile', { method: 'POST', body: '{}' })
+        .then(() => { showToast('已触发一次状态核验。', 'info'); refresh(); })
+        .catch((e) => showToast(String(e instanceof Error ? e.message : e), 'error'));
+      return;
+    }
+    if (act === 'takeover' || act === 'resolve') {
+      window.dispatchEvent(new CustomEvent('dsh-dispatch-ask', {
+        detail: { act, dispatchId: d.id } as AskPayload,
+      }));
+    }
+  };
 
   return (
     <div style={{ padding: '8px 10px', borderRadius: 8, background: 'var(--dsw-alias-bg-layer-2)', display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -151,7 +160,7 @@ function DispatchCard({ t, d, refresh }: { t: TFunc; d: ListEntry; refresh: () =
           type="button"
           title={t('detail.goNode')}
           onClick={() => window.dispatchEvent(new CustomEvent('dsh-dispatch-nav', { detail: { projectId: d.node.projectId, nodeId: d.node.nodeId } }))}
-          style={{ flex: 1, minWidth: 0, textAlign: 'left', border: 'none', background: 'none', cursor: 'pointer', padding: 0, fontSize: 12, fontWeight: 600, color: 'var(--dsh-alias-label-primary, var(--dsw-alias-label-primary))', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          style={{ flex: 1, minWidth: 0, textAlign: 'left', border: 'none', background: 'none', cursor: 'pointer', padding: 0, fontSize: 12, fontWeight: 600, color: 'var(--dsw-alias-label-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
         >{d.title}</button>
         <span style={{ flex: 'none', fontSize: 10, color: 'var(--dsw-alias-label-caption)' }}>
           {d.phase !== 'finished' ? `${t('panel.elapsed')} ${fmtElapsed(d.createdAt)}` : fmtTime(d.endedAt)}
@@ -159,11 +168,11 @@ function DispatchCard({ t, d, refresh }: { t: TFunc; d: ListEntry; refresh: () =
       </div>
       <div style={{ fontSize: 11, color: 'var(--dsw-alias-label-caption)' }}>{phaseText(t, d)}</div>
       <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-        {d.allowedActions.includes('cancel') && <Btn act="cancel" label={t('btn.cancel')} primary />}
-        {d.allowedActions.includes('takeover') && d.phase !== 'finished' && <Btn act="takeover" label={t('btn.takeover')} />}
-        {d.allowedActions.includes('reconcile') && <Btn act="reconcile" label={t('btn.reconcile')} />}
-        {d.allowedActions.includes('resolve') && <Btn act="resolve" label={t('btn.resolve')} />}
-        <Btn act="detail" label={open ? t('btn.hideDetail') : t('btn.detail')} />
+        {d.allowedActions.includes('cancel') && <CardBtn act="cancel" label={t('btn.cancel')} primary onAction={onAction} />}
+        {d.allowedActions.includes('takeover') && d.phase !== 'finished' && <CardBtn act="takeover" label={t('btn.takeover')} onAction={onAction} />}
+        {d.allowedActions.includes('reconcile') && <CardBtn act="reconcile" label={t('btn.reconcile')} onAction={onAction} />}
+        {d.allowedActions.includes('resolve') && <CardBtn act="resolve" label={t('btn.resolve')} onAction={onAction} />}
+        <CardBtn act="detail" label={open ? t('btn.hideDetail') : t('btn.detail')} onAction={onAction} />
       </div>
       {open && (
         <div style={{ fontSize: 10.5, lineHeight: 1.65, color: 'var(--dsw-alias-label-secondary)', borderTop: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.18))', paddingTop: 6, display: 'flex', flexDirection: 'column', gap: 3, wordBreak: 'break-all' }}>
@@ -172,7 +181,6 @@ function DispatchCard({ t, d, refresh }: { t: TFunc; d: ListEntry; refresh: () =
             <>
               <div><b>{t('detail.node')}</b> {detail.source.snapshot.nodeTitle}({detail.source.snapshot.nodeKind ?? '—'})</div>
               {detail.source.snapshot.nodeDetail && <div style={{ whiteSpace: 'pre-wrap', maxHeight: 84, overflow: 'auto' }}>{detail.source.snapshot.nodeDetail}</div>}
-              <div><b>{t('detail.executor')}</b> {detail.runtime.childSessionId.slice(0, 18)}…</div>
               <div><b>{t('detail.model')}</b> {detail.effectiveConfig.modelProvider}/{detail.effectiveConfig.model}</div>
               <div><b>{t('detail.times')}</b> {fmtTime(detail.createdAt)} → {fmtTime(detail.endedAt ?? null)}</div>
               <div><b>{t('detail.stop')}</b> {detail.runtime.observedRuns.at(-1)?.observedEndAt?.stopReason ?? (detail.result?.reasonCode ?? '—')}</div>
@@ -198,6 +206,8 @@ function DispatchCard({ t, d, refresh }: { t: TFunc; d: ListEntry; refresh: () =
   );
 }
 
+interface AskPayload { act: 'takeover' | 'resolve'; dispatchId: string }
+
 function PanelBody(props: { useTabInfo: () => { tab: any }; t: TFunc; sessionId?: string; useSessions?: (sel: (s: any) => any) => any }) {
   const { t, sessionId, useSessions } = props;
   const cwd = useSessions ? useSessions((s: any) => s?.byId?.[sessionId ?? '']?.cwd) : undefined;
@@ -205,14 +215,18 @@ function PanelBody(props: { useTabInfo: () => { tab: any }; t: TFunc; sessionId?
   const [err, setErr] = React.useState('');
   const [showHistory, setShowHistory] = React.useState(false);
   const [workbench, setWorkbench] = React.useState<{ counts: Record<string, number>; tasks: { id: string; title: string; status: string }[] } | null>(null);
+  const [tick, setTick] = React.useState(0);
+  const [confirmReq, setConfirmReq] = React.useState<ConfirmRequest | null>(null);
 
   React.useEffect(() => {
     let alive = true;
     const load = () => {
       if (document.hidden) return; // §8.4:页面隐藏暂停 UI 轮询(宿主对账独立)
       api<{ dispatches: ListEntry[] }>(`/dispatch/list${cwd ? `?ws=${encodeURIComponent(cwd)}` : ''}`)
-        .then((r) => { if (alive) { setList(r.dispatches); setErr(''); } })
+        .then((r) => { if (alive) { setList(r.dispatches); setErr(''); setTick((n) => n + 1); } })
         .catch((e) => { if (alive) setErr(String(e instanceof Error ? e.message : e)); });
+      api<{ counts: Record<string, number>; tasks: { id: string; title: string; status: string }[] }>('/dispatch/workbench/overview')
+        .then((value) => { if (alive) setWorkbench(value); }).catch(() => undefined);
     };
     load();
     const timer = setInterval(load, 10_000);
@@ -221,29 +235,57 @@ function PanelBody(props: { useTabInfo: () => { tab: any }; t: TFunc; sessionId?
     return () => { alive = false; clearInterval(timer); document.removeEventListener('visibilitychange', onVis); };
   }, [cwd]);
 
+  // Wave 1:卡片操作经 CustomEvent 请求接管/解除(面板自身是独立 React root,经事件解耦)
   React.useEffect(() => {
-    let alive = true;
-    const load = () => {
-      if (document.hidden) return;
-      api<{ counts: Record<string, number>; tasks: { id: string; title: string; status: string }[] }>('/dispatch/workbench/overview')
-        .then((value) => { if (alive) setWorkbench(value); }).catch(() => undefined);
+    const onAsk = (ev: Event) => {
+      const payload = (ev as CustomEvent<AskPayload>).detail;
+      if (!payload) return;
+      const t2 = t;
+      if (payload.act === 'takeover') {
+        setConfirmReq({
+          title: t2('confirm.takeover'),
+          description: '接管会撤销执行者写权限并请求停止;迟到的报告不会再改动节点。',
+          confirmText: t2('btn.takeover'), danger: true,
+          onConfirm: (reason) => {
+            setConfirmReq(null);
+            api('/dispatch/takeover', { method: 'POST', body: JSON.stringify({ dispatchId: payload.dispatchId, actor: 'ui', reason }) })
+              .then(() => { showToast('已接管;正在请求执行者停止。', 'info'); setTick((n) => n + 1); })
+              .catch((e) => showToast(String(e instanceof Error ? e.message : e), 'error'));
+          },
+          onClose: () => setConfirmReq(null),
+        });
+      } else {
+        setConfirmReq({
+          title: t2('confirm.resolve'),
+          description: '人工确认停止并收尾(操作员责任);请先核查会话与进程已停止。',
+          confirmText: t2('btn.resolve'),
+          onConfirm: (evidence) => {
+            setConfirmReq(null);
+            api('/dispatch/resolve', { method: 'POST', body: JSON.stringify({ dispatchId: payload.dispatchId, operator: 'ui', evidence }) })
+              .then(() => { showToast('已按人工核验收尾。', 'success'); setTick((n) => n + 1); })
+              .catch((e) => showToast(String(e instanceof Error ? e.message : e), 'error'));
+          },
+          onClose: () => setConfirmReq(null),
+        });
+      }
     };
-    load();
-    const timer = setInterval(load, 10_000);
-    return () => { alive = false; clearInterval(timer); };
-  }, []);
+    window.addEventListener('dsh-dispatch-ask', onAsk as EventListener);
+    return () => window.removeEventListener('dsh-dispatch-ask', onAsk as EventListener);
+  }, [t]);
 
   const legacy = (list ?? []).filter((d) => d.targetType !== 'workbench_task');
   const active = legacy.filter((d) => d.phase !== 'finished');
   const history = legacy.filter((d) => d.phase === 'finished');
   const refresh = () => {
     api<{ dispatches: ListEntry[] }>(`/dispatch/list${cwd ? `?ws=${encodeURIComponent(cwd)}` : ''}`)
-      .then((r) => setList(r.dispatches))
+      .then((r) => { setList(r.dispatches); setTick((n) => n + 1); })
       .catch(() => undefined);
   };
 
   return (
     <div style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8, minHeight: '100%', overflow: 'auto' }}>
+      <ToastHost />
+      {confirmReq && <ConfirmModal {...confirmReq} />}
       <div style={{ padding: 12, borderRadius: 8, background: 'var(--dsw-alias-bg-layer-2)' }}>
         <div style={{ fontWeight: 700, marginBottom: 6 }}>AI 团队工作台</div>
         <div style={{ fontSize: 11, color: 'var(--dsw-alias-label-caption)', marginBottom: 8 }}>
@@ -261,7 +303,7 @@ function PanelBody(props: { useTabInfo: () => { tab: any }; t: TFunc; sessionId?
       {active.length === 0 && (
         <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-caption)', lineHeight: 1.8 }}>{t('panel.empty')}</div>
       )}
-      {active.map((d) => <DispatchCard key={d.id} t={t} d={d} refresh={refresh} />)}
+      {active.map((d) => <DispatchCard key={d.id} t={t} d={d} refreshTick={tick} refresh={refresh} />)}
 
       {history.length > 0 && (
         <>
@@ -271,7 +313,7 @@ function PanelBody(props: { useTabInfo: () => { tab: any }; t: TFunc; sessionId?
             className="dsh-dispatch-press"
             style={{ alignSelf: 'flex-start', marginTop: 4, height: 20, padding: '0 8px', borderRadius: 5, cursor: 'pointer', fontSize: 10.5, border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.28))', background: 'var(--dsw-alias-bg-layer-1, rgba(127,127,127,.12))', color: 'var(--dsw-alias-label-secondary)' }}
           >{showHistory ? t('panel.hideHistory') : `${t('panel.showHistory')}(${history.length})`}</button>
-          {showHistory && history.map((d) => <DispatchCard key={d.id} t={t} d={d} refresh={refresh} />)}
+          {showHistory && history.map((d) => <DispatchCard key={d.id} t={t} d={d} refreshTick={tick} refresh={refresh} />)}
         </>
       )}
       </>}

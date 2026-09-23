@@ -1,6 +1,7 @@
 import React from 'react';
 import { DndContext, KeyboardSensor, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { api } from './api';
+import { ConfirmModal, ToastHost, showToast, type ConfirmRequest } from './feedback';
 import { workbenchCss } from './workbench-style';
 
 type Status = 'todo' | 'in_progress' | 'in_review' | 'blocked' | 'done';
@@ -63,6 +64,12 @@ function evidencePath(run: Run, ref: string) {
   return root.replace(/[\\/]+$/, '') + sep + ref.replace(/[\\/]/g, sep);
 }
 function errorText(error: unknown) { return error instanceof Error ? error.message : String(error); }
+/** 409 等常见失败转成可行动文案;其余透传服务端消息。 */
+function friendlyError(error: unknown): string {
+  const status = (error as { status?: number })?.status;
+  if (status === 409) return '内容刚被其他操作更新过。已为你拉取最新数据,请重试一次刚才的操作。';
+  return errorText(error);
+}
 function write(path: string, method: 'POST' | 'PATCH', body: unknown) {
   return api(`${BASE}${path}`, { method, body: JSON.stringify(body) });
 }
@@ -77,8 +84,10 @@ export function WorkbenchTrigger({ wide }: { wide?: boolean }) {
 }
 
 function Column({ status, tasks, agents, onTask }: { status: Status; tasks: Task[]; agents: Agent[]; onTask: (id: string) => void }) {
-  const { setNodeRef, isOver } = useDroppable({ id: status, disabled: status !== 'todo' && status !== 'blocked' });
-  return <section ref={setNodeRef} className={`dsh-wb-col${isOver ? ' over' : ''}`} aria-label={LABEL[status]}>
+  // 全列可放置:不接受的目标在 onDragEnd 里校验并给出明确提示(拖入无反馈的静默失败更差)
+  const droppable = status !== 'in_progress';
+  const { setNodeRef, isOver } = useDroppable({ id: status });
+  return <section ref={setNodeRef} className={`dsh-wb-col${isOver ? ' over' : ''}`} aria-label={LABEL[status]} data-accepts={droppable ? 'yes' : 'no'}>
     <div className="dsh-wb-col-head"><span>{LABEL[status]}</span><em>{tasks.length}</em></div>
     {tasks.map((task) => <TaskCard key={task.id} task={task} agent={agents.find((a) => a.id === task.assigneeId)} onTask={onTask} />)}
   </section>;
@@ -89,9 +98,11 @@ function TaskCard({ task, agent, onTask }: { task: Task; agent?: Agent; onTask: 
   return <article ref={setNodeRef} className="dsh-wb-card" style={{ opacity: isDragging ? .55 : 1,
     transform: transform ? `translate3d(${transform.x}px,${transform.y}px,0)` : undefined }}>
     <div className="dsh-wb-row"><button className="dsh-wb-card-title" onClick={() => onTask(task.id)}>{task.title}</button>
-      {movable && <button type="button" className="dsh-wb-drag" title="拖动任务；也可在详情中使用状态选择"
+      {task.owner && <span className="dsh-wb-card-live" title="执行中" aria-label="执行中" />}
+      {movable && <button type="button" className="dsh-wb-drag" title="拖动任务;也可在详情中使用状态选择"
         {...attributes} {...listeners}>⠿</button>}</div>
     <div className="dsh-wb-muted">{agent?.name ?? '未分派'} · {task.runIds.length} 次执行</div>
+    {task.description && <div className="dsh-wb-card-desc">{preview(task.description, 64)}</div>}
   </article>;
 }
 
@@ -126,8 +137,8 @@ function ActivityCard({ item }: { item: ActivityItem }) {
       <ExpandableText text={event.text ?? ''} label="查看详情" fold />}
   </article>;
 }
-function RunPanel({ run, latestProgress, onCancel, onTakeover, onResolve }: { run: Run; latestProgress?: Timeline; onCancel: () => Promise<void>;
-  onTakeover: (reason: string) => Promise<void>; onResolve: (evidence: string) => Promise<void> }) {
+function RunPanel({ run, latestProgress, onCancel, onAskTakeover, onAskResolve }: { run: Run; latestProgress?: Timeline; onCancel: () => Promise<void>;
+  onAskTakeover: () => void; onAskResolve: () => void }) {
   const [events, setEvents] = React.useState<Event[]>([]);
   const [cursor, setCursor] = React.useState(-1);
   const cursorRef = React.useRef(-1);
@@ -179,8 +190,8 @@ function RunPanel({ run, latestProgress, onCancel, onTakeover, onResolve }: { ru
       </p>}
       {run.phase !== 'finished' && <div className="dsh-wb-row">
         <button className="dsh-wb-btn danger" onClick={() => void onCancel()}>取消执行</button>
-        <button className="dsh-wb-btn" onClick={() => { const reason = window.prompt('输入人工接管原因。此操作会撤销执行者写入权。')?.trim(); if (reason) void onTakeover(reason); }}>人工接管</button>
-        {run.phase === 'reconciling' && <button className="dsh-wb-btn" onClick={() => { const evidence = window.prompt('请先确认子会话已停止且队列静止，再填写核验依据。')?.trim(); if (evidence) void onResolve(evidence); }}>确认静止并收尾</button>}
+        <button className="dsh-wb-btn" onClick={() => onAskTakeover()}>人工接管</button>
+        {run.phase === 'reconciling' && <button className="dsh-wb-btn" onClick={() => onAskResolve()}>确认静止并收尾</button>}
       </div>}
     </section>
     <div className="dsh-wb-run-facts">
@@ -316,6 +327,9 @@ function Workbench() {
   const [comment, setComment] = React.useState('');
   const [reviewText, setReviewText] = React.useState('');
   const [error, setError] = React.useState('');
+  const [formError, setFormError] = React.useState('');
+  const [detailError, setDetailError] = React.useState('');
+  const [confirmReq, setConfirmReq] = React.useState<ConfirmRequest | null>(null);
   const [busy, setBusy] = React.useState(false);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), useSensor(KeyboardSensor));
   const selected = taskId && detail?.task.id === taskId ? detail.task : null;
@@ -353,19 +367,30 @@ function Workbench() {
   React.useEffect(() => {
     if (page === 'legacy') void api<{ runs: Run[] }>(`${BASE}/legacy`).then((x) => setLegacy(x.runs)).catch((e) => setError(errorText(e)));
   }, [page]);
-  React.useEffect(() => { const key = (ev: KeyboardEvent) => { if (ev.key === 'Escape') { if (modal) setModal(null); else if (taskId) setTaskId(''); else setOpen(false); } };
-    document.addEventListener('keydown', key); return () => document.removeEventListener('keydown', key); }, [modal, taskId]);
+  React.useEffect(() => { const key = (ev: KeyboardEvent) => { if (ev.key === 'Escape') { if (confirmReq) return; if (modal) setModal(null); else if (taskId) setTaskId(''); else setOpen(false); } };
+    document.addEventListener('keydown', key); return () => document.removeEventListener('keydown', key); }, [modal, taskId, confirmReq]);
 
-  async function mutate(action: () => Promise<unknown>) {
-    if (overview.readOnly) { setError('工作台处于只读故障态，请检查 DSH 宿主日志和存储备份。'); return false; }
-    setBusy(true); setError('');
+  async function mutate(action: () => Promise<unknown>, scope: 'page' | 'detail' | 'modal' = 'page') {
+    if (overview.readOnly) {
+      const text = '工作台处于只读故障态，请检查 DSH 宿主日志和存储备份。';
+      if (scope === 'modal') setFormError(text); else if (scope === 'detail') setDetailError(text); else showToast(text, 'error');
+      return false;
+    }
+    setBusy(true);
+    if (scope === 'modal') setFormError(''); else if (scope === 'detail') setDetailError(''); else setError('');
     try { await action(); await refresh(); if (taskId) await refreshDetail(taskId); return true; }
-    catch (e) { setError(errorText(e)); await refresh(); if (taskId) await refreshDetail(taskId); return false; }
+    catch (e) {
+      const text = friendlyError(e);
+      if (scope === 'modal') setFormError(text); else if (scope === 'detail') setDetailError(text); else showToast(text, 'error');
+      await refresh(); if (taskId) await refreshDetail(taskId);
+      return false;
+    }
     finally { setBusy(false); }
   }
   function begin(kind: 'project' | 'agent' | 'task', id?: string) {
     const item = kind === 'project' ? overview.projects.find((p) => p.id === id) : kind === 'agent' ? overview.agents.find((a) => a.id === id) : overview.tasks.find((t) => t.id === id);
     setEditing(id ?? null);
+    setFormError('');
     if (kind === 'agent') setToolAllow((item as Agent | undefined)?.toolAllow ?? Object.keys(TOOLS));
     setForm(item ? Object.fromEntries(Object.entries(item).map(([k, v]) => [k, String(v ?? '')])) :
       kind === 'task' ? { projectId: projectId || overview.projects[0]?.id || '', title: '', description: '', acceptanceCriteria: '', assigneeId: '' } :
@@ -375,24 +400,42 @@ function Workbench() {
   async function saveModal() {
     if (!modal) return;
     const kind = modal;
+    // 客户端必填校验:失败留在 modal 内展示,不打扰后端
+    const missing: string[] = [];
+    if (!form.title?.trim() && kind !== 'agent') missing.push(kind === 'task' ? '任务标题' : '项目名称');
+    if (kind === 'project' && !editing && !form.root?.trim()) missing.push('本机工作区绝对路径');
+    if (kind === 'agent' && !form.name?.trim()) missing.push('Agent 名称');
+    if (kind === 'task') {
+      if (!form.acceptanceCriteria?.trim()) missing.push('验收标准');
+      if (!form.projectId) missing.push('所属项目');
+    }
+    if (missing.length) { setFormError(`请填写:${missing.join('、')}`); return; }
     const endpoint = kind === 'project' ? 'projects' : kind === 'agent' ? 'agents' : 'tasks';
     const current = editing ? (kind === 'project' ? overview.projects : kind === 'agent' ? overview.agents : overview.tasks).find((x) => x.id === editing) : undefined;
     const body = kind === 'project' ? { title: form.title, root: form.root, expectedRevision: current?.revision } :
       kind === 'agent' ? { name: form.name, instructions: form.instructions, model: form.model, toolAllow, expectedRevision: current?.revision } :
       { projectId: form.projectId, title: form.title, description: form.description, acceptanceCriteria: form.acceptanceCriteria,
         assigneeId: form.assigneeId || null, expectedRevision: current?.revision };
-    const ok = await mutate(() => write(`/${endpoint}${editing ? `/${editing}` : ''}`, editing ? 'PATCH' : 'POST', body));
+    const ok = await mutate(() => write(`/${endpoint}${editing ? `/${editing}` : ''}`, editing ? 'PATCH' : 'POST', body), 'modal');
     if (ok) { setModal(null); if (kind === 'task' && taskId) void refreshDetail(taskId); }
   }
   function moveTask(id: string, status: Status) {
     const task = overview.tasks.find((t) => t.id === id);
-    if (!task || (status !== 'todo' && status !== 'blocked') || task.owner || !['todo', 'blocked'].includes(task.status)) return;
-    void mutate(() => write(`/tasks/${id}`, 'PATCH', { expectedRevision: task.revision, status }));
+    if (!task) return;
+    if (task.owner) { showToast('任务执行中,状态由运行流程管理;请先取消或等待完成。', 'warn'); return; }
+    if (!['todo', 'blocked'].includes(task.status)) { showToast('该状态由运行或验收流程流转,不能手工切换。', 'warn'); return; }
+    if (!['todo', 'blocked'].includes(status)) {
+      showToast(status === 'in_progress' ? '「执行中」由「手动运行」进入,不能拖入。' : `「${LABEL[status]}」由人工验收流转,不能拖入。`, 'warn');
+      return;
+    }
+    if (status === task.status) return;
+    void mutate(() => write(`/tasks/${id}`, 'PATCH', { expectedRevision: task.revision, status }), 'detail');
   }
   function onDragEnd(event: DragEndEvent) { if (event.over) moveTask(String(event.active.id), String(event.over.id) as Status); }
-  const taskButton = (id: string) => { setDetail(null); setTaskId(id); setRunId(''); };
+  const taskButton = (id: string) => { setDetail(null); setDetailError(''); setTaskId(id); setRunId(''); };
   const counts = overview.counts;
   return <div className="dsh-wb" data-dsh-plugin="dsh-dispatch" data-dsh-part="workbench"><style>{workbenchCss}</style>
+    <ToastHost />
     <nav className="dsh-wb-nav" aria-label="工作台导航">
       <div className="dsh-wb-brand"><small>DSH DISPATCH</small>AI 团队工作台</div>
       {([['overview', '总览'], ['tasks', '任务'], ['projects', '项目'], ['agents', 'Agent 目录'], ['legacy', '旧派发历史']] as const).map(([key, title]) =>
@@ -426,9 +469,10 @@ function Workbench() {
     </main>
     {selected && <><button className="dsh-wb-backdrop" aria-label="关闭任务详情" onClick={() => setTaskId('')} /><aside className="dsh-wb-detail" aria-label="任务详情">
       <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><span className="dsh-wb-kicker">TASK / {selected.id}</span><button className="dsh-wb-btn ghost" onClick={() => setTaskId('')}>关闭 ✕</button></div>
-      <h1>{selected.title}</h1><p className="dsh-wb-muted">{overview.projects.find((p) => p.id === selected.projectId)?.title} · {LABEL[selected.status]} · revision {selected.revision}</p>
+      <h1>{selected.title}</h1><p className="dsh-wb-muted">{overview.projects.find((p) => p.id === selected.projectId)?.title} · {LABEL[selected.status]}</p>
+      {detailError && <div role="alert" className="dsh-wb-error">{detailError}</div>}
       <div className="dsh-wb-row" style={{ margin: '16px 0' }}><button className="dsh-wb-btn" disabled={!!selected.owner || ['in_review', 'done'].includes(selected.status)} onClick={() => begin('task', selected.id)}>编辑任务</button>
-        {selected.status === 'done' && <button className="dsh-wb-btn" disabled={busy} onClick={() => void mutate(() => write(`/tasks/${selected.id}`, 'PATCH', { expectedRevision: selected.revision, status: 'todo' }))}>重新打开</button>}
+        {selected.status === 'done' && <button className="dsh-wb-btn" disabled={busy} onClick={() => void mutate(() => write(`/tasks/${selected.id}`, 'PATCH', { expectedRevision: selected.revision, status: 'todo' }), 'detail')}>重新打开</button>}
         {['todo', 'blocked'].includes(selected.status) && !selected.owner && <select className="dsh-wb-select" aria-label="修改任务状态" value={selected.status} onChange={(e) => moveTask(selected.id, e.target.value as Status)}><option value="todo">待办</option><option value="blocked">受阻</option></select>}</div>
       <details className="dsh-wb-panel dsh-wb-task-brief" key={selected.id} open={!selected.runIds.length}>
         <summary><b>任务要求与验收标准</b><span>{preview(selected.acceptanceCriteria, 90)}</span></summary>
@@ -436,36 +480,54 @@ function Workbench() {
         <h3>验收标准</h3><p style={{ whiteSpace: 'pre-wrap' }}>{selected.acceptanceCriteria}</p>
       </details>
       <div className="dsh-wb-panel dsh-wb-assignment">
-        <div className="dsh-wb-row"><span>执行者：</span><select className="dsh-wb-select" aria-label="分派 Agent" disabled={!!selected.owner || busy} value={selected.assigneeId ?? ''} onChange={(e) => void mutate(() => write('/tasks/' + selected.id, 'PATCH', { expectedRevision: selected.revision, assigneeId: e.target.value || null }))}><option value="">未分派</option>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name} · {a.model}</option>)}</select>
-          {['todo', 'blocked'].includes(selected.status) && !selected.owner && <button className="dsh-wb-btn primary" disabled={!selected.assigneeId || busy} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/run', 'POST', { idempotencyKey: 'ui-' + crypto.randomUUID() }))}>手动运行</button>}</div>
+        <div className="dsh-wb-row"><span>执行者：</span><select className="dsh-wb-select" aria-label="分派 Agent" disabled={!!selected.owner || busy} value={selected.assigneeId ?? ''} onChange={(e) => void mutate(() => write('/tasks/' + selected.id, 'PATCH', { expectedRevision: selected.revision, assigneeId: e.target.value || null }), 'detail')}><option value="">未分派</option>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name} · {a.model}</option>)}</select>
+          {['todo', 'blocked'].includes(selected.status) && !selected.owner && <button className="dsh-wb-btn primary" disabled={!selected.assigneeId || busy} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/run', 'POST', { idempotencyKey: 'ui-' + crypto.randomUUID() }), 'detail')}>手动运行</button>}</div>
         {selected.owner && <p className="dsh-wb-muted">执行中；目标与验收标准已锁定。取消后等待静止确认。</p>}
       </div>
       <RunHistory key={selected.id} runs={detail?.runs ?? []} selectedId={runId} onSelect={setRunId} />
       {selectedRun && <RunPanel key={selectedRun.id} run={selectedRun}
         latestProgress={[...selected.timeline].reverse().find((event) => event.kind === 'progress' && event.runId === selectedRun.id)}
-        onCancel={async () => { await mutate(() => write('/runs/' + selectedRun.id + '/cancel', 'POST', { reason: '用户取消' })); }}
-        onTakeover={async (reason) => { await mutate(() => write('/runs/' + selectedRun.id + '/takeover', 'POST', { reason })); }}
-        onResolve={async (evidence) => { await mutate(() => write('/runs/' + selectedRun.id + '/resolve', 'POST', { evidence })); }} />}
+        onCancel={async () => { await mutate(() => write('/runs/' + selectedRun.id + '/cancel', 'POST', { reason: '用户取消' }), 'detail'); }}
+        onTakeover={async (reason) => { await mutate(() => write('/runs/' + selectedRun.id + '/takeover', 'POST', { reason }), 'detail'); }}
+        onResolve={async (evidence) => { await mutate(() => write('/runs/' + selectedRun.id + '/resolve', 'POST', { evidence }), 'detail'); }}
+        onAskTakeover={() => setConfirmReq({
+          title: '人工接管本次执行',
+          description: '接管会撤销执行者的写入权限并请求其停止;迟到的报告不会再改动任务。请填写接管原因(审计记录)。',
+          placeholder: '例如:方向需要调整 / 发现任务描述有误',
+          confirmText: '接管', danger: true,
+          onConfirm: (reason) => { setConfirmReq(null); void mutate(() => write('/runs/' + selectedRun.id + '/takeover', 'POST', { reason }), 'detail'); },
+          onClose: () => setConfirmReq(null),
+        })}
+        onAskResolve={() => setConfirmReq({
+          title: '确认已停止并收尾',
+          description: '请先在「执行过程」确认子会话已停止且队列静止,再填写核验依据(操作员责任,审计记录)。',
+          placeholder: '例如:已核查子会话无新事件、无残留进程',
+          confirmText: '确认并收尾',
+          onConfirm: (evidence) => { setConfirmReq(null); void mutate(() => write('/runs/' + selectedRun.id + '/resolve', 'POST', { evidence }), 'detail'); },
+          onClose: () => setConfirmReq(null),
+        })} />}
       {selected.status === 'in_review' && <div className="dsh-wb-panel dsh-wb-review">
         <h3>人工验收</h3><p>先核对上方选中运行的报告、证据和过程记录。接受后任务才会标记为已完成。</p>
         <textarea className="dsh-wb-textarea" aria-label="验收或退回意见" value={reviewText} onChange={(e) => setReviewText(e.target.value)} placeholder="退回时必须填写意见" />
-        <div className="dsh-wb-row"><button className="dsh-wb-btn primary" disabled={busy} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/review', 'POST', { expectedRevision: selected.revision, decision: 'accept', comment: reviewText }))}>接受，标记完成</button>
-          <button className="dsh-wb-btn" disabled={busy || !reviewText.trim()} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/review', 'POST', { expectedRevision: selected.revision, decision: 'reject', comment: reviewText }))}>退回待办</button></div>
+        <div className="dsh-wb-row"><button className="dsh-wb-btn primary" disabled={busy} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/review', 'POST', { expectedRevision: selected.revision, decision: 'accept', comment: reviewText }), 'detail')}>接受，标记完成</button>
+          <button className="dsh-wb-btn" disabled={busy || !reviewText.trim()} onClick={() => void mutate(() => write('/tasks/' + selected.id + '/review', 'POST', { expectedRevision: selected.revision, decision: 'reject', comment: reviewText }), 'detail')}>退回待办</button></div>
       </div>}
       <div className="dsh-wb-panel"><h3>任务讨论与状态更新</h3><TaskTimeline items={selected.timeline} onRun={setRunId} />
-        <textarea className="dsh-wb-textarea" aria-label="发表评论" value={comment} onChange={(e) => setComment(e.target.value)} placeholder="记录问题、建议或决策" /><button className="dsh-wb-btn" disabled={!comment.trim() || busy} onClick={() => void mutate(() => write(`/tasks/${selected.id}/comments`, 'POST', { expectedRevision: selected.revision, text: comment })).then((ok) => { if (ok) setComment(''); })}>发送评论</button></div>
+        <textarea className="dsh-wb-textarea" aria-label="发表评论" value={comment} onChange={(e) => setComment(e.target.value)} placeholder="记录问题、建议或决策" /><button className="dsh-wb-btn" disabled={!comment.trim() || busy} onClick={() => void mutate(() => write(`/tasks/${selected.id}/comments`, 'POST', { expectedRevision: selected.revision, text: comment }), 'detail').then((ok) => { if (ok) setComment(''); })}>发送评论</button></div>
     </aside></>}
     {modal && <><button className="dsh-wb-backdrop" style={{ zIndex: 112 }} aria-label="关闭表单" onClick={() => setModal(null)} /><div className="dsh-wb-modal" role="dialog" aria-modal="true" aria-label={editing ? '编辑' : '新建'}>
       <h2>{editing ? '编辑' : '新建'}{modal === 'project' ? '项目' : modal === 'agent' ? ' Agent' : '任务'}</h2>
-      {modal === 'project' && <><Field label="项目名称" value={form.title} onChange={(v) => setForm({ ...form, title: v })} />{editing ? <div className="dsh-wb-code">{form.root}</div> : <Field label="本机工作区绝对路径" value={form.root} onChange={(v) => setForm({ ...form, root: v })} />}</>}
-      {modal === 'agent' && <><Field label="Agent 名称" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><div className="dsh-wb-field"><label>模型</label><select className="dsh-wb-select" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })}>{models.allowed.map((m) => <option key={m}>{m}</option>)}</select></div><div className="dsh-wb-field"><label>工作指令</label><textarea className="dsh-wb-textarea" value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} /></div><div className="dsh-wb-field"><label>受控工具权限</label><div className="dsh-wb-row">{Object.entries(TOOLS).map(([name, label]) => <label key={name} className="dsh-wb-row"><input type="checkbox" checked={toolAllow.includes(name)} onChange={(e) => setToolAllow(e.target.checked ? [...toolAllow, name] : toolAllow.filter((x) => x !== name))} />{label}</label>)}</div></div></>}
-      {modal === 'task' && <><div className="dsh-wb-field"><label>项目</label>{editing ? <div>{overview.projects.find((p) => p.id === form.projectId)?.title}</div> : <select className="dsh-wb-select" value={form.projectId} onChange={(e) => setForm({ ...form, projectId: e.target.value })}>{overview.projects.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}</select>}</div><Field label="任务标题" value={form.title} onChange={(v) => setForm({ ...form, title: v })} /><div className="dsh-wb-field"><label>任务描述</label><textarea className="dsh-wb-textarea" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></div><div className="dsh-wb-field"><label>验收标准</label><textarea className="dsh-wb-textarea" value={form.acceptanceCriteria} onChange={(e) => setForm({ ...form, acceptanceCriteria: e.target.value })} /></div><div className="dsh-wb-field"><label>分派 Agent（不会自动运行）</label><select className="dsh-wb-select" value={form.assigneeId} onChange={(e) => setForm({ ...form, assigneeId: e.target.value })}><option value="">暂不分派</option>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div></>}
+      {formError && <div role="alert" className="dsh-wb-error">{formError}</div>}
+      {modal === 'project' && <><Field autoFocus label="项目名称" value={form.title} onChange={(v) => setForm({ ...form, title: v })} />{editing ? <div className="dsh-wb-code">{form.root}</div> : <Field label="本机工作区绝对路径" hint="须位于 DSH_HOME 之外;一个路径只绑一个项目" value={form.root} onChange={(v) => setForm({ ...form, root: v })} />}</>}
+      {modal === 'agent' && <><Field autoFocus label="Agent 名称" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><div className="dsh-wb-field"><label>模型</label><select className="dsh-wb-select" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })}>{models.allowed.map((m) => <option key={m}>{m}</option>)}</select></div><div className="dsh-wb-field"><label>工作指令</label><textarea className="dsh-wb-textarea" rows={Math.min(16, Math.max(4, (form.instructions ?? '').split('\n').length))} value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} /></div><div className="dsh-wb-field"><label>受控工具权限</label><div className="dsh-wb-row">{Object.entries(TOOLS).map(([name, label]) => <label key={name} className="dsh-wb-row"><input type="checkbox" checked={toolAllow.includes(name)} onChange={(e) => setToolAllow(e.target.checked ? [...toolAllow, name] : toolAllow.filter((x) => x !== name))} />{label}</label>)}</div></div></>}
+      {modal === 'task' && <><div className="dsh-wb-field"><label>项目</label>{editing ? <div>{overview.projects.find((p) => p.id === form.projectId)?.title}</div> : <select className="dsh-wb-select" value={form.projectId} onChange={(e) => setForm({ ...form, projectId: e.target.value })}>{overview.projects.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}</select>}</div><Field autoFocus label="任务标题" value={form.title} onChange={(v) => setForm({ ...form, title: v })} /><div className="dsh-wb-field"><label>任务描述</label><textarea className="dsh-wb-textarea" rows={Math.min(10, Math.max(3, (form.description ?? '').split('\n').length))} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></div><div className="dsh-wb-field"><label>验收标准(必填)</label><textarea className="dsh-wb-textarea" rows={Math.min(10, Math.max(3, (form.acceptanceCriteria ?? '').split('\n').length))} value={form.acceptanceCriteria} onChange={(e) => setForm({ ...form, acceptanceCriteria: e.target.value })} /></div><div className="dsh-wb-field"><label>分派 Agent（不会自动运行）</label><select className="dsh-wb-select" value={form.assigneeId} onChange={(e) => setForm({ ...form, assigneeId: e.target.value })}><option value="">暂不分派</option>{overview.agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div></>}
       <div className="dsh-wb-row" style={{ justifyContent: 'flex-end' }}><button className="dsh-wb-btn" onClick={() => setModal(null)}>取消</button><button className="dsh-wb-btn primary" disabled={busy} onClick={() => void saveModal()}>保存</button></div>
     </div></>}
+    {confirmReq && <ConfirmModal {...confirmReq} />}
   </div>;
 }
-function Field({ label, value, onChange }: { label: string; value?: string; onChange: (v: string) => void }) {
-  return <div className="dsh-wb-field"><label>{label}</label><input className="dsh-wb-input" value={value ?? ''} onChange={(e) => onChange(e.target.value)} /></div>;
+function Field({ label, value, onChange, autoFocus, hint }: { label: string; value?: string; onChange: (v: string) => void; autoFocus?: boolean; hint?: string }) {
+  return <div className="dsh-wb-field"><label>{label}</label><input className="dsh-wb-input" autoFocus={autoFocus} value={value ?? ''} onChange={(e) => onChange(e.target.value)} />{hint && <small className="dsh-wb-field-hint">{hint}</small>}</div>;
 }
 export function WorkbenchOverlay() {
   const open = React.useSyncExternalStore(subscribe, openSnapshot);
