@@ -243,7 +243,6 @@ export const workbenchCss = `
   .dsh-wb-grid { grid-template-columns: repeat(2,1fr); }
 }
 @media print { .dsh-wb-nav,.dsh-wb-head-actions { display: none; } }
-`;
 
 /* ---------- Wave 3:对话时间线与自动跟随 ---------- */
 .dsh-wb-activity-scroll { position: relative; max-height: min(72vh, 900px); overflow-y: auto; scroll-behavior: smooth; }
@@ -256,3 +255,4 @@ export const workbenchCss = `
 .dsh-wb-chat-meta time { font-size: 10px; color: var(--dsw-alias-label-caption, #8f9aa8); margin-left: auto; font-variant-numeric: tabular-nums; }
 .dsh-wb-chat-text { font-size: 12px; color: var(--dsw-alias-label-primary); }
 .dsh-wb-new-events { position: sticky; bottom: 12px; left: 50%; transform: translateX(-50%); display: block; margin: 0 auto; border: 1px solid color-mix(in srgb, var(--dsp-accent, #4d6bfe) 55%, transparent); background: color-mix(in srgb, var(--dsp-accent, #4d6bfe) 18%, var(--dsw-alias-bg-base, #161616)); color: color-mix(in srgb, var(--dsp-accent, #4d6bfe) 75%, white); border-radius: 999px; padding: 5px 14px; font-size: 11px; font-weight: 650; box-shadow: 0 6px 18px rgba(0,0,0,.3); }
+`;
