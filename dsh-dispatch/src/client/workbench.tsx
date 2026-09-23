@@ -317,6 +317,7 @@ function Workbench() {
   const [legacy, setLegacy] = React.useState<Run[]>([]);
   const [projectId, setProjectId] = React.useState('');
   const [layout, setLayout] = React.useState<'board' | 'list'>('board');
+  const [statusFilter, setStatusFilter] = React.useState<Status | ''>('');
   const [taskId, setTaskId] = React.useState('');
   const [detail, setDetail] = React.useState<{ task: Task; runs: Run[] } | null>(null);
   const [runId, setRunId] = React.useState('');
@@ -334,7 +335,8 @@ function Workbench() {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), useSensor(KeyboardSensor));
   const selected = taskId && detail?.task.id === taskId ? detail.task : null;
   const selectedRun = detail?.runs.find((run) => run.id === runId);
-  const filtered = projectId ? overview.tasks.filter((task) => task.projectId === projectId) : overview.tasks;
+  const scoped = projectId ? overview.tasks.filter((task) => task.projectId === projectId) : overview.tasks;
+  const filtered = statusFilter ? scoped.filter((task) => task.status === statusFilter) : scoped;
   const project = overview.projects.find((p) => p.id === projectId);
 
   const refresh = React.useCallback(async () => {
@@ -438,9 +440,9 @@ function Workbench() {
     <ToastHost />
     <nav className="dsh-wb-nav" aria-label="工作台导航">
       <div className="dsh-wb-brand"><small>DSH DISPATCH</small>AI 团队工作台</div>
-      {([['overview', '总览'], ['tasks', '任务'], ['projects', '项目'], ['agents', 'Agent 目录'], ['legacy', '旧派发历史']] as const).map(([key, title]) =>
-        <button className={`dsh-wb-navbtn${page === key ? ' active' : ''}`} key={key} onClick={() => setPage(key)}>{title}</button>)}
-      <div className="dsh-wb-navfoot">本机工作台 · 手动启动 · 单执行槽</div>
+      {([['overview', '◫', '总览'], ['tasks', '▤', '任务'], ['projects', '⊀', '项目'], ['agents', '◈', 'Agent 目录'], ['legacy', '⧖', '旧派发历史']] as const).map(([key, ico, title]) =>
+        <button className={`dsh-wb-navbtn${page === key ? ' active' : ''}`} key={key} onClick={() => setPage(key)}><span className="dsp-nav-ico" aria-hidden>{ico}</span><span>{title}</span></button>)}
+      <div className="dsh-wb-navfoot">同一时间运行一个任务;<br />完成后由你验收归档。</div>
     </nav>
     <main className="dsh-wb-main">
       <header className="dsh-wb-head"><div><div className="dsh-wb-kicker">DSH / DISPATCH</div><h1>{page === 'overview' ? '工作总览' : page === 'tasks' ? '任务' : page === 'projects' ? '项目' : page === 'agents' ? 'Agent 目录' : '旧派发历史'}</h1></div>
@@ -448,13 +450,18 @@ function Workbench() {
       {error && <div role="alert" className="dsh-wb-error">{error}</div>}
       {overview.readOnly && <div role="status" className="dsh-wb-error">工作台当前只读；项目、任务和历史记录仍可查看。</div>}
       {page === 'overview' && <>
-        <div className="dsh-wb-grid">{STATUS.map((s) => <div className="dsh-wb-stat" key={s}><span>{LABEL[s]}</span><strong>{counts[s]}</strong></div>)}</div>
+        <div className="dsh-wb-grid dsp-stagger">{STATUS.map((s, i) =>
+          <button type="button" className="dsh-wb-stat" key={s} data-tone={s} style={{ ['--dsp-i' as string]: String(i) }}
+            onClick={() => { setPage('tasks'); setStatusFilter(s); }} title={`查看${LABEL[s]}任务`}>
+            <span>{LABEL[s]}</span><strong>{counts[s]}</strong>
+          </button>)}</div>
         <div className="dsh-wb-panel"><div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><h2>当前项目</h2><button className="dsh-wb-btn primary" onClick={() => begin('project')}>新建项目</button></div>
           {overview.projects.length ? overview.projects.map((p) => <div className="dsh-wb-row" key={p.id} style={{ padding: '9px 0' }}><button className="dsh-wb-link" onClick={() => { setProjectId(p.id); setPage('tasks'); }}>{p.title}</button><span className="dsh-wb-muted">{overview.tasks.filter((t) => t.projectId === p.id).length} 个任务 · {p.root}</span></div>) : <div className="dsh-wb-empty">先创建一个项目并绑定本机工作区。</div>}</div>
         <div className="dsh-wb-panel"><div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><h2>最近任务</h2><button className="dsh-wb-btn" onClick={() => setPage('tasks')}>查看全部</button></div>
           {[...overview.tasks].sort((a, b) => b.revision - a.revision).slice(0, 8).map((t) => <div key={t.id} className="dsh-wb-row" style={{ padding: '8px 0' }}><button className="dsh-wb-link" onClick={() => taskButton(t.id)}>{t.title}</button><span className="dsh-wb-muted">{LABEL[t.status]}</span></div>)}</div>
       </>}
       {page === 'tasks' && <><div className="dsh-wb-toolbar"><select className="dsh-wb-select" aria-label="按项目筛选" value={projectId} onChange={(e) => setProjectId(e.target.value)}><option value="">全部项目</option>{overview.projects.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}</select>
+        <select className="dsh-wb-select" aria-label="按状态筛选" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as Status | '')}><option value="">全部状态</option>{STATUS.map((s) => <option key={s} value={s}>{LABEL[s]}</option>)}</select>
         <button className={`dsh-wb-btn${layout === 'board' ? ' primary' : ''}`} onClick={() => setLayout('board')}>看板</button><button className={`dsh-wb-btn${layout === 'list' ? ' primary' : ''}`} onClick={() => setLayout('list')}>列表</button>
         <button className="dsh-wb-btn primary" disabled={!overview.projects.length} onClick={() => begin('task')}>新建任务</button></div>
         {project && <p className="dsh-wb-muted">工作区：{project.root}</p>}
@@ -463,9 +470,12 @@ function Workbench() {
       {page === 'projects' && <><button className="dsh-wb-btn primary" onClick={() => begin('project')}>新建项目</button><div style={{ height: 16 }} />
         {overview.projects.map((p) => <div className="dsh-wb-panel" key={p.id}><div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><h2>{p.title}</h2><button className="dsh-wb-btn" onClick={() => begin('project', p.id)}>重命名</button></div><div className="dsh-wb-code">{p.root}</div><button className="dsh-wb-link" onClick={() => { setProjectId(p.id); setPage('tasks'); }}>查看 {overview.tasks.filter((t) => t.projectId === p.id).length} 个任务 →</button></div>)}</>}
       {page === 'agents' && <><button className="dsh-wb-btn primary" onClick={() => begin('agent')}>新建 Agent</button><div style={{ height: 16 }} />
-        {overview.agents.map((a) => <div className="dsh-wb-panel" key={a.id}><div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><h2>{a.name}</h2><button className="dsh-wb-btn" onClick={() => begin('agent', a.id)}>编辑</button></div><div className="dsh-wb-muted">模型：{a.model} · 已分派 {overview.tasks.filter((t) => t.assigneeId === a.id).length} 个任务</div><p style={{ whiteSpace: 'pre-wrap' }}>{a.instructions || '无额外指令'}</p><div className="dsh-wb-muted">工具：{a.toolAllow.map((tool) => TOOLS[tool] ?? tool).join('、') || '无'}</div></div>)}</>}
-      {page === 'legacy' && <div className="dsh-wb-panel"><p className="dsh-wb-muted">旧 trajectory 派发仅供查看，不会自动成为已验收任务。共 {overview.legacyCount} 条。</p>
-        <table className="dsh-wb-table"><thead><tr><th>目标</th><th>结果</th><th>开始</th><th>结束</th></tr></thead><tbody>{legacy.map((r) => <tr key={r.id}><td>{r.targetRef.nodeId}</td><td>{r.result?.kind ?? r.phase}</td><td>{fmt(r.createdAt)}</td><td>{fmt(r.endedAt)}</td></tr>)}</tbody></table></div>}
+        <div className="dsp-stagger">{overview.agents.map((a, i) => <div className="dsh-wb-panel" key={a.id} style={{ ['--dsp-i' as string]: String(i) }}>
+          <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><h2>{a.name}</h2><button className="dsh-wb-btn" onClick={() => begin('agent', a.id)}>编辑</button></div>
+          <div className="dsh-wb-muted">模型:{a.model} · 已分派 {overview.tasks.filter((t) => t.assigneeId === a.id).length} 个任务 · 工具 {a.toolAllow.length}/{Object.keys(TOOLS).length}</div>
+          <ExpandableText text={a.instructions} label="展开完整工作指令" fold /></div>)}</div></>}
+      {page === 'legacy' && <div className="dsh-wb-panel"><p className="dsh-wb-muted">旧 trajectory 派发仅供查看,不会自动成为已验收任务。共 {overview.legacyCount} 条。</p>
+        <table className="dsh-wb-table"><thead><tr><th>目标</th><th>结果</th><th>开始</th><th>结束</th></tr></thead><tbody>{legacy.map((r) => <tr key={r.id}><td>{r.targetType === 'workbench_task' ? '工作台任务' : r.targetRef.nodeId}</td><td>{OUTCOME_LABEL[r.result?.kind ?? ''] ?? PHASE_LABEL[r.phase] ?? r.phase}</td><td>{fmt(r.createdAt)}</td><td>{fmt(r.endedAt)}</td></tr>)}</tbody></table></div>}
     </main>
     {selected && <><button className="dsh-wb-backdrop" aria-label="关闭任务详情" onClick={() => setTaskId('')} /><aside className="dsh-wb-detail" aria-label="任务详情">
       <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><span className="dsh-wb-kicker">TASK / {selected.id}</span><button className="dsh-wb-btn ghost" onClick={() => setTaskId('')}>关闭 ✕</button></div>

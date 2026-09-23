@@ -8,7 +8,7 @@ export default defineConfig({
   outDir: 'dist-client',
   dts: false,
   sourcemap: false,
-  minify: false,
+  minify: true,
   platform: 'browser',
   define: { 'process.env.NODE_ENV': JSON.stringify('production') },
   deps: { neverBundle: [/^react(\/.*)?$/, /^react-dom(\/.*)?$/, /^@deepseek-ai\//],
