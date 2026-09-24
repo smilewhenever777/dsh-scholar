@@ -323,6 +323,21 @@ export const workbenchCss = `
 .dsh-wb-order-toggle:hover { color: var(--dsw-alias-label-primary); }
 
 
+/* ---------- 项目页富卡片 ---------- */
+.dsh-wb-projcard h2 { font-size: 14px; }
+.dsh-wb-projgoal { margin: 8px 0 0; font-size: 12px; line-height: 1.65; color: var(--dsw-alias-label-secondary, #b3b8c2); }
+.dsh-wb-projcounts { margin-top: 10px; flex-wrap: wrap; gap: 6px; }
+.dsh-wb-countchip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.28)); background: transparent; color: var(--dsw-alias-label-caption, #9aa0aa); border-radius: 999px; padding: 3px 11px; font-size: 11px; cursor: pointer; }
+.dsh-wb-countchip b { font-weight: 700; font-variant-numeric: tabular-nums; }
+.dsh-wb-countchip[data-tone="in_progress"] { color: var(--dsp-accent, #5d74ec); border-color: color-mix(in srgb, var(--dsp-accent, #5d74ec) 45%, transparent); }
+.dsh-wb-countchip[data-tone="in_review"] { color: #d9a359; border-color: color-mix(in srgb, #d9a359 45%, transparent); }
+.dsh-wb-countchip[data-tone="blocked"] { color: #d96959; border-color: color-mix(in srgb, #d96959 45%, transparent); }
+.dsh-wb-countchip[data-tone="done"] { color: #5fbf7f; border-color: color-mix(in srgb, #5fbf7f 45%, transparent); }
+.dsh-wb-countchip:hover { border-color: var(--dsw-alias-fill-primary, #5d74ec); color: var(--dsw-alias-label-base, #d7dae0); }
+.dsh-wb-projrecent { margin-top: 12px; border-top: 1px dashed var(--dsw-alias-border-l2, rgba(127,127,127,.25)); padding-top: 8px; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.dsh-wb-projrecent > span { font-size: 10px; }
+.dsh-wb-projrecent-item { font-size: 12px; text-align: left; padding: 2px 0; }
+
 /* ---------- 目录浏览器(项目路径选择) ---------- */
 .dsh-wb-picker { position: fixed; z-index: 116; top: 50%; left: 50%; transform: translate(-50%,-50%); width: min(620px, calc(100vw - 24px)); max-height: min(74vh, 660px); display: flex; flex-direction: column; padding: 16px 18px; background: var(--dsw-alias-bg-base, #20242c); border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3)); border-radius: 14px; box-shadow: 0 24px 65px rgba(0,0,0,.5); animation: dsp-pop var(--dsp-dur) var(--dsp-spring); }
 .dsh-wb-picker-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }

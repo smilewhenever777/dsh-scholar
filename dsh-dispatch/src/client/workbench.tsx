@@ -11,7 +11,7 @@ type Project = { id: string; title: string; root: string; revision: number; goal
 type Agent = { id: string; name: string; instructions: string; model: string; toolAllow: string[]; revision: number; displayDescription?: string };
 type Timeline = { id: string; kind: string; at: number; text: string; runId?: string; actor: string };
 type Task = { id: string; projectId: string; title: string; description: string; acceptanceCriteria: string; assigneeId?: string;
-  assignment?: { kind: string; id: string };
+  assignment?: { kind: string; id: string }; updatedAt?: number;
   status: Status; revision: number; runIds: string[]; timeline: Timeline[]; timelineTotal?: number; owner?: { dispatchId: string } };
 type SquadStep = { agentId: string; responsibility: string };
 type Squad = { id: string; name: string; description: string; steps: SquadStep[]; revision: number; createdAt: number; updatedAt: number };
@@ -42,6 +42,15 @@ function openSnapshot() { return state.open; }
 function setOpen(value: boolean) { state.open = value; for (const fn of state.listeners) fn(); }
 export function openWorkbench() { setOpen(true); }
 function fmt(ts?: number) { return ts ? new Date(ts).toLocaleString('zh-CN', { hour12: false }) : '—'; }
+function relTime(ts?: number): string {
+  if (!ts) return '—';
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return '刚刚';
+  if (diff < 3600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3600_000)} 小时前`;
+  if (diff < 30 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+  return fmt(ts);
+}
 function elapsed(run: Run) {
   const seconds = Math.max(0, Math.floor(((run.endedAt ?? Date.now()) - run.createdAt) / 1000));
   if (seconds < 60) return `${seconds} 秒`;
@@ -799,8 +808,33 @@ function Workbench() {
         {layout === 'board' ? <DndContext sensors={sensors} onDragEnd={onDragEnd}><div className="dsh-wb-board">{STATUS.filter((s) => !statusFilter || s === statusFilter).map((s) => <Column key={s} status={s} tasks={filtered.filter((t) => t.status === s)} agents={overview.agents} onTask={taskButton} />)}</div></DndContext> :
           <div className="dsh-wb-panel"><table className="dsh-wb-table"><thead><tr><th>任务</th><th>项目</th><th>执行者</th><th>状态</th><th>Run</th></tr></thead><tbody>{filtered.map((t) => <tr key={t.id}><td><button className="dsh-wb-link" onClick={() => taskButton(t.id)}>{t.title}</button></td><td>{overview.projects.find((p) => p.id === t.projectId)?.title}</td><td>{overview.agents.find((a) => a.id === t.assigneeId)?.name ?? '未分派'}</td><td>{LABEL[t.status]}</td><td>{t.runIds.length}</td></tr>)}</tbody></table>{!filtered.length && <div className="dsh-wb-empty">暂无任务</div>}</div>}</>}
       {page === 'projects' && <><button className="dsh-wb-btn primary" onClick={() => begin('project')}>新建项目</button><div style={{ height: 16 }} />
-        {overview.projects.map((p) => <div className="dsh-wb-panel" key={p.id}><div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><h2>{p.title}</h2><button className="dsh-wb-btn" onClick={() => begin('project', p.id)}>重命名</button></div>{p.goal && <p style={{ margin: '6px 0 0', fontSize: 12, lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary)' }}>{p.goal}</p>}
-            <div className="dsh-wb-code">{p.root}</div><button className="dsh-wb-link" onClick={() => { setProjectId(p.id); setPage('tasks'); }}>查看 {overview.tasks.filter((t) => t.projectId === p.id).length} 个任务 →</button></div>)}</>}
+        {overview.projects.map((p) => {
+          const ptasks = overview.tasks.filter((t) => t.projectId === p.id);
+          const pc: Record<Status, number> = { todo: 0, in_progress: 0, in_review: 0, blocked: 0, done: 0 };
+          for (const t of ptasks) pc[t.status] += 1;
+          const recent = [...ptasks].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, 3);
+          const goTasks = (st?: Status) => { setProjectId(p.id); setStatusFilter(st ?? ''); setPage('tasks'); };
+          return <div className="dsh-wb-panel dsh-wb-projcard" key={p.id}>
+            <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}>
+              <h2 className="dsh-wb-row">{p.title}{pc.in_progress > 0 && <span className="dsh-wb-card-live" title="有任务执行中" />}</h2>
+              <div className="dsh-wb-row">
+                <button className="dsh-wb-btn" onClick={() => begin('project', p.id)}>编辑</button>
+                <button className="dsh-wb-btn" onClick={() => goTasks()}>查看任务 →</button>
+              </div>
+            </div>
+            {p.goal ? <p className="dsh-wb-projgoal">{p.goal}</p> : <p className="dsh-wb-muted">未设定目标——点「编辑」补一段话说明这个项目要解决什么问题。</p>}
+            <div className="dsh-wb-code">{p.root}</div>
+            <div className="dsh-wb-row dsh-wb-projcounts">
+              {STATUS.map((st) => (pc[st] > 0 || ['todo', 'in_progress', 'in_review'].includes(st)
+                ? <button key={st} type="button" className="dsh-wb-countchip" data-tone={st} onClick={() => goTasks(st)} title={`查看${LABEL[st]}任务`}>{LABEL[st]} <b>{pc[st]}</b></button>
+                : null))}
+            </div>
+            {recent.length > 0 && <div className="dsh-wb-projrecent">
+              <span className="dsh-wb-muted">最近活动</span>
+              {recent.map((t) => <button key={t.id} type="button" className="dsh-wb-link dsh-wb-projrecent-item" onClick={() => taskButton(t.id)}>{t.title}<span className="dsh-wb-muted"> · {LABEL[t.status]} · {relTime(t.updatedAt)}</span></button>)}
+            </div>}
+          </div>;
+        })}</>}
       {page === 'agents' && <><button className="dsh-wb-btn primary" onClick={() => begin('agent')}>新建 Agent</button><div style={{ height: 16 }} />
         <div className="dsp-stagger">{overview.agents.map((a, i) => <div className="dsh-wb-panel" key={a.id} style={{ ['--dsp-i' as string]: String(i) }}>
           <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><h2>{a.name}</h2><button className="dsh-wb-btn" onClick={() => begin('agent', a.id)}>编辑</button></div>
