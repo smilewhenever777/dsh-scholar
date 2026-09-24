@@ -13,6 +13,7 @@ import { InMemoryTargetAdapter } from '../dist/adapters/target.js';
 import { MockRuntime } from '../dist/runtime.js';
 import { DispatchService } from '../dist/service.js';
 import { defaultPolicyConfig } from '../dist/policy.js';
+import { createHash } from 'node:crypto';
 import { sleep, assertRejects } from './util.mjs';
 
 async function harness() {
@@ -29,8 +30,10 @@ async function harness() {
   const workbench = new WorkbenchService(workbenchStore, dispatch, dispatchStore, () => ['glm/glm-5.3'], () => 'glm/glm-5.3');
   const squad = new SquadService(workbenchStore);
   const automation = new AutomationService(workbenchStore,
-    async (template, source) => {
-      const task = await workbench.createTask({ ...template, sourceNote: `自动化规则「${source}」定时创建` });
+    async (template, source, ruleName) => {
+      // 与 index.ts 生产版一致:确定性任务 ID 使崩溃重放不重建任务
+      const fixedId = 't_auto_' + createHash('sha256').update(source).digest('hex').slice(0, 24);
+      const task = await workbench.createTask({ ...template, sourceNote: `自动化规则「${ruleName}」定时创建`, fixedId });
       const result = await workbench.start(task.id, { idempotencyKey: `auto-${source}` });
       return { taskId: task.id, dispatchId: result.dispatchId };
     },
@@ -61,7 +64,7 @@ async function harness() {
 test('cron:周级规则落到下一个周一 9:00,绝不落在 +1h 回退', async () => {
   const h = await harness();
   try {
-    const rule = await h.automation.create({ name: '周报', cron: '0 9 * * 1', template: { projectId: 'p1', title: 't', acceptanceCriteria: 'a' } });
+    const rule = await h.automation.create({ name: '周报', cron: '0 9 * * 1', template: { projectId: h.project.id, title: 't', acceptanceCriteria: 'a' } });
     const next = new Date(rule.nextTriggerAt);
     assert.ok(rule.nextTriggerAt > Date.now(), '下次触发必须在未来');
     assert.equal(next.getDay(), 1, '必须落在周一');
@@ -74,7 +77,7 @@ test('cron:周级规则落到下一个周一 9:00,绝不落在 +1h 回退', asyn
 test('cron:月级规则(每月 1 号)在 32 天窗口内命中', async () => {
   const h = await harness();
   try {
-    const rule = await h.automation.create({ name: '月度汇总', cron: '0 9 1 * *', template: { projectId: 'p1', title: 't', acceptanceCriteria: 'a' } });
+    const rule = await h.automation.create({ name: '月度汇总', cron: '0 9 1 * *', template: { projectId: h.project.id, title: 't', acceptanceCriteria: 'a' } });
     const next = new Date(rule.nextTriggerAt);
     assert.ok(rule.nextTriggerAt > Date.now());
     assert.equal(next.getDate(), 1, '必须落在 1 号');
@@ -86,7 +89,7 @@ test('cron:月级规则(每月 1 号)在 32 天窗口内命中', async () => {
 test('cron:不存在的日子(2 月 30 日)返回 0 表示永不调度,不再回退 +1h', async () => {
   const h = await harness();
   try {
-    const rule = await h.automation.create({ name: '永不存在', cron: '0 9 30 2 *', template: { projectId: 'p1', title: 't', acceptanceCriteria: 'a' } });
+    const rule = await h.automation.create({ name: '永不存在', cron: '0 9 30 2 *', template: { projectId: h.project.id, title: 't', acceptanceCriteria: 'a' } });
     assert.equal(rule.nextTriggerAt, 0, '400 天无匹配应返回 0(调度器按 falsy 跳过)');
   } finally { h.dispose(); }
 });
@@ -94,7 +97,7 @@ test('cron:不存在的日子(2 月 30 日)返回 0 表示永不调度,不再回
 test('cron:分钟级表达式仍即时命中(回归检查两段式重构)', async () => {
   const h = await harness();
   try {
-    const rule = await h.automation.create({ name: '高频', cron: '*/30 * * * *', template: { projectId: 'p1', title: 't', acceptanceCriteria: 'a' } });
+    const rule = await h.automation.create({ name: '高频', cron: '*/30 * * * *', template: { projectId: h.project.id, title: 't', acceptanceCriteria: 'a' } });
     const next = new Date(rule.nextTriggerAt);
     assert.equal(next.getMinutes() % 30, 0);
     assert.ok(rule.nextTriggerAt - Date.now() <= 30 * 60_000 + 60_000, '半小时内必有命中');
@@ -220,5 +223,91 @@ test('接续目标缺失(下一步 Agent 被删):exec 落 paused_failed + 任务
     assert.equal(exec.state, 'paused_failed', '接续目标缺失必须落终态');
     assert.ok(exec.pauseReason.includes('无法接续'));
     assert.equal(h.workbench.taskDetail(task.id).task.status, 'blocked', '任务退回 blocked 供用户处理');
+  } finally { h.dispose(); }
+});
+
+/* ---------- v0.10 审计修复回归 ---------- */
+
+test('P0-3:cron 按规则时区计算——同时区墙钟不同 epoch;非法时区 422', async () => {
+  const h = await harness();
+  try {
+    const mk = (tz) => h.automation.create({ name: 'tz-' + tz.replace('/', '_'), cron: '0 9 * * *', timezone: tz,
+      template: { projectId: h.project.id, title: 't', acceptanceCriteria: 'a' } });
+    const sh = await mk('Asia/Shanghai');
+    const utc = await mk('UTC');
+    assert.notEqual(sh.nextTriggerAt, utc.nextTriggerAt, '相同时刻表在不同时区必须产生不同触发时间');
+    // 各自落到自己时区的 9:00(宿主机即上海时区,本地小时即上海墙钟)
+    const shd = new Date(sh.nextTriggerAt);
+    assert.equal(shd.getHours(), 9);
+    assert.equal(shd.getMinutes(), 0);
+    const utcd = new Date(utc.nextTriggerAt);
+    assert.equal(utcd.getUTCHours(), 9);
+    assert.equal(utcd.getUTCMinutes(), 0);
+    // 两次触发的时间差恰为时区差的整数圈(8h mod 24h)
+    const diffH = (utc.nextTriggerAt - sh.nextTriggerAt) / 3600_000;
+    const m = ((diffH % 24) + 24) % 24; // 归一化余数:时差 ±8h 跨日界后表现为 8 或 16
+    assert.ok(m === 8 || m === 16, `触发差应 ≡ ±8h (mod 24h),实际 ${diffH}h`);
+    await assertRejects(() => mk('Mars/Olympus'), 'VALIDATION');
+  } finally { h.dispose(); }
+});
+
+test('P0-3:闰日 cron 在 10 年窗口内命中(2 月 29 日)', async () => {
+  const h = await harness();
+  try {
+    const rule = await h.automation.create({ name: 'leap', cron: '0 9 29 2 *', timezone: 'UTC',
+      template: { projectId: h.project.id, title: 't', acceptanceCriteria: 'a' } });
+    assert.ok(rule.nextTriggerAt > 0, '闰日必须命中(旧 400 天窗口可能为 0)');
+    const d = new Date(rule.nextTriggerAt);
+    assert.equal(d.getUTCMonth(), 1);
+    assert.equal(d.getUTCDate(), 29);
+    assert.equal(d.getUTCHours(), 9);
+  } finally { h.dispose(); }
+});
+
+test('P0-4:planned attempt 崩溃恢复——重放不重建任务(fixedId 幂等)', async () => {
+  const h = await harness();
+  try {
+    const rule = await h.automation.create({ name: 'recover', cron: '0 9 * * *', timezone: 'Asia/Shanghai',
+      template: { projectId: h.project.id, title: '恢复任务', description: '', acceptanceCriteria: '完成', assigneeId: h.agentA.id } });
+    await h.automation.update(rule.id, { expectedRevision: rule.revision, enabled: true });
+    const first = await h.automation.tryTrigger(rule.id, rule.nextTriggerAt);
+    assert.equal(first.result, 'started');
+    await h.cancelRun(first.dispatchId); // 收尾首个 run(任务回 todo),模拟启动后崩溃前任务已存在
+    const countAfter = Object.values(h.workbenchStore.snapshot().tasks).filter((t) => t.title === '恢复任务').length;
+    assert.equal(countAfter, 1);
+    // 模拟崩溃后重放:把 attempt 手工拨回 planned(去 taskId),再触发同一 scheduledAt
+    await h.workbenchStore.mutate((root) => {
+      const attempts = root.triggerAttempts;
+      const at = Object.values(attempts).find((a) => a.ruleId === rule.id);
+      if (at) { at.result = 'planned'; delete at.taskId; }
+    });
+    const again = await h.automation.tryTrigger(rule.id, rule.nextTriggerAt);
+    assert.equal(again.result, 'started', 'planned 态必须可恢复(幂等键重放)');
+    const countReplay = Object.values(h.workbenchStore.snapshot().tasks).filter((t) => t.title === '恢复任务').length;
+    assert.equal(countReplay, 1, 'fixedId 幂等——重放不得重建任务');
+    const t2 = h.workbench.taskDetail(again.taskId).task;
+    assert.ok(t2.timeline.some((ev) => ev.text.includes('自动化规则')), '来源标记仍在');
+  } finally { h.dispose(); }
+});
+
+test('P0-1:小队执行期间(含交接间隙)任务内容锁定;人工接管落终态', async () => {
+  const h = await harness();
+  try {
+    const squad = await h.squad.create({ name: '锁定小队', description: '',
+      steps: [{ agentId: h.agentA.id, responsibility: '起草' }, { agentId: h.agentB.id, responsibility: '审校' }] });
+    const task = await h.workbench.createTask({ projectId: h.project.id, title: '锁定任务', description: '', acceptanceCriteria: '完成', assigneeId: squad.id });
+    const started = await h.workbench.start(task.id, { idempotencyKey: 'lock-1' });
+    // 执行中(owner 在):旧路径已锁;交接间隙(无 owner + in_progress):新锁定
+    await h.finishRun(started.dispatchId, 'done', '第一步完成');
+    const t1 = h.workbench.taskDetail(task.id).task;
+    assert.equal(t1.status, 'in_progress');
+    assert.equal(t1.owner, undefined, '交接间隙无 owner');
+    await assertRejects(() => h.workbench.updateTask(task.id, { expectedRevision: t1.revision, title: '偷偷改名' }), 'WRONG_STATE');
+    // 人工接管 → 执行落终态,小队可删,任务不再被 30s 重试锁死
+    await h.dispatch.takeover(started.dispatchId, 'user', '测试接管');
+    const exec = h.execOf(task.id);
+    assert.equal(exec.state, 'paused_failed');
+    assert.ok(exec.pauseReason.includes('人工接管'));
+    assert.equal(await h.squad.delete(squad.id), true, '接管后小队可删除');
   } finally { h.dispose(); }
 });

@@ -159,7 +159,10 @@ export class WorkbenchService {
       }
       const now = Date.now();
       const sourceNote = typeof raw.sourceNote === 'string' && raw.sourceNote.trim() ? raw.sourceNote.slice(0, 200) : '';
-      const task: WorkTask = { id: newId('t'), projectId, title, description, acceptanceCriteria,
+      // 内部参数(不经路由暴露):fixedId 使创建幂等——自动化崩溃恢复重放不重建任务
+      const fixedId = typeof raw.fixedId === 'string' && /^t_[A-Za-z0-9_-]{4,64}$/.test(raw.fixedId) ? raw.fixedId : null;
+      if (fixedId && root.tasks[fixedId]) return root.tasks[fixedId];
+      const task: WorkTask = { id: fixedId ?? newId('t'), projectId, title, description, acceptanceCriteria,
         assignment,
         status: 'todo', revision: 1, contentVersion: 1, createdAt: now, updatedAt: now,
         leaseEpoch: 0, runIds: [], operations: {},
@@ -173,6 +176,13 @@ export class WorkbenchService {
       const task = getTask(root, id);
       expectRevision(task.revision, raw.expectedRevision);
       if (task.owner) throw new ServiceError('WRONG_STATE', '任务执行中；先取消或接管', 409);
+      // P0-1(审计):小队步骤交接间隙(任务 in_progress 且无 owner)同样锁定内容——
+      // 否则下一步可能领取到另一份任务合同(标题/验收/分派已被改)
+      const execLock = (root as unknown as { squadExecutions?: Record<string, { taskId: string; state: string }> });
+      if (task.assignment?.kind === 'squad'
+        && Object.values(execLock.squadExecutions ?? {}).some((e) => e.taskId === id && e.state === 'running')) {
+        throw new ServiceError('WRONG_STATE', '小队执行进行中，任务内容已锁定；请等待完成或先取消', 409);
+      }
       if (['in_review', 'done'].includes(task.status) && (raw.title !== undefined || raw.description !== undefined || raw.acceptanceCriteria !== undefined)) {
         throw new ServiceError('WRONG_STATE', '已完成或待验收任务须先重新打开或退回', 409);
       }
@@ -382,28 +392,37 @@ export class WorkbenchService {
           continue;
         }
 
+        // P0-2(审计):步骤幂等键不含时间戳——固定键使崩溃重放安全;
+        // 启动成功与步骤记账之间崩溃后,下个周期按同键查到既有 Run 直接绑定,不再重发
+        const stepKey = `squad:${exec.id}:step:${exec.currentStep + 1}`;
+        const bindStep = async (dispatchId: string) => {
+          await this.store.mutate((mutRoot) => {
+            const mExecRoot = mutRoot as unknown as { squadExecutions?: Record<string, { currentStep: number; runIds: string[]; updatedAt: number }> };
+            const mExec = mExecRoot.squadExecutions?.[exec.id];
+            if (mExec) {
+              if (!mExec.runIds.includes(dispatchId)) mExec.runIds.push(dispatchId);
+              mExec.currentStep = Math.max(mExec.currentStep, exec.currentStep + 1);
+              mExec.updatedAt = Date.now();
+            }
+          });
+          started.push(dispatchId);
+        };
+        const existing = this.dispatchStore.findByIdempotency('workbench', stepKey);
+        if (existing) {
+          await bindStep(existing.dispatchId); // 崩溃恢复:绑定已启动的 Run
+          continue;
+        }
         try {
-          // 推进步骤并启动下一步
           const startResult = await this.dispatch.start({
-            actorScope: 'workbench', idempotencyKey: `squad:${exec.id}:step:${exec.currentStep + 1}:${Date.now()}`,
+            actorScope: 'workbench', idempotencyKey: stepKey,
             targetType: 'workbench_task', projectId: project.id, nodeId: task.id, ws: project.root,
             model: nextAgent.model, toolAllow: nextAgent.toolAllow,
             agentProfile: { id: nextAgent.id, name: nextAgent.name, instructions: nextAgent.instructions,
               revision: nextAgent.revision, toolAllow: nextAgent.toolAllow },
           });
-          // 更新执行状态
-          await this.store.mutate((mutRoot) => {
-            const mExecRoot = mutRoot as unknown as { squadExecutions?: Record<string, { currentStep: number; runIds: string[]; updatedAt: number }> };
-            const mExec = mExecRoot.squadExecutions?.[exec.id];
-            if (mExec) {
-              mExec.currentStep += 1;
-              mExec.runIds.push(startResult.dispatchId);
-              mExec.updatedAt = Date.now();
-            }
-          });
-          started.push(startResult.dispatchId);
+          await bindStep(startResult.dispatchId);
         } catch {
-          // 启动失败(如全局槽被占):exec 保持 running,任务无 owner,下个周期自动重试
+          // 启动失败(如并发已满):exec 保持 running,任务无 owner,下个周期按固定键自动重试
         }
       }
     }

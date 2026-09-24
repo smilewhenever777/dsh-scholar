@@ -14,6 +14,10 @@ export class WorkbenchTargetAdapter implements TargetAdapter {
   hasOwner(dispatchId: string): boolean {
     return Object.values(this.store.snapshot()?.tasks ?? {}).some((task) => task.owner?.dispatchId === dispatchId);
   }
+  /** 该派发是否绑定过工作台任务(交接间隙无 owner 时,撤销/接管仍需路由到工作台侧)。 */
+  hasRun(dispatchId: string): boolean {
+    return Object.values(this.store.snapshot()?.tasks ?? {}).some((task) => task.runIds.includes(dispatchId));
+  }
   async readTask(ref: TargetRef): Promise<{ snapshot: TaskSnapshot; fingerprint: string } | null> {
     const root = this.store.snapshot();
     const task = root?.tasks[ref.nodeId];
@@ -121,6 +125,19 @@ export class WorkbenchTargetAdapter implements TargetAdapter {
   async revoke(input: { dispatchId: string; ref?: TargetRef; mode: 'worker_only' | 'takeover' }): Promise<{ ok: boolean; detail: string }> {
     return this.store.mutate((root) => {
       const task = input.ref ? root.tasks[input.ref.nodeId] : Object.values(root.tasks).find((t) => t.owner?.dispatchId === input.dispatchId);
+      if (input.mode === 'takeover') {
+        // P0-1(审计):接管即终止小队执行——即使所有权已被 finalize 清空(交接间隙,
+        // 此处按 runIds 关联定位),否则 running 执行会让接续永久重试且小队不可删
+        const squadTask = (task?.assignment?.kind === 'squad' ? task : undefined)
+          ?? (input.ref ? root.tasks[input.ref.nodeId] : undefined)
+          ?? Object.values(root.tasks).find((t) => t.assignment?.kind === 'squad' && t.runIds.includes(input.dispatchId));
+        if (squadTask) {
+          const execRoot = root as unknown as { squadExecutions?: Record<string, { taskId: string; state: string; pauseReason?: string; updatedAt: number }> };
+          const exec = Object.values(execRoot.squadExecutions ?? {})
+            .find((e) => e.taskId === squadTask.id && e.state === 'running');
+          if (exec) { exec.state = 'paused_failed'; exec.pauseReason = '人工接管,小队执行中止'; exec.updatedAt = Date.now(); }
+        }
+      }
       if (task?.owner?.dispatchId !== input.dispatchId) return { ok: true, detail: '无在册所有权' };
       task.owner.workerWrites = false;
       if (input.mode === 'takeover') task.owner.revoked = true;
@@ -139,6 +156,8 @@ export class RoutedTargetAdapter implements TargetAdapter {
   finalize(input: Parameters<TargetAdapter['finalize']>[0]) { return this.for(input.ref).finalize(input); }
   revoke(input: Parameters<TargetAdapter['revoke']>[0]) {
     if (input.ref) return this.for(input.ref).revoke(input);
-    return this.workbench.hasOwner(input.dispatchId) ? this.workbench.revoke(input) : this.legacy.revoke(input);
+    return (this.workbench.hasOwner(input.dispatchId) || this.workbench.hasRun(input.dispatchId))
+      ? this.workbench.revoke(input)
+      : this.legacy.revoke(input);
   }
 }

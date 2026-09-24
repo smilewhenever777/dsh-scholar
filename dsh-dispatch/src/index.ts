@@ -14,6 +14,7 @@ import type {} from '@deepseek-ai/dsh-settings';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import z from 'schemastery';
+import { createHash } from 'node:crypto';
 import { DispatchStore, dshHome } from './store.js';
 import { DispatchService, allowedActions as allowedActionsFor } from './service.js';
 import { SubagentRuntimeAdapter } from './runtime.js';
@@ -55,6 +56,11 @@ interface DispatchConfig {
   allowedModels: string[];
   maxWallMinutes: number;
   maxConcurrentDispatches: number;
+}
+
+/** 自动化任务确定性 ID 的散列(sha256 前 24 hex)。 */
+function automationTaskHash(source: string): string {
+  return createHash('sha256').update(source).digest('hex').slice(0, 24);
 }
 
 function readConfig(scope: { get: () => unknown }): DispatchConfig {
@@ -129,7 +135,12 @@ export function apply(ctx: Context): void {
   // 否则宿主重启后无人打开工作台时,已启用的自动化规则永远不触发。
   let squadInstance: import('./workbench/squad.js').SquadService | null = null;
   let automationInstance: import('./workbench/automation.js').AutomationService | null = null;
-  const ensureSideServices = async () => {
+  let sideServicesPromise: Promise<{ workbench: WorkbenchService; squad: import('./workbench/squad.js').SquadService; automation: import('./workbench/automation.js').AutomationService; dispatch: DispatchService } | null> | null = null;
+  const ensureSideServices = () => {
+    if (!sideServicesPromise) sideServicesPromise = ensureSideServicesInner().catch((e) => { sideServicesPromise = null; throw e; });
+    return sideServicesPromise;
+  };
+  const ensureSideServicesInner = async () => {
     const dispatch = await servicePromise;
     if (!dispatch || !workbenchInstance) return null;
     if (!squadInstance) {
@@ -146,6 +157,9 @@ export function apply(ctx: Context): void {
             description: template.description, acceptanceCriteria: template.acceptanceCriteria,
             assigneeId: template.assigneeId,
             sourceNote: `自动化规则「${ruleName}」定时创建`,
+            // P0-4(审计):确定性任务 ID——崩溃在"建任务"与"启动"之间时,
+            // attempt 恢复重放 fixedId 直接命中既有任务,不会重复创建
+            fixedId: `t_auto_${automationTaskHash(source)}`,
           });
           const result = await workbenchInstance!.start(task.id, { idempotencyKey: `auto-${source}` });
           return { taskId: task.id, dispatchId: result.dispatchId };
@@ -166,6 +180,7 @@ export function apply(ctx: Context): void {
   registerWorkbenchRoutes(ctx, ensureSideServices);
   void ensureSideServices().catch(() => undefined);
 
+  let squadTimer: ReturnType<typeof setInterval> | null = null;
   // §7.1:启动对账(初始退避 ~5s;只扫描,不重放业务任务)
   void servicePromise.then((svc) => {
     if (!svc) return;
@@ -176,8 +191,8 @@ export function apply(ctx: Context): void {
     }, 5_000);
     t.unref?.();
 
-    // P0-1:小队接续调度——每 30s 检查待接续的小队执行
-    const squadTimer = setInterval(() => {
+    // P0-1:小队接续调度——每 30s 检查待接续的小队执行(timer 外层持有,dispose 清除)
+    squadTimer = setInterval(() => {
       if (!workbenchInstance) return;
       void workbenchInstance.continueSquadExecutions().then((started) => {
         if (started.length) journal('squad/continued', { count: started.length, dispatchIds: started });
@@ -191,6 +206,7 @@ export function apply(ctx: Context): void {
     (ctx as unknown as { on?: (ev: string, fn: () => void) => void }).on?.('dispose', () => {
       service?.dispose();
       automationInstance?.stop(); // P0-3:dispose 时停止调度器
+      if (squadTimer) { clearInterval(squadTimer); squadTimer = null; } // P1(审计):接续定时器随卸载清除
       workbenchStore.dispose();
       journal('service/dispose', {});
     });

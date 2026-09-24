@@ -629,7 +629,7 @@ function Workbench() {
     }
     if (missing.length) { setFormError(`请填写:${missing.join('、')}`); return; }
     const endpoint = kind === 'project' ? 'projects' : kind === 'agent' ? 'agents' : kind === 'squad' ? 'squads' : kind === 'automation' ? 'automations' : 'tasks';
-    const current = editing ? (kind === 'project' ? overview.projects : kind === 'agent' ? overview.agents : overview.tasks).find((x) => x.id === editing) : undefined;
+    const current = editing ? (kind === 'project' ? overview.projects : kind === 'agent' ? overview.agents : kind === 'squad' ? squads : kind === 'automation' ? autoRules : overview.tasks).find((x) => x.id === editing) : undefined;
     const body = kind === 'project' ? { title: form.title, root: form.root, goal: form.goal ?? '', description: form.description ?? '', expectedRevision: current?.revision } :
       kind === 'agent' ? { name: form.name, instructions: form.instructions, model: form.model, toolAllow, displayDescription: form.displayDescription ?? '', expectedRevision: current?.revision } :
       kind === 'automation' ? (() => ({
@@ -761,7 +761,7 @@ function Workbench() {
           const blocked = overview.tasks.filter((t) => t.status === 'blocked');
           const running = overview.tasks.filter((t) => t.status === 'in_progress' || t.owner);
           const ready = overview.tasks.filter((t) => t.status === 'todo' && !!assigneeOf(t) && !t.owner);
-          const unassigned = overview.tasks.filter((t) => t.status === 'todo' && !t.assigneeId);
+          const unassigned = overview.tasks.filter((t) => t.status === 'todo' && !assigneeOf(t));
           const actionable = [...review.map((t) => ({ task: t, why: '等待人工验收', act: '去验收' })),
             ...blocked.map((t) => ({ task: t, why: '任务受阻,需查看原因', act: '查看' })),
             ...running.map((t) => ({ task: t, why: 'Agent 正在工作', act: '查看进度' })),
@@ -806,7 +806,7 @@ function Workbench() {
         <button className="dsh-wb-btn primary" disabled={!overview.projects.length} onClick={() => begin('task')}>新建任务</button></div>
         {project && <p className="dsh-wb-muted">工作区：{project.root}</p>}
         {layout === 'board' ? <DndContext sensors={sensors} onDragEnd={onDragEnd}><div className="dsh-wb-board">{STATUS.filter((s) => !statusFilter || s === statusFilter).map((s) => <Column key={s} status={s} tasks={filtered.filter((t) => t.status === s)} agents={overview.agents} onTask={taskButton} />)}</div></DndContext> :
-          <div className="dsh-wb-panel"><table className="dsh-wb-table"><thead><tr><th>任务</th><th>项目</th><th>执行者</th><th>状态</th><th>Run</th></tr></thead><tbody>{filtered.map((t) => <tr key={t.id}><td><button className="dsh-wb-link" onClick={() => taskButton(t.id)}>{t.title}</button></td><td>{overview.projects.find((p) => p.id === t.projectId)?.title}</td><td>{overview.agents.find((a) => a.id === t.assigneeId)?.name ?? '未分派'}</td><td>{LABEL[t.status]}</td><td>{t.runIds.length}</td></tr>)}</tbody></table>{!filtered.length && <div className="dsh-wb-empty">暂无任务</div>}</div>}</>}
+          <div className="dsh-wb-panel"><table className="dsh-wb-table"><thead><tr><th>任务</th><th>项目</th><th>执行者</th><th>状态</th><th>Run</th></tr></thead><tbody>{filtered.map((t) => <tr key={t.id}><td><button className="dsh-wb-link" onClick={() => taskButton(t.id)}>{t.title}</button></td><td>{overview.projects.find((p) => p.id === t.projectId)?.title}</td><td>{overview.agents.find((a) => a.id === assigneeOf(t))?.name ?? (squads.find((sq) => sq.id === assigneeOf(t)) ? `☰ ${squads.find((sq) => sq.id === assigneeOf(t))!.name}` : '未分派')}</td><td>{LABEL[t.status]}</td><td>{t.runIds.length}</td></tr>)}</tbody></table>{!filtered.length && <div className="dsh-wb-empty">暂无任务</div>}</div>}</>}
       {page === 'projects' && <><button className="dsh-wb-btn primary" onClick={() => begin('project')}>新建项目</button><div style={{ height: 16 }} />
         {overview.projects.map((p) => {
           const ptasks = overview.tasks.filter((t) => t.projectId === p.id);
@@ -868,9 +868,9 @@ function Workbench() {
       </>}
     </main>
     {modal && <><button className="dsh-wb-backdrop" style={{ zIndex: 112 }} aria-label="关闭表单" onClick={() => setModal(null)} /><div className="dsh-wb-modal" role="dialog" aria-modal="true" aria-label={editing ? '编辑' : '新建'}>
-      <h2>{editing ? '编辑' : '新建'}{modal === 'project' ? '项目' : modal === 'agent' ? ' Agent' : '任务'}</h2>
+      <h2>{editing ? '编辑' : '新建'}{modal === 'project' ? '项目' : modal === 'agent' ? ' Agent' : modal === 'squad' ? '小队' : modal === 'automation' ? '自动化规则' : '任务'}</h2>
       {formError && <div role="alert" className="dsh-wb-error">{formError}</div>}
-      {browse && <div className="dsh-wb-picker" role="dialog" aria-modal="true" aria-label="选择工作区目录" onKeyDown={(e) => { if (e.key === 'Escape') setBrowse(null); }}>
+      {browse && <div className="dsh-wb-picker" role="dialog" aria-modal="true" aria-label="选择工作区目录" onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setBrowse(null); } }}>
         <div className="dsh-wb-picker-head">
           <button type="button" className="dsh-wb-btn" autoFocus disabled={browse.parent === null} onClick={() => void loadBrowse(browse.parent ?? '')}>↑ 上级</button>
           <div className="dsh-wb-picker-path" title={browse.path}>{browse.path || '此电脑'}</div>
@@ -885,7 +885,7 @@ function Workbench() {
           {browse.truncated && <div className="dsh-wb-muted" style={{ padding: 8 }}>子目录过多,仅显示前 500 项——可直接在下方输入完整路径</div>}
         </div>
         <div className="dsh-wb-picker-foot">
-          <span className="dsh-wb-muted" style={{ marginRight: 'auto', fontSize: 10.5 }}>选中的目录就是 Agent 的工作区</span>
+          <span className="dsh-wb-muted" style={{ marginRight: 'auto', fontSize: 10.5 }}>选中的目录即项目工作区(Agent 只在其中读写)</span>
           <button type="button" className="dsh-wb-btn" onClick={() => setBrowse(null)}>取消</button>
           <button type="button" className="dsh-wb-btn primary" disabled={!browse.path || browse.blocked} title={browse.blocked ? '当前目录位于 DSH_HOME 内,不能作为工作区' : ''} onClick={() => { setForm((f) => ({ ...f, root: browse.path })); setBrowse(null); }}>选择此目录</button>
         </div>
