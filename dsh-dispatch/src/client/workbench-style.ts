@@ -323,6 +323,18 @@ export const workbenchCss = `
 .dsh-wb-order-toggle:hover { color: var(--dsw-alias-label-primary); }
 
 
+/* ---------- 目录浏览器(项目路径选择) ---------- */
+.dsh-wb-picker { position: fixed; z-index: 116; top: 50%; left: 50%; transform: translate(-50%,-50%); width: min(620px, calc(100vw - 24px)); max-height: min(74vh, 660px); display: flex; flex-direction: column; padding: 16px 18px; background: var(--dsw-alias-bg-base, #20242c); border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3)); border-radius: 14px; box-shadow: 0 24px 65px rgba(0,0,0,.5); animation: dsp-pop var(--dsp-dur) var(--dsp-spring); }
+.dsh-wb-picker-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.dsh-wb-picker-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-family: ui-monospace, monospace; direction: rtl; text-align: left; }
+.dsh-wb-picker-list { flex: 1; min-height: 200px; max-height: 44vh; overflow: auto; display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.18)); border-radius: 10px; padding: 6px; }
+.dsh-wb-picker-item { display: flex; align-items: center; gap: 6px; text-align: left; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--dsw-alias-label-base, #d7dae0); font-size: 12px; cursor: pointer; }
+.dsh-wb-picker-item:hover:not(:disabled) { background: color-mix(in srgb, var(--dsw-alias-fill-primary, #5d74ec) 16%, transparent); }
+.dsh-wb-picker-item:disabled { opacity: .38; cursor: not-allowed; }
+.dsh-wb-picker-foot { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.dsh-wb-pickerchip { border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3)); background: transparent; color: var(--dsw-alias-label-caption, #9aa0aa); border-radius: 999px; padding: 2px 10px; font-size: 10.5px; cursor: pointer; }
+.dsh-wb-pickerchip:hover { color: var(--dsw-alias-label-base, #d7dae0); border-color: var(--dsw-alias-fill-primary, #5d74ec); }
+
 /* ---------- 阶段A:活动流重组(进度收起) ---------- */
 .dsh-wb-collapsed-progress { margin-top: 10px; border-top: 1px dashed var(--dsw-alias-border-l2, rgba(127,127,127,.25)); padding-top: 8px; }
 .dsh-wb-collapsed-progress summary { cursor: pointer; color: var(--dsw-alias-label-caption); font-size: 11px; display: flex; align-items: center; gap: 8px; padding: 4px 0; }

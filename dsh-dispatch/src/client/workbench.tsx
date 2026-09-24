@@ -32,6 +32,8 @@ const STATUS: Status[] = ['todo', 'in_progress', 'in_review', 'blocked', 'done']
 const LABEL: Record<Status, string> = { todo: '待办', in_progress: '执行中', in_review: '待验收', blocked: '受阻', done: '已完成' };
 const TOOLS: Record<string, string> = { dispatch_read_file: '读取文件', dispatch_list_dir: '列出目录', dispatch_write_report: '写入报告', dispatch_progress: '提交进度', dispatch_report: '提交结果' };
 const EMPTY: Overview = { projects: [], agents: [], tasks: [], counts: { todo: 0, in_progress: 0, in_review: 0, blocked: 0, done: 0 }, legacyCount: 0, readOnly: false };
+type BrowseEntry = { name: string; path: string; blocked: boolean };
+type BrowseResult = { path: string; parent: string | null; blocked: boolean; home: string; drives: string[]; dirs: BrowseEntry[]; truncated: boolean };
 /** v2:从 assignment 或旧 assigneeId 取分派 Agent id(客户端兼容读取) */
 function assigneeOf(task: Task): string | undefined { return task.assignment?.id ?? task.assigneeId; }
 const state = { open: false, listeners: new Set<() => void>() };
@@ -476,6 +478,13 @@ function Workbench() {
   const [page, setPage] = React.useState<Page>('overview');
   const [overview, setOverview] = React.useState<Overview>(EMPTY);
   const [models, setModels] = React.useState<Models>({ allowed: [], default: '' });
+  const [browse, setBrowse] = React.useState<BrowseResult | null>(null);
+  const [browseError, setBrowseError] = React.useState('');
+  async function loadBrowse(p: string) {
+    setBrowseError('');
+    try { setBrowse(await api<BrowseResult>(`${BASE}/fs/browse?path=${encodeURIComponent(p)}`)); }
+    catch (e) { setBrowseError(errorText(e)); }
+  }
   const [legacy, setLegacy] = React.useState<Run[]>([]);
   const [squads, setSquads] = React.useState<Squad[]>([]);
   const [autoRules, setAutoRules] = React.useState<AutomationRule[]>([]);
@@ -653,6 +662,7 @@ function Workbench() {
   function onDragEnd(event: DragEndEvent) { if (event.over) moveTask(String(event.active.id), String(event.over.id) as Status); }
   const taskButton = (id: string) => { setDetail(null); setDetailError(''); setTaskId(id); setRunId(''); };
   const counts = overview.counts;
+  const recentRoots = [...new Set(overview.projects.map((p) => p.root).filter(Boolean))].slice(-4).reverse();
   return <div className="dsh-wb" data-dsh-plugin="dsh-dispatch" data-dsh-part="workbench"><style>{workbenchCss}{markdownCss}</style>
     <ToastHost />
     <nav className="dsh-wb-nav" aria-label="工作台导航">
@@ -826,7 +836,30 @@ function Workbench() {
     {modal && <><button className="dsh-wb-backdrop" style={{ zIndex: 112 }} aria-label="关闭表单" onClick={() => setModal(null)} /><div className="dsh-wb-modal" role="dialog" aria-modal="true" aria-label={editing ? '编辑' : '新建'}>
       <h2>{editing ? '编辑' : '新建'}{modal === 'project' ? '项目' : modal === 'agent' ? ' Agent' : '任务'}</h2>
       {formError && <div role="alert" className="dsh-wb-error">{formError}</div>}
-      {modal === 'project' && <><Field autoFocus label="项目名称" value={form.title} onChange={(v) => setForm({ ...form, title: v })} />{editing ? <div className="dsh-wb-code">{form.root}</div> : <Field label="本机工作区绝对路径" hint="须位于 DSH_HOME 之外;一个路径只绑一个项目" value={form.root} onChange={(v) => setForm({ ...form, root: v })} />}
+      {browse && <div className="dsh-wb-picker" role="dialog" aria-modal="true" aria-label="选择工作区目录" onKeyDown={(e) => { if (e.key === 'Escape') setBrowse(null); }}>
+        <div className="dsh-wb-picker-head">
+          <button type="button" className="dsh-wb-btn" autoFocus disabled={browse.parent === null} onClick={() => void loadBrowse(browse.parent ?? '')}>↑ 上级</button>
+          <div className="dsh-wb-picker-path" title={browse.path}>{browse.path || '此电脑'}</div>
+          <button type="button" className="dsh-wb-btn ghost" onClick={() => setBrowse(null)}>✕ 关闭</button>
+        </div>
+        {browseError && <div role="alert" className="dsh-wb-error" style={{ marginBottom: 8 }}>{browseError}</div>}
+        <div className="dsh-wb-picker-list">
+          {browse.path === '' && browse.drives.map((d) => <button key={d} type="button" className="dsh-wb-picker-item" onClick={() => void loadBrowse(d)}>💽 {d}</button>)}
+          {browse.path === '' && <button type="button" className="dsh-wb-picker-item" onClick={() => void loadBrowse(browse.home)}>🏠 用户主目录</button>}
+          {browse.path !== '' && browse.dirs.map((e) => <button key={e.path} type="button" className="dsh-wb-picker-item" disabled={e.blocked} title={e.blocked ? '位于 DSH_HOME 内,不能作为工作区' : e.path} onClick={() => void loadBrowse(e.path)}>📁 {e.name}</button>)}
+          {browse.path !== '' && browse.dirs.length === 0 && <div className="dsh-wb-muted" style={{ padding: 8 }}>此目录下没有子文件夹</div>}
+          {browse.truncated && <div className="dsh-wb-muted" style={{ padding: 8 }}>子目录过多,仅显示前 500 项——可直接在下方输入完整路径</div>}
+        </div>
+        <div className="dsh-wb-picker-foot">
+          <span className="dsh-wb-muted" style={{ marginRight: 'auto', fontSize: 10.5 }}>选中的目录就是 Agent 的工作区</span>
+          <button type="button" className="dsh-wb-btn" onClick={() => setBrowse(null)}>取消</button>
+          <button type="button" className="dsh-wb-btn primary" disabled={!browse.path || browse.blocked} title={browse.blocked ? '当前目录位于 DSH_HOME 内,不能作为工作区' : ''} onClick={() => { setForm((f) => ({ ...f, root: browse.path })); setBrowse(null); }}>选择此目录</button>
+        </div>
+      </div>}
+      {modal === 'project' && <><Field autoFocus label="项目名称" value={form.title} onChange={(v) => setForm({ ...form, title: v })} />{editing ? <div className="dsh-wb-code">{form.root}</div> : <div className="dsh-wb-field"><label>本机工作区绝对路径</label>
+          <div className="dsh-wb-row"><input className="dsh-wb-input" value={form.root} onChange={(e) => setForm({ ...form, root: e.target.value })} placeholder="D:/research/project(或点「浏览…」选择)" /><button type="button" className="dsh-wb-btn" onClick={() => void loadBrowse(form.root?.trim() || '')}>浏览…</button></div>
+          <small className="dsh-wb-field-hint">须位于 DSH_HOME 之外;一个路径只绑一个项目</small>
+          {recentRoots.length > 0 && <div className="dsh-wb-row" style={{ marginTop: 6, flexWrap: 'wrap', gap: 6 }}>{recentRoots.map((r) => <button key={r} type="button" className="dsh-wb-pickerchip" title={r} onClick={() => setForm({ ...form, root: r })}>↻ {r.split(/[\/]/).filter(Boolean).pop() || r}</button>)}</div>}</div>}
         <div className="dsh-wb-field"><label>项目目标(可选)</label><textarea className="dsh-wb-textarea" rows={3} value={form.goal ?? ''} onChange={(e) => setForm({ ...form, goal: e.target.value })} placeholder="一段话说明这个项目要解决什么问题" /></div>
         <div className="dsh-wb-field"><label>项目说明(可选)</label><textarea className="dsh-wb-textarea" rows={3} value={form.description ?? ''} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="方法论、分工、注意事项等" /></div></>}
       {modal === 'agent' && <><Field autoFocus label="Agent 名称" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><div className="dsh-wb-field"><label>模型</label><select className="dsh-wb-select" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })}>{models.allowed.map((m) => <option key={m}>{m}</option>)}</select></div>

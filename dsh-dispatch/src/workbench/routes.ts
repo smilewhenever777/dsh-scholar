@@ -9,6 +9,7 @@ import type { AutomationService } from './automation.js';
 import type { DispatchService } from '../service.js';
 import { ServiceError } from '../types.js';
 import { workerPreviewFile } from '../workerfs.js';
+import { browseDirs } from './fsbrowse.js';
 
 function send(res: ServerResponse, status: number, data: unknown): void {
   res.statusCode = status;
@@ -112,6 +113,10 @@ export function registerWorkbenchRoutes(ctx: Context, getServices: () => Promise
         if (!area && method === 'GET') { const since = Number(url.searchParams.get('sinceRevision') ?? Number.NaN); return send(res, 200, workbench.overview(Number.isNaN(since) ? undefined : since)); }
         if (area === 'overview' && method === 'GET') { const since = Number(url.searchParams.get('sinceRevision') ?? Number.NaN); return send(res, 200, workbench.overview(Number.isNaN(since) ? undefined : since)); }
         if (area === 'models' && method === 'GET') return send(res, 200, workbench.models());
+        // 目录浏览器(项目路径选择器):仅列目录名,loopback 守卫已覆盖
+        if (area === 'fs' && id === 'browse' && method === 'GET') {
+          return send(res, 200, browseDirs(url.searchParams.get('path') ?? undefined));
+        }
         if (area === 'legacy' && method === 'GET') return send(res, 200, { runs: workbench.legacy() });
         if (area === 'projects' && !id && method === 'POST') return send(res, 201, await workbench.createProject(body));
         if (area === 'projects' && id && method === 'PATCH') return send(res, 200, await workbench.updateProject(id, body));
