@@ -42,10 +42,10 @@ async function harness() {
   const agentA = await workbench.createAgent({ name: '起草员', instructions: '起草', model: 'glm/glm-5.3' });
   const agentB = await workbench.createAgent({ name: '审校员', instructions: '审校', model: 'glm/glm-5.3' });
   return { dir, home, ws, dispatchStore, workbenchStore, runtime, dispatch, workbench, squad, automation, project, agentA, agentB,
-    async finishRun(dispatchId, outcome, summary) {
+    async finishRun(dispatchId, outcome, summary, evidence = []) {
       const child = dispatch.status(dispatchId).runtime.childSessionId;
       runtime.emitRunStart(child, `run-${dispatchId}`);
-      await dispatch.ingestReport(child, { outcome, summary, evidence: [] });
+      await dispatch.ingestReport(child, { outcome, summary, evidence });
       runtime.emitRunEnd(child, `run-${dispatchId}`, 'completed');
       await sleep(150);
     },
@@ -136,7 +136,7 @@ test('小队两步全流程:中间步 in_progress → 接续 → 最后步 in_re
     assert.equal(exec.currentStep, 0);
 
     // 第一步完成 → 任务 in_progress(不是 in_review),exec 仍 running 等接续
-    await h.finishRun(started.dispatchId, 'done', '第一步完成');
+    await h.finishRun(started.dispatchId, 'done', '起草完成,初稿在 draft.md', ['draft.md']);
     let t = h.workbench.taskDetail(task.id).task;
     assert.equal(t.status, 'in_progress', '中间步骤成功应保持 in_progress');
     exec = h.execOf(task.id);
@@ -145,6 +145,12 @@ test('小队两步全流程:中间步 in_progress → 接续 → 最后步 in_re
     // 接续第二步(claim 须放行小队交接的 in_progress)
     const startedNext = await h.workbench.continueSquadExecutions();
     assert.equal(startedNext.length, 1, '应启动第二步');
+    // P1:交接包——上一步结论与证据进入第二步提示词快照
+    const snap2 = h.dispatch.status(startedNext[0]).source.snapshot;
+    assert.ok(String(snap2.nodeDetail).includes('小队交接'), '快照须含交接标记');
+    assert.ok(String(snap2.nodeDetail).includes('起草完成'), '交接须带上一步结论');
+    assert.ok(String(snap2.nodeDetail).includes('draft.md'), '交接须带交付物');
+    assert.ok(h.execOf(task.id).handoffs?.['0']?.summary.includes('起草完成'), 'exec 须记录交接(供 UI 展示)');
     exec = h.execOf(task.id);
     assert.equal(exec.currentStep, 1);
     assert.equal(exec.runIds.length, 2, '两步各留一条 Run');
@@ -309,5 +315,73 @@ test('P0-1:小队执行期间(含交接间隙)任务内容锁定;人工接管落
     assert.equal(exec.state, 'paused_failed');
     assert.ok(exec.pauseReason.includes('人工接管'));
     assert.equal(await h.squad.delete(squad.id), true, '接管后小队可删除');
+  } finally { h.dispose(); }
+});
+
+test('P1:接续启动永久失败(模型失效)→ paused_failed + 任务 blocked,不静默循环', async () => {
+  const h = await harness();
+  try {
+    const squad = await h.squad.create({ name: '坏模型小队', description: '',
+      steps: [{ agentId: h.agentA.id, responsibility: '起草' }, { agentId: h.agentB.id, responsibility: '审校' }] });
+    const task = await h.workbench.createTask({ projectId: h.project.id, title: '坏模型任务', description: '', acceptanceCriteria: '完成', assigneeId: squad.id });
+    const started = await h.workbench.start(task.id, { idempotencyKey: 'badm-1' });
+    await h.finishRun(started.dispatchId, 'done', '第一步完成');
+    // 第一步后把第二步 Agent 模型改成不在允许列表(模拟配置失效)
+    await h.workbenchStore.mutate((root) => { root.agents[h.agentB.id].model = 'glm/glm-nonexistent'; });
+    const next = await h.workbench.continueSquadExecutions();
+    assert.equal(next.length, 0);
+    const exec = h.execOf(task.id);
+    assert.equal(exec.state, 'paused_failed', '永久性失败必须落终态');
+    assert.ok(exec.pauseReason.includes('启动失败'), `原因可见:${exec.pauseReason}`);
+    assert.equal(h.workbench.taskDetail(task.id).task.status, 'blocked', '任务退回 blocked 供处理');
+  } finally { h.dispose(); }
+});
+
+test('P1:missed_offline 按在线区间判定——boot 前到期记错过,lastTick 邻近的照常触发', async () => {
+  const h = await harness();
+  try {
+    const rule = await h.automation.create({ name: '在线区间', cron: '0 9 * * *', timezone: 'Asia/Shanghai',
+      template: { projectId: h.project.id, title: '区间任务', description: '', acceptanceCriteria: '完成', assigneeId: h.agentA.id } });
+    await h.automation.update(rule.id, { expectedRevision: rule.revision, enabled: true });
+    // 模拟调度器已启动:bootedAt=now-10min, lastTickAt=now-40s
+    await h.workbenchStore.mutate((root) => {
+      (root).schedulerMeta = { bootedAt: Date.now() - 600_000, lastTickAt: Date.now() - 40_000 };
+    });
+    // 情形 A:到期时刻在 boot 之前(停机错过)
+    await h.workbenchStore.mutate((root) => {
+      const r = root.automationRules[rule.id];
+      r.nextTriggerAt = Date.now() - 700_000; // 早于 bootedAt
+    });
+    await h.automation.tick();
+    let attempts = h.automation.attempts();
+    assert.equal(attempts[0]?.result, 'missed_offline', 'boot 前到期只记审计');
+    // 情形 B:到期时刻在 lastTick 邻近(在线期间刚到期)→ 正常触发
+    await h.workbenchStore.mutate((root) => {
+      const r = root.automationRules[rule.id];
+      r.nextTriggerAt = Date.now() - 30_000; // 晚于 lastTick-120s
+    });
+    await h.automation.tick();
+    attempts = h.automation.attempts();
+    assert.equal(attempts[0]?.result, 'started', '在线期间到期应正常触发');
+    const t = h.workbench.taskDetail(attempts[0].taskId).task;
+    assert.equal(t.title, '区间任务');
+    await h.cancelRun(attempts[0].dispatchId);
+  } finally { h.dispose(); }
+});
+
+test('P1:store 二次 init 无迁移时不重写文件(mtime 不变)', async () => {
+  const h = await harness();
+  try {
+    const file = join(h.home, 'dispatch', 'workbench.json');
+    mkdirSync(join(h.dir, 'ws-c'));
+    await h.workbench.createProject({ title: 'p2', root: join(h.dir, 'ws-c') });
+    const { statSync } = await import('node:fs');
+    const before = statSync(file).mtimeMs;
+    await new Promise((r) => setTimeout(r, 20));
+    const store2 = new WorkbenchStore(h.home);
+    await store2.init();
+    assert.equal(statSync(file).mtimeMs, before, '无迁移的启动不得重写 workbench.json');
+    assert.equal(Object.keys(store2.snapshot().projects).length, 2, '数据完好');
+    store2.dispose();
   } finally { h.dispose(); }
 });

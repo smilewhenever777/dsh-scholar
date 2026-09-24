@@ -163,9 +163,11 @@ export class WorkbenchStore {
       return;
     }
     try {
-      this.root = parseRoot(readFileSync(this.file, 'utf8'));
-      // 迁移后立即持久化(写前备份由 persist 内置)
-      if (this.root && !this.fault.readOnly) {
+      const raw = readFileSync(this.file, 'utf8');
+      const onDiskVersion = (JSON.parse(raw) as { schemaVersion?: number })?.schemaVersion;
+      this.root = parseRoot(raw);
+      // 仅在实际发生 v1→v2 迁移时重写文件(旧实现每次启动都重写文件与 .bak)
+      if (this.root && !this.fault.readOnly && onDiskVersion !== 2) {
         try { this.persist(this.root); } catch { /* 迁移写入失败保持可用,下次启动再试 */ }
       }
     } catch (e) {
@@ -234,9 +236,10 @@ export class WorkbenchStore {
       // 克隆候选根:fn 内的任何修改只发生在候选上;抛错时丢弃,不影响真实 root
       const candidate = structuredClone(this.root!) as WorkbenchRoot;
       const out = fn(candidate);
-      // fn 成功:候选成为新真实根,持久化(含备份+原子替换)
-      this.root = candidate;
+      // P1(审计):先落盘后换内存——persist 抛错(转只读)时候选被整体丢弃,
+      // 当前进程不会看到"重启即消失"的未持久化修改
       this.persist(candidate);
+      this.root = candidate;
       return out;
     };
     const next = this.chain.then(run, run);

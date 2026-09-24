@@ -53,6 +53,8 @@ export interface TriggerAttempt {
 export interface AutomationStore {
   automationRules: Record<string, AutomationRule>;
   triggerAttempts: Record<string, TriggerAttempt>;
+  /** 调度器在线区间(审计 P1:停机错过按真实在线区间判定,而非固定 2 分钟阈值) */
+  schedulerMeta?: { bootedAt: number; lastTickAt?: number };
 }
 
 export class AutomationService {
@@ -153,6 +155,11 @@ export class AutomationService {
     if (this.timer) return;
     this.timer = setInterval(() => void this.tick(), 30_000);
     (this.timer as { unref?: () => void }).unref?.();
+    // 记录本次宿主启动时刻(清掉旧会话 lastTickAt):bootedAt 之前的到期都是停机错过
+    void this.store.mutate((root) => {
+      const autoRoot = root as never as AutomationStore;
+      autoRoot.schedulerMeta = { bootedAt: Date.now() };
+    }).catch(() => undefined);
     console.log('[dsh-dispatch] 自动化调度器已启动(30s 间隔)');
   }
 
@@ -167,18 +174,29 @@ export class AutomationService {
     this.ticking = true;
     try {
       const now = Date.now();
+      const meta = this.root().schedulerMeta;
+      // 先记本 tick 时刻(长 tick 期间也算在线),再按在线区间判定错过
+      await this.store.mutate((root) => {
+        const autoRoot = root as never as AutomationStore;
+        autoRoot.schedulerMeta = { bootedAt: autoRoot.schedulerMeta?.bootedAt ?? now, lastTickAt: now };
+      });
+      const onlineSince = meta?.bootedAt ?? now;
+      const lastTick = meta?.lastTickAt ?? onlineSince;
       const rules = this.list().filter((r) => r.enabled && r.nextTriggerAt);
       for (const rule of rules) {
         if (rule.nextTriggerAt! > now) continue;
         try {
-          // P0-4:停机不补跑——过期的计划时刻只记审计,不执行;推进游标到未来
-          const missedMs = now - rule.nextTriggerAt!;
-          if (missedMs > 120_000) { // 超过 2 分钟视为停机错过
-            await this.recordMissedOffline(rule, rule.nextTriggerAt!, missedMs);
+          // P1(审计):按真实在线区间判定——到期时刻早于本次启动(停机错过),
+          // 或早于上一次 tick 超 2 分钟(事件循环长时间阻塞),都只记审计不补跑
+          const due = rule.nextTriggerAt!;
+          const missedOffline = due < onlineSince;
+          const missedBlocked = lastTick > 0 && due < lastTick - 120_000;
+          if (missedOffline || missedBlocked) {
+            await this.recordMissedOffline(rule, due, now - due);
             await this.advanceCursor(rule.id);
             continue;
           }
-          await this.tryTrigger(rule.id, rule.nextTriggerAt!);
+          await this.tryTrigger(rule.id, due);
         } catch (e) {
           console.error(`[dsh-dispatch] 自动化规则 ${rule.id} 触发异常:${String((e as Error)?.message ?? e)}`);
         }

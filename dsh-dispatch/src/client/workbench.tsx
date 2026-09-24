@@ -14,10 +14,14 @@ type Task = { id: string; projectId: string; title: string; description: string;
   assignment?: { kind: string; id: string }; updatedAt?: number;
   status: Status; revision: number; runIds: string[]; timeline: Timeline[]; timelineTotal?: number; owner?: { dispatchId: string } };
 type SquadStep = { agentId: string; responsibility: string };
+type SquadExecution = { id: string; taskId: string; squadId: string; steps: SquadStep[]; currentStep: number;
+  state: 'running' | 'paused_failed' | 'completed' | 'aborted'; runIds: string[]; pauseReason?: string;
+  waitReason?: string; waitSince?: number; handoffs?: Record<string, { fromAgent: string; summary: string; evidence?: string[]; at: number }>;
+  createdAt: number; updatedAt: number };
+const EXEC_LABEL: Record<string, string> = { running: '执行中', paused_failed: '已暂停(失败)', completed: '已完成', aborted: '已取消' };
 type Squad = { id: string; name: string; description: string; steps: SquadStep[]; revision: number; createdAt: number; updatedAt: number };
 type AutomationRule = { id: string; name: string; enabled: boolean; cron: string; timezone: string; template: { projectId: string; title: string; description: string; acceptanceCriteria: string; assigneeId: string }; nextTriggerAt?: number; revision: number };
 type TriggerAttempt = { id: string; ruleId: string; ruleName: string; scheduledAt: number; result: string; reason?: string; taskId?: string; at: number };
-type SquadExecution = { id: string; taskId: string; squadId: string; steps: SquadStep[]; currentStep: number; state: string; runIds: string[]; pauseReason?: string; createdAt: number };
 type Run = { id: string; phase: string; createdAt: number; acceptedAt?: number; lastProgressAt?: number; endedAt?: number; runtime: { childSessionId: string; quiescence: string };
   effectiveConfig: { modelProvider: string; model: string; agentProfile?: { name: string } };
   report?: { outcome: string; summary: string; evidence: ({ kind: string; ref: string; summary?: string } | string)[]; nextHint?: string };
@@ -496,6 +500,7 @@ function Workbench() {
   }
   const [legacy, setLegacy] = React.useState<Run[]>([]);
   const [squads, setSquads] = React.useState<Squad[]>([]);
+  const [squadExecs, setSquadExecs] = React.useState<SquadExecution[]>([]);
   const [autoRules, setAutoRules] = React.useState<AutomationRule[]>([]);
   const [autoAttempts, setAutoAttempts] = React.useState<TriggerAttempt[]>([]);
   const [projectId, setProjectId] = React.useState('');
@@ -546,6 +551,7 @@ function Workbench() {
   React.useEffect(() => {
     void refresh(); void api<{ rules: AutomationRule[]; attempts: TriggerAttempt[] }>(`${BASE}/automations`).then((r) => { setAutoRules(r.rules ?? []); setAutoAttempts(r.attempts ?? []); }).catch(() => undefined);
     void api<{ squads: Squad[] }>(`${BASE}/squads`).then((r) => setSquads(r.squads)).catch(() => undefined);
+    void api<{ executions: SquadExecution[] }>(`${BASE}/squad-executions`).then((r) => setSquadExecs(r.executions ?? [])).catch(() => undefined);
     void api<Models>(`${BASE}/models`).then(setModels).catch((e) => setError(errorText(e)));
     const timer = setInterval(() => { if (!document.hidden) void refresh(); }, 5000);
     return () => clearInterval(timer);
@@ -573,6 +579,7 @@ function Workbench() {
     // P0-1:保存后同步刷新 squads/automations(否则新建不出现、启停不更新)
     const refreshCollections = () => {
       void api<{ squads: Squad[] }>(`${BASE}/squads`).then((r) => setSquads(r.squads ?? [])).catch(() => undefined);
+      void api<{ executions: SquadExecution[] }>(`${BASE}/squad-executions`).then((r) => setSquadExecs(r.executions ?? [])).catch(() => undefined);
       void api<{ rules: AutomationRule[]; attempts: TriggerAttempt[] }>(`${BASE}/automations`).then((r) => { setAutoRules(r.rules ?? []); setAutoAttempts(r.attempts ?? []); }).catch(() => undefined);
     };
     try { await action(); await refresh(); refreshCollections(); if (taskId) await refreshDetail(taskId); return true; }
@@ -847,7 +854,28 @@ function Workbench() {
     {sq.description && <p style={{ margin: '4px 0 8px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }}>{sq.description}</p>}
     <div className="dsh-wb-muted">{sq.steps.length} 步:{sq.steps.map((s, j) => `${j + 1}.${s.responsibility || overview.agents.find(a => a.id === s.agentId)?.name || '?'}`).join(' → ')}</div>
   </div>)}</div>
-  {!squads.length && <div className="dsh-wb-empty">暂无小队。创建 2+ 步骤的 Agent 序列来自动化多步工作流。</div>}</>}
+  {!squads.length && <div className="dsh-wb-empty">暂无小队。创建 2+ 步骤的 Agent 序列来自动化多步工作流。</div>}
+  {squadExecs.length > 0 && <><h2 style={{ margin: '22px 0 10px', fontSize: 14 }}>执行记录</h2>
+    {[...squadExecs].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 20).map((ex) => {
+      const exTask = overview.tasks.find((t) => t.id === ex.taskId);
+      const exSquad = squads.find((sq) => sq.id === ex.squadId);
+      const handoffList = Object.entries(ex.handoffs ?? {}).sort((a, b) => Number(a[0]) - Number(b[0]));
+      return <div className="dsh-wb-panel" key={ex.id} style={{ marginBottom: 10 }}>
+        <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}>
+          <div className="dsh-wb-row" style={{ flexWrap: 'wrap', gap: 8 }}>
+            <button type="button" className="dsh-wb-link" onClick={() => exTask && taskButton(exTask.id)}>{exTask?.title ?? ex.taskId}</button>
+            <span className="dsh-wb-countchip" data-tone={ex.state === 'running' ? 'in_progress' : ex.state === 'completed' ? 'done' : ex.state === 'paused_failed' ? 'blocked' : 'todo'}>{EXEC_LABEL[ex.state] ?? ex.state}</span>
+            <span className="dsh-wb-muted">{exSquad?.name ?? ex.squadId} · 第 {Math.min(ex.currentStep + 1, ex.steps.length)}/{ex.steps.length} 步 · {ex.runIds.length} 次 Run · {relTime(ex.updatedAt)}</span>
+          </div>
+        </div>
+        {ex.waitReason && <p className="dsh-wb-muted" style={{ margin: '6px 0 0' }}>⏳ {ex.waitReason}(自 {relTime(ex.waitSince)})</p>}
+        {ex.pauseReason && <p className="dsh-wb-muted" style={{ margin: '6px 0 0' }}>⛔ {ex.pauseReason}</p>}
+        {handoffList.length > 0 && <details style={{ marginTop: 8 }}><summary className="dsh-wb-muted" style={{ cursor: 'pointer', fontSize: 11 }}>交接记录({handoffList.length})</summary>
+          {handoffList.map(([idx, h]) => <p key={idx} style={{ margin: '6px 0 0', fontSize: 12, lineHeight: 1.6 }}>
+            <b>第 {Number(idx) + 1} 步 · {h.fromAgent}</b>:{h.summary}{h.evidence?.length ? <span className="dsh-wb-muted">(交付:{h.evidence.join('、')})</span> : null}</p>)}
+        </details>}
+      </div>;
+    })}</>}</>}
       {page === 'automations' && <><button className="dsh-wb-btn primary" onClick={() => begin('automation')}>新建规则</button><div style={{ height: 16 }} />
   {autoRules.length ? autoRules.map((rule) => <div className="dsh-wb-panel" key={rule.id}>
     <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}>

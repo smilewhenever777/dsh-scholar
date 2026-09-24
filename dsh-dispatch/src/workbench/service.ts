@@ -392,16 +392,35 @@ export class WorkbenchService {
           continue;
         }
 
+        // P1(审计):交接包——把上一步报告结论与证据注入下一步提示词,
+        // 让顺序执行成为真正的协作交接(而非各自重读同一份任务描述)
+        const prevRunId = exec.runIds[exec.currentStep];
+        const prevRun = prevRunId ? this.dispatchStore.get(prevRunId) : undefined;
+        const prevAgentName = root.agents[exec.steps[exec.currentStep].agentId]?.name ?? '上一步';
+        const prevEvidence = (prevRun?.report?.evidence ?? []).map((item) => (typeof item === 'string' ? item : item.ref)).slice(0, 10);
+        const handoffText = prevRun?.report?.summary
+          ? `【小队交接】本任务由小队按步骤执行,你是第 ${exec.currentStep + 2}/${exec.steps.length} 步。
+上一步「${prevAgentName}」结论:${prevRun.report.summary.slice(0, 1500)}${prevEvidence.length ? `
+上一步交付物:${prevEvidence.join('、')}` : ''}
+请在此基础上继续,不要重复已完成的工作。`
+          : undefined;
+
         // P0-2(审计):步骤幂等键不含时间戳——固定键使崩溃重放安全;
         // 启动成功与步骤记账之间崩溃后,下个周期按同键查到既有 Run 直接绑定,不再重发
         const stepKey = `squad:${exec.id}:step:${exec.currentStep + 1}`;
         const bindStep = async (dispatchId: string) => {
           await this.store.mutate((mutRoot) => {
-            const mExecRoot = mutRoot as unknown as { squadExecutions?: Record<string, { currentStep: number; runIds: string[]; updatedAt: number }> };
+            const mExecRoot = mutRoot as unknown as { squadExecutions?: Record<string, { currentStep: number; runIds: string[]; updatedAt: number; waitReason?: string; waitSince?: number; handoffs?: Record<string, { fromAgent: string; summary: string; evidence?: string[]; at: number }> }> };
             const mExec = mExecRoot.squadExecutions?.[exec.id];
             if (mExec) {
               if (!mExec.runIds.includes(dispatchId)) mExec.runIds.push(dispatchId);
               mExec.currentStep = Math.max(mExec.currentStep, exec.currentStep + 1);
+              mExec.waitReason = undefined;
+              mExec.waitSince = undefined;
+              if (handoffText && prevRun?.report?.summary) {
+                mExec.handoffs = { ...(mExec.handoffs ?? {}), [String(exec.currentStep)]:
+                  { fromAgent: prevAgentName, summary: prevRun.report.summary.slice(0, 300), evidence: prevEvidence, at: Date.now() } };
+              }
               mExec.updatedAt = Date.now();
             }
           });
@@ -419,10 +438,37 @@ export class WorkbenchService {
             model: nextAgent.model, toolAllow: nextAgent.toolAllow,
             agentProfile: { id: nextAgent.id, name: nextAgent.name, instructions: nextAgent.instructions,
               revision: nextAgent.revision, toolAllow: nextAgent.toolAllow },
+            extraContext: handoffText,
           });
           await bindStep(startResult.dispatchId);
-        } catch {
-          // 启动失败(如并发已满):exec 保持 running,任务无 owner,下个周期按固定键自动重试
+        } catch (e) {
+          // P1(审计):失败分类可见——容量/工作区占用是暂时性,记录等待原因继续自动重试;
+          // 其余(模型失效等)是永久性,落 paused_failed + 任务 blocked,不再静默循环
+          const code = (e as { code?: string }).code;
+          const retryable = code === 'CAPACITY_EXCEEDED' || code === 'WORKSPACE_OCCUPIED';
+          await this.store.mutate((mutRoot) => {
+            const mExecRoot = mutRoot as unknown as { squadExecutions?: Record<string, { state: string; pauseReason?: string; waitReason?: string; waitSince?: number; updatedAt: number }> };
+            const mExec = mExecRoot.squadExecutions?.[exec.id];
+            if (!mExec) return;
+            if (retryable) {
+              mExec.waitReason = code === 'CAPACITY_EXCEEDED' ? '并发已满,等待空位自动重试' : '工作区被其他任务占用,等待自动重试';
+              mExec.waitSince = mExec.waitSince ?? Date.now();
+            } else {
+              mExec.state = 'paused_failed';
+              mExec.pauseReason = `步骤 ${exec.currentStep + 2} 启动失败:${String((e as Error)?.message ?? e).slice(0, 160)}`;
+            }
+            mExec.updatedAt = Date.now();
+            if (!retryable) {
+              const mTask = mutRoot.tasks[exec.taskId];
+              if (mTask && mTask.status === 'in_progress' && !mTask.owner) {
+                mTask.status = 'blocked';
+                mTask.revision += 1;
+                mTask.updatedAt = Date.now();
+                mTask.timeline.push({ id: newId('ev'), kind: 'run', at: Date.now(),
+                  text: `小队步骤启动失败,任务退回 blocked:${String((e as Error)?.message ?? e).slice(0, 120)}`, actor: 'system' });
+              }
+            }
+          });
         }
       }
     }

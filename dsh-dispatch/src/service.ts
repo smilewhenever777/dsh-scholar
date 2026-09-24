@@ -27,6 +27,8 @@ export interface StartRequestInput {
   model?: string;
   toolAllow?: string[];
   agentProfile?: { id: string; name: string; instructions: string; revision: number; toolAllow: string[] };
+  /** 追加上下文(小队交接包):拼进快照 nodeDetail,进入子代理提示词。 */
+  extraContext?: string;
 }
 
 export interface StartResult {
@@ -181,7 +183,13 @@ export class DispatchService {
       targetType: raw.targetType as 'traj_node' | 'workbench_task' };
     const read = await this.target.readTask(ref);
     if (!read) throw new ServiceError('NOT_FOUND', `目标任务 ${raw.projectId}/${raw.nodeId} 不存在`, 404);
-    const { snapshot, fingerprint } = read;
+    const { fingerprint } = read;
+    // 小队交接包:拼进详情区,随快照进入下一步提示词(prompt.ts 渲染 nodeDetail)
+    const snapshot = raw.extraContext
+      ? { ...read.snapshot, nodeDetail: `${read.snapshot.nodeDetail ?? ''}
+
+${raw.extraContext.slice(0, 4000)}`.trim() }
+      : read.snapshot;
     if (JSON.stringify(snapshot).length > this.config.maxPromptBytes) {
       throw new ServiceError('VALIDATION', '任务快照超出容量上限,拒绝而非静默截断', 413);
     }
