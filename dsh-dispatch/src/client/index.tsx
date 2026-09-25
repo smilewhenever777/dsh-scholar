@@ -6,6 +6,7 @@
 import { zh, en } from './locales';
 import { registerDispatchRightbar } from './rightbar';
 import { WorkbenchOverlay, WorkbenchTrigger } from './workbench';
+import { DispatchSettingsSection } from './SettingsSection';
 
 const NS = 'dsh-dispatch';
 const APPLY_FLAG = '__dshDispatchClientApplied';
@@ -28,4 +29,13 @@ export function apply(ctx: any): void {
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay', id: 'dsh-dispatch-workbench', order: 120, locale: NS,
   }, WorkbenchOverlay));
+  // 宿主设置页分区:内置插件卡是硬编码的,第三方经 settings.section 自注册
+  // (分区公约:服务器100 → 学者110 → 皮肤120 → 主线图130 → AI 团队工作台140)
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'dsh-dispatch',
+    order: 140,
+    label: () => 'AI 团队工作台',
+    locale: NS,
+  }, DispatchSettingsSection));
 }
