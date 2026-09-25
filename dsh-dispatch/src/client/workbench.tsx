@@ -29,7 +29,7 @@ type Run = { id: string; phase: string; createdAt: number; acceptedAt?: number; 
   targetRef: { nodeId: string; canonicalRoot?: string }; targetType: string; cancel?: { reason: string } };
 type Overview = { projects: Project[]; agents: Agent[]; tasks: Task[]; counts: Record<Status, number>; legacyCount: number; concurrency?: { active: number; max: number }; readOnly: boolean; revision?: number; squads?: Squad[] };
 type Event = { seq: number; at: number; kind: string; text?: string; name?: string; error?: boolean; interrupted?: boolean };
-type Models = { allowed: string[]; default: string };
+type Models = { allowed: string[]; default: string; available?: string[] };
 
 const BASE = '/dispatch/workbench';
 const STATUS: Status[] = ['todo', 'in_progress', 'in_review', 'blocked', 'done'];
@@ -858,8 +858,11 @@ function Workbench() {
         <button type="button" aria-label={'移除 ' + m} style={{ border: 0, background: 'transparent', color: 'inherit', cursor: 'pointer', padding: 0 }} disabled={models.allowed.length <= 1} onClick={() => void saveModelPolicy(models.allowed.filter((x) => x !== m))}>✕</button></span>)}
     </div>
     <div className="dsh-wb-row" style={{ marginTop: 10 }}>
-      <input className="dsh-wb-input" style={{ maxWidth: 280 }} placeholder="provider/model,如 glm/glm-5.3-flash" value={newModel} onChange={(e) => setNewModel(e.target.value)} />
-      <button type="button" className="dsh-wb-btn" onClick={() => { const v = newModel.trim(); if (!v) return; if (!/^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(v)) { showToast('格式须为 provider/model(斜杠连接)', 'warn'); return; } if (!models.allowed.includes(v)) void saveModelPolicy([...models.allowed, v]); setNewModel(''); }}>添加</button>
+      <select className="dsh-wb-select" style={{ maxWidth: 280 }} value={newModel} onChange={(e) => setNewModel(e.target.value)} aria-label="选择要添加的模型">
+        <option value="">选择要添加的模型…</option>
+        {(models.available ?? []).filter((m) => !models.allowed.includes(m)).map((m) => <option key={m} value={m}>{m}</option>)}
+      </select>
+      <button type="button" className="dsh-wb-btn" disabled={!newModel} onClick={() => { if (newModel) void saveModelPolicy([...models.allowed, newModel]); setNewModel(''); }}>添加</button>
     </div>
     <p className="dsh-wb-muted" style={{ margin: '8px 0 0', fontSize: 10.5 }}>可用 provider 见 DSH 设置 → 模型(当前已配 kimi/glm/gpt/linkapi 等);删除最后一条不可用。</p>
   </div>

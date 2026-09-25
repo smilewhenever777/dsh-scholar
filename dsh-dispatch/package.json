@@ -82,6 +82,7 @@
     "url": "git+https://github.com/smilewhenever777/dsh-dispatch.git"
   },
   "dependencies": {
-    "@dnd-kit/core": "^6.3.1"
+    "@dnd-kit/core": "^6.3.1",
+    "yaml": "^2.9.1"
   }
 }

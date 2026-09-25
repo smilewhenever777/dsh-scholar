@@ -6,7 +6,7 @@ import { api } from './api';
  * 宿主内置的插件配置卡是硬编码的(仅终端/Agent循环/Subagent/网页搜索),
  * 第三方插件通过 client slot `settings.section` 自注册分区(与 dsh-trajectory 同款)。
  */
-type Policy = { allowed: string[]; default: string; maxConcurrent?: number };
+type Policy = { allowed: string[]; default: string; maxConcurrent?: number; available?: string[] };
 
 const CSS = `
 .dsp-set { display: flex; flex-direction: column; gap: 14px; font-size: 13px; color: var(--dsw-alias-label-base, #d7dae0); }
@@ -16,6 +16,7 @@ const CSS = `
 .dsp-set-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3)); border-radius: 999px; padding: 3px 11px; font-size: 11.5px; }
 .dsp-set-chip button { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0; font-size: 11px; }
 .dsp-set-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.dsp-set select { background: var(--dsw-alias-bg-inset, rgba(0,0,0,.25)); border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3)); border-radius: 8px; padding: 6px 10px; color: inherit; font-size: 12.5px; }
 .dsp-set input { background: var(--dsw-alias-bg-inset, rgba(0,0,0,.25)); border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3)); border-radius: 8px; padding: 6px 10px; color: inherit; font-size: 12.5px; }
 .dsp-set button.primary { background: var(--dsw-alias-fill-primary, #5d74ec); border: 0; color: #fff; border-radius: 8px; padding: 6px 14px; font-size: 12.5px; cursor: pointer; }
 .dsp-set button.plain { background: transparent; border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3)); color: inherit; border-radius: 8px; padding: 6px 14px; font-size: 12.5px; cursor: pointer; }
@@ -63,14 +64,15 @@ export function DispatchSettingsSection(): React.ReactElement {
           <button type="button" aria-label={'移除 ' + m} disabled={policy.allowed.length <= 1 || busy} onClick={() => void save({ allowedModels: policy.allowed.filter((x) => x !== m) })}>✕</button></span>)}
       </div>
       <div className="dsp-set-row" style={{ marginTop: 8 }}>
-        <input placeholder="如 kimi/kimi-k3 或 glm/glm-5.3-flash" value={newModel} style={{ maxWidth: 260 }} onChange={(e) => setNewModel(e.target.value)} />
-        <button type="button" className="plain" disabled={busy} onClick={() => {
-          const v = newModel.trim();
-          if (!v) return;
-          if (!/^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(v)) { setMsg({ ok: false, text: '格式须为 provider/model(斜杠连接)' }); return; }
-          if (!policy.allowed.includes(v)) void save({ allowedModels: [...policy.allowed, v] });
-          setNewModel('');
-        }}>添加</button>
+        {(policy.available?.length ?? 0) > 0
+          ? <>
+            <select className="dsp-set-sel" value={newModel} onChange={(e) => setNewModel(e.target.value)} aria-label="选择要添加的模型">
+              <option value="">选择要添加的模型…</option>
+              {policy.available!.filter((m) => !policy.allowed.includes(m)).map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <button type="button" className="plain" disabled={busy || !newModel} onClick={() => { if (newModel) void save({ allowedModels: [...policy.allowed, newModel] }); setNewModel(''); }}>添加</button>
+          </>
+          : <p>未读取到宿主模型清单(settings.yaml providers),请按 provider/model 手动输入。</p>}
       </div>
     </div>
     <div>

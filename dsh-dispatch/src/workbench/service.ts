@@ -3,6 +3,7 @@ import type { DispatchStore } from '../store.js';
 import type { DispatchRecord } from '../types.js';
 import { DEFAULT_CHILD_TOOL_ALLOW } from '../policy.js';
 import { ServiceError } from '../types.js';
+import { hostModels } from './hostmodels.js';
 import { canonicalProjectRoot, newId, type AgentProfile, type Project, type TaskStatus, type WorkTask,
   type WorkbenchRoot, type WorkbenchStore } from './store.js';
 
@@ -331,7 +332,11 @@ export class WorkbenchService {
     return publicRun(run);
   }
   legacy() { return this.dispatchStore.all().filter((d) => d.targetType === 'traj_node').sort((a, b) => b.createdAt - a.createdAt).map(publicRun); }
-  models() { return { allowed: this.allowedModels(), default: this.defaultModel() }; }
+  models() {
+    const conc = (this.dispatch as unknown as { concurrency?: () => { active: number; max: number } }).concurrency?.();
+    return { allowed: this.allowedModels(), default: this.defaultModel(), maxConcurrent: conc?.max ?? 1,
+      available: hostModels() };
+  }
 
   /**
    * P0-1:小队编排接续——检查 running 小队执行,如果当前步的 Run 已完成则启动下一步。
