@@ -96,7 +96,7 @@ export function previewRunEvidence(run: ReturnType<WorkbenchService['runDetail']
   return result;
 }
 
-export function registerWorkbenchRoutes(ctx: Context, getServices: () => Promise<{ workbench: WorkbenchService; squad?: SquadService; automation?: AutomationService; dispatch: DispatchService } | null>): void {
+export function registerWorkbenchRoutes(ctx: Context, getServices: () => Promise<{ workbench: WorkbenchService; squad?: SquadService; automation?: AutomationService; dispatch: DispatchService; settingsScope?: { update: (patch: Record<string, unknown>) => Promise<void>; get: () => unknown } } | null>): void {
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix', path: '/dispatch/workbench',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -104,15 +104,27 @@ export function registerWorkbenchRoutes(ctx: Context, getServices: () => Promise
         if (!guardLocal(req, res)) return;
         const services = await getServices();
         if (!services) return send(res, 503, { code: 'STORE_READONLY', error: '工作台不可用' });
-        const { workbench, dispatch, squad, automation } = services;
+        const { workbench, dispatch, squad, automation, settingsScope } = services;
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const path = url.pathname.replace(/^\/dispatch\/workbench\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
         const method = req.method ?? 'GET';
-        const body = ['POST', 'PATCH'].includes(method) ? await readBody(req) : {};
+        const body = ['POST', 'PATCH', 'PUT'].includes(method) ? await readBody(req) : {};
         const [area, id, action] = path;
         if (!area && method === 'GET') { const since = Number(url.searchParams.get('sinceRevision') ?? Number.NaN); return send(res, 200, workbench.overview(Number.isNaN(since) ? undefined : since)); }
         if (area === 'overview' && method === 'GET') { const since = Number(url.searchParams.get('sinceRevision') ?? Number.NaN); return send(res, 200, workbench.overview(Number.isNaN(since) ? undefined : since)); }
         if (area === 'models' && method === 'GET') return send(res, 200, workbench.models());
+        // 模型白名单管理:宿主设置页不展示第三方插件命名空间,白名单在工作台内自管
+        if (area === 'model-policy' && method === 'GET') return send(res, 200, workbench.models());
+        if (area === 'model-policy' && (method === 'PUT' || method === 'PATCH')) {
+          if (!settingsScope) return send(res, 503, { error: 'settings 不可用' });
+          const list = Array.isArray(body.allowedModels) ? body.allowedModels.map(String) : [];
+          if (!list.length) return send(res, 422, { code: 'VALIDATION', error: '白名单至少保留一个模型' });
+          const bad = list.find((m) => !/^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(m));
+          if (bad) return send(res, 422, { code: 'VALIDATION', error: `模型格式须为 provider/model,收到:${bad}` });
+          const uniq = [...new Set(list)];
+          await settingsScope.update({ allowedModels: uniq });
+          return send(res, 200, workbench.models());
+        }
         // 目录浏览器(项目路径选择器):仅列目录名,loopback 守卫已覆盖
         if (area === 'fs' && id === 'browse' && method === 'GET') {
           return send(res, 200, browseDirs(url.searchParams.get('path') ?? undefined));

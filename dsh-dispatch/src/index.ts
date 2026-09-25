@@ -135,7 +135,7 @@ export function apply(ctx: Context): void {
   // 否则宿主重启后无人打开工作台时,已启用的自动化规则永远不触发。
   let squadInstance: import('./workbench/squad.js').SquadService | null = null;
   let automationInstance: import('./workbench/automation.js').AutomationService | null = null;
-  let sideServicesPromise: Promise<{ workbench: WorkbenchService; squad: import('./workbench/squad.js').SquadService; automation: import('./workbench/automation.js').AutomationService; dispatch: DispatchService } | null> | null = null;
+  let sideServicesPromise: Promise<{ workbench: WorkbenchService; squad: import('./workbench/squad.js').SquadService; automation: import('./workbench/automation.js').AutomationService; dispatch: DispatchService; settingsScope?: { update: (patch: Record<string, unknown>) => Promise<void>; get: () => unknown } } | null> | null = null;
   const ensureSideServices = () => {
     if (!sideServicesPromise) sideServicesPromise = ensureSideServicesInner().catch((e) => { sideServicesPromise = null; throw e; });
     return sideServicesPromise;
@@ -175,7 +175,8 @@ export function apply(ctx: Context): void {
       automationInstance.start();
       console.log('[dsh-dispatch] 自动化调度器已启动(随内核就绪)');
     }
-    return { workbench: workbenchInstance, squad: squadInstance, automation: automationInstance, dispatch };
+    return { workbench: workbenchInstance, squad: squadInstance, automation: automationInstance, dispatch,
+      settingsScope: scope as { update: (patch: Record<string, unknown>) => Promise<void>; get: () => unknown } };
   };
   registerWorkbenchRoutes(ctx, ensureSideServices);
   void ensureSideServices().catch(() => undefined);

@@ -493,6 +493,14 @@ function Workbench() {
   const [models, setModels] = React.useState<Models>({ allowed: [], default: '' });
   const [browse, setBrowse] = React.useState<BrowseResult | null>(null);
   const [browseError, setBrowseError] = React.useState('');
+  const [newModel, setNewModel] = React.useState('');
+  async function saveModelPolicy(next: string[]) {
+    try {
+      const r = await api<Models>(`${BASE}/model-policy`, { method: 'PUT', body: JSON.stringify({ allowedModels: next }) });
+      setModels(r);
+      showToast('模型白名单已更新,新建 Agent 即刻可选', 'info');
+    } catch (e) { showToast(friendlyError(e), 'error'); }
+  }
   async function loadBrowse(p: string) {
     setBrowseError('');
     try { setBrowse(await api<BrowseResult>(`${BASE}/fs/browse?path=${encodeURIComponent(p)}`)); }
@@ -843,6 +851,18 @@ function Workbench() {
           </div>;
         })}</>}
       {page === 'agents' && <><button className="dsh-wb-btn primary" onClick={() => begin('agent')}>新建 Agent</button><div style={{ height: 16 }} />
+  <div className="dsh-wb-panel" style={{ marginBottom: 16 }}>
+    <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><h2 style={{ fontSize: 13 }}>模型白名单</h2><span className="dsh-wb-muted">新建 Agent 只能从下列模型中选择;保存即热生效(持久化到 DSH settings)</span></div>
+    <div className="dsh-wb-row" style={{ marginTop: 10, flexWrap: 'wrap', gap: 6 }}>
+      {models.allowed.map((m) => <span key={m} className="dsh-wb-pickerchip" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>{m}
+        <button type="button" aria-label={'移除 ' + m} style={{ border: 0, background: 'transparent', color: 'inherit', cursor: 'pointer', padding: 0 }} disabled={models.allowed.length <= 1} onClick={() => void saveModelPolicy(models.allowed.filter((x) => x !== m))}>✕</button></span>)}
+    </div>
+    <div className="dsh-wb-row" style={{ marginTop: 10 }}>
+      <input className="dsh-wb-input" style={{ maxWidth: 280 }} placeholder="provider/model,如 glm/glm-5.3-flash" value={newModel} onChange={(e) => setNewModel(e.target.value)} />
+      <button type="button" className="dsh-wb-btn" onClick={() => { const v = newModel.trim(); if (!v) return; if (!/^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(v)) { showToast('格式须为 provider/model(斜杠连接)', 'warn'); return; } if (!models.allowed.includes(v)) void saveModelPolicy([...models.allowed, v]); setNewModel(''); }}>添加</button>
+    </div>
+    <p className="dsh-wb-muted" style={{ margin: '8px 0 0', fontSize: 10.5 }}>可用 provider 见 DSH 设置 → 模型(当前已配 kimi/glm/gpt/linkapi 等);删除最后一条不可用。</p>
+  </div>
         <div className="dsp-stagger">{overview.agents.map((a, i) => <div className="dsh-wb-panel" key={a.id} style={{ ['--dsp-i' as string]: String(i) }}>
           <div className="dsh-wb-row" style={{ justifyContent: 'space-between' }}><h2>{a.name}</h2><button className="dsh-wb-btn" onClick={() => begin('agent', a.id)}>编辑</button></div>
           {a.displayDescription && <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }}>{a.displayDescription}</p>}
