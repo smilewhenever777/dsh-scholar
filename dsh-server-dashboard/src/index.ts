@@ -25,6 +25,30 @@ import { parseSshConfig } from './host/sshconfig.js';
 import { TEMP_HOT } from './client/thresholds.js';
 import type { LogTail, ServerSnapshot } from './client/types.js';
 
+/** 兼容层:dsh-settings 0.1.5(SettingsProvider.register)与 0.2.0(SettingsForms)
+ * 的双端配置访问。旧端走 register 得 scope;新端插件声明 Config schema(loader
+ * 校验合并进 fiber.config),读值从 fiber.config,写值经 settings.update(带
+ * revision 冲突检测重试)。返回统一形状 { get(), update(patch) }。 */
+export function attachConfigScope(ctx: any, ns: string, schema: any): { get(): any; update(patch: Record<string, unknown>): Promise<void> } {
+  const anySettings = ctx.settings as any;
+  if (typeof anySettings?.register === 'function') {
+    const scope = anySettings.register(ns, schema, {});
+    return { get: () => scope.get(), update: (patch) => scope.update(patch) };
+  }
+  // 0.2.0:读值——fiber.config 已含 profile 默认值(schema 默认在 resolveConfig 时合并)
+  const read = () => {
+    const cfg = ctx.fiber?.config;
+    return cfg && typeof cfg === 'object' ? cfg : {};
+  };
+  const update = async (patch: Record<string, unknown>) => {
+    if (typeof anySettings?.update !== 'function') throw new Error('当前宿主不支持配置写入');
+    // SettingsForms.update 的 ns 是 profile entry id(包名),我们的插件以包名登记
+    const entryId = (ctx as any).fiber?.runtime?.name ?? ns;
+    await anySettings.update(entryId, patch);
+  };
+  return { get: read, update };
+}
+
 export const name = 'dsh-server-dashboard';
 
 /** Host services this plugin waits for (registry, credentials vault, http carrier). */
@@ -122,7 +146,7 @@ function sameAuthIdentity(a: DashboardHostConfig, b: DashboardHostConfig): boole
 /** Only persisted rows can migrate their own historical names. New request
  * bodies never select a source vault entry. Ambiguous legacy names fail closed. */
 async function migrateSavedCredentials(ctx: Context, scope: { get(): unknown; update(patch: Partial<DashboardConfig>): Promise<unknown> }): Promise<void> {
-  const initial = scope.get() as DashboardConfig;
+  const initial = { hosts: [], refreshIntervalS: 30, staleMinutes: 10, alertIdleMin: 5, ...(scope.get() ?? {}) } as DashboardConfig;
   const migrated = new Map<string, string>();
   for (const host of initial.hosts) {
     const old = host.credentialRef, next = derivedCredName(host.id);
@@ -150,7 +174,7 @@ async function migrateSavedCredentials(ctx: Context, scope: { get(): unknown; up
     migrated.set(host.id, old);
   }
   if (migrated.size) {
-    const current = scope.get() as DashboardConfig;
+    const current = { hosts: [], refreshIntervalS: 30, staleMinutes: 10, alertIdleMin: 5, ...((scope.get() ?? {}) as Partial<DashboardConfig>) } as DashboardConfig;
     await scope.update({ hosts: current.hosts.map(h => {
       const before = initial.hosts.find(x => x.id === h.id);
       return before && migrated.get(h.id) === h.credentialRef && sameAuthIdentity(before, h)
@@ -428,7 +452,7 @@ export function planLogPathUpdates(
 }
 
 export function apply(ctx: Context) {
-  const scope = ctx.settings.register(NS, DashboardConfigSchema, {});
+  const scope = attachConfigScope(ctx, NS, DashboardConfigSchema);
   // Every plugin-owned config writer shares this queue. A content revision also
   // detects settings changes made outside this plugin and survives host restarts.
   let configQueue: Promise<unknown> = Promise.resolve();
@@ -467,7 +491,7 @@ export function apply(ctx: Context) {
   // File-based auth cache; vault values bypass it and updates clear backoff.
   const authCache = new Map<string, AuthCacheEntry>();
   ctx.on('credentials/reference-updated', ref => {
-    for (const host of (scope.get() as DashboardConfig).hosts) {
+    for (const host of (((scope.get() ?? {}) as Partial<DashboardConfig>).hosts ?? []) as DashboardHostConfig[]) {
       if (derivedCredName(host.id) !== ref) continue;
       authCache.delete(host.id);
       backoff.delete(host.id);
@@ -508,7 +532,7 @@ export function apply(ctx: Context) {
   };
 
   async function runPoll(config: DashboardConfig): Promise<Record<string, ServerSnapshot>> {
-      await Promise.all(config.hosts.map(async (hostCfg) => {
+      await Promise.all((config.hosts ?? []).map(async (hostCfg) => {
         const back = backoff.get(hostCfg.id);
         if (back && Date.now() < back.nextTryAt) {
           // cooling down — serve the cached error with a fresh timestamp
@@ -528,7 +552,7 @@ export function apply(ctx: Context) {
             auth.onFingerprint = (fp) => {
               try {
                 void withConfigLock(async () => {
-                  const cur = scope.get() as DashboardConfig;
+                  const cur = { hosts: [], refreshIntervalS: 30, staleMinutes: 10, alertIdleMin: 5, ...((scope.get() ?? {}) as Partial<DashboardConfig>) } as DashboardConfig;
                   const live = cur.hosts.find(h => h.id === hostCfg.id);
                   if (!live || !sameAuthIdentity(live, hostCfg) || live.identityFile !== hostCfg.identityFile || live.hostKeyFingerprint) return;
                   await scope.update({ hosts: cur.hosts.map(h => h.id === live.id ? { ...h, hostKeyFingerprint: fp } : h) });
@@ -582,7 +606,7 @@ export function apply(ctx: Context) {
         let patches = planLogPathUpdates(config, snapsForPlan, Object.fromEntries([...logActivity.entries()]), config.staleMinutes, Date.now());
         if (patches.length > 0) {
           await withConfigLock(async () => {
-            const fresh = scope.get() as DashboardConfig;
+            const fresh = { hosts: [], refreshIntervalS: 30, staleMinutes: 10, alertIdleMin: 5, ...((scope.get() ?? {}) as Partial<DashboardConfig>) } as DashboardConfig;
             patches = patches.filter(p => {
               const before = config.hosts.find(h => h.id === p.id);
               const live = fresh.hosts.find(h => h.id === p.id);
@@ -619,13 +643,13 @@ export function apply(ctx: Context) {
       }
       // recycle state (and pooled SSH connections) of hosts removed from the
       // config outside our PUT handler (direct settings edits)
-      sweepRemovedHosts(new Set((scope.get() as DashboardConfig).hosts.map((h) => h.id)));
+      sweepRemovedHosts(new Set((({ hosts: [], ...((scope.get() ?? {}) as Partial<DashboardConfig>) }).hosts ?? []).map((h) => h.id)));
     return cacheSnapshot();
   }
 
   async function pollAll(config: DashboardConfig, force = false, forceHost?: string): Promise<Record<string, ServerSnapshot>> {
     await ensureCredentials();
-    config = scope.get() as DashboardConfig;
+    config = safeConfig();
     // loop: after awaiting an inflight round, RE-CHECK before starting our own —
     // two concurrent ?force=1 requests would otherwise overlap rounds (double
     // config writes from planLogPathUpdates, duplicate stall events)
@@ -766,7 +790,7 @@ export function apply(ctx: Context) {
     handler: async (req, res) => {
       if (!guard(req, res)) return;
       if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
-      const config = scope.get() as DashboardConfig;
+      const config = safeConfig();
       const hostsMeta = config.hosts.map((h) => ({ id: h.id, name: h.name, pinned: h.pinned, archived: h.archived }));
       // ?force=1[&host=<id>] — manual refresh bypasses the failure backoff,
       // optionally only for one host (the offline card's retry button)
@@ -821,7 +845,7 @@ export function apply(ctx: Context) {
         await ensureCredentials();
         if (req.method === 'GET') {
           return await withConfigLock(async () => {
-            const config = scope.get() as DashboardConfig;
+            const config = safeConfig();
             sendJson(res, 200, { config, revision: revisionOf(config) });
           });
         }
@@ -837,7 +861,7 @@ export function apply(ctx: Context) {
             staleMinutes?: number;
           };
           return await withConfigLock(async () => {
-            const current = scope.get() as DashboardConfig;
+            const current = { hosts: [], refreshIntervalS: 30, staleMinutes: 10, alertIdleMin: 5, ...((scope.get() ?? {}) as Partial<DashboardConfig>) } as DashboardConfig;
             if (!body.revision || body.revision !== revisionOf(current)) {
               return sendJson(res, 409, { error: '配置已变化或缺少版本，请重新加载并核对后保存', conflict: true });
             }
@@ -925,7 +949,7 @@ export function apply(ctx: Context) {
             if (credentialCleanupFailed) {
               return sendJson(res, 500, { error: '主机配置已保存，但已删除主机的凭据清理失败，请在宿主凭据管理中检查残留凭据' });
             }
-            const config = scope.get() as DashboardConfig;
+            const config = safeConfig();
             sendJson(res, 200, { ok: true, config, revision: revisionOf(config) });
           });
         }
@@ -973,7 +997,7 @@ export function apply(ctx: Context) {
           password?: string; privateKey?: string;
         };
         if (!body.host) return sendJson(res, 400, { error: 'host 必填' });
-        const auth = await resolveAuthFromBody(ctx, body, (scope.get() as DashboardConfig).hosts);
+        const auth = await resolveAuthFromBody(ctx, body, ((scope.get() ?? {}) as Partial<DashboardConfig>).hosts ?? []);
         const result = await testConnection(auth);
         sendJson(res, 200, result);
       } catch (err) {
@@ -997,7 +1021,7 @@ export function apply(ctx: Context) {
           password?: string; privateKey?: string;
         };
         if (!body.host) return sendJson(res, 400, { error: 'host 必填' });
-        const auth = await resolveAuthFromBody(ctx, body, (scope.get() as DashboardConfig).hosts);
+        const auth = await resolveAuthFromBody(ctx, body, ((scope.get() ?? {}) as Partial<DashboardConfig>).hosts ?? []);
         const candidates = await discoverLogs(auth);
         sendJson(res, 200, { candidates });
       } catch (err) {
@@ -1051,9 +1075,12 @@ export function apply(ctx: Context) {
     watcherTimer = setInterval(watcherTick, intervalMs);
     watcherTimer.unref();
   };
+  /** 0.2.0 下 fiber.config 首帧可能未就绪:统一兜底到 schema 默认,避免 hosts 不可迭代 */
+  const safeConfig = (): DashboardConfig => ({ hosts: [], refreshIntervalS: 30, staleMinutes: 10, alertIdleMin: 5, ...((scope.get() ?? {}) as Partial<DashboardConfig>) });
+
   async function watcherTick() {
     if (eventWaiters.size === 0) return; // nobody long-polling — skip SSH sampling
-    const config = scope.get() as DashboardConfig;
+    const config = safeConfig();
     // the interval may have changed via direct settings edit — re-arm
     const want = Math.max(WATCHER_MIN_MS, config.refreshIntervalS * 1000);
     if (want !== watcherIntervalMs) scheduleWatcher(want);
@@ -1084,7 +1111,7 @@ export function apply(ctx: Context) {
       }
     }
   }
-  scheduleWatcher(Math.max(WATCHER_MIN_MS, ((scope.get() as DashboardConfig).refreshIntervalS || 30) * 1000));
+  scheduleWatcher(Math.max(WATCHER_MIN_MS, (((scope.get() ?? {}) as DashboardConfig).refreshIntervalS || 30) * 1000));
 
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
