@@ -30,6 +30,30 @@ import { WorkbenchTargetAdapter, RoutedTargetAdapter } from './workbench/target.
 import { WorkbenchService } from './workbench/service.js';
 import { guardLocal, registerWorkbenchRoutes } from './workbench/routes.js';
 
+/** 兼容层:dsh-settings 0.1.5(SettingsProvider.register)与 0.2.0(SettingsForms)
+ * 的双端配置访问。旧端走 register 得 scope;新端插件声明 Config schema(loader
+ * 校验合并进 fiber.config),读值从 fiber.config,写值经 settings.update(带
+ * revision 冲突检测重试)。返回统一形状 { get(), update(patch) }。 */
+export function attachConfigScope(ctx: any, ns: string, schema: any): { get(): any; update(patch: Record<string, unknown>): Promise<void> } {
+  const anySettings = ctx.settings as any;
+  if (typeof anySettings?.register === 'function') {
+    const scope = anySettings.register(ns, schema, {});
+    return { get: () => scope.get(), update: (patch) => scope.update(patch) };
+  }
+  // 0.2.0:读值——fiber.config 已含 profile 默认值(schema 默认在 resolveConfig 时合并)
+  const read = () => {
+    const cfg = ctx.fiber?.config;
+    return cfg && typeof cfg === 'object' ? cfg : {};
+  };
+  const update = async (patch: Record<string, unknown>) => {
+    if (typeof anySettings?.update !== 'function') throw new Error('当前宿主不支持配置写入');
+    // SettingsForms.update 的 ns 是 profile entry id(包名),我们的插件以包名登记
+    const entryId = (ctx as any).fiber?.runtime?.name ?? ns;
+    await anySettings.update(entryId, patch);
+  };
+  return { get: read, update };
+}
+
 export const name = 'dsh-dispatch';
 
 /** P0 实测:agents/subagents 是 cordis 服务,必须声明在 inject(否则取属性即抛错)。 */
@@ -78,18 +102,28 @@ function readConfig(scope: { get: () => unknown }): DispatchConfig {
 export function apply(ctx: Context): void {
   console.log(`[dsh-dispatch] P1 执行内核加载(home ${dshHome()})`);
 
-  const scope = ctx.settings.register(NS, ConfigSchema, {});
+  const scope = attachConfigScope(ctx, NS, ConfigSchema);
   let cfg = readConfig(scope);
   let activePolicy: (PolicyConfig & { maxWallMs: number }) | null = null;
-  ctx.effect(() => scope.watch?.(() => {
-    cfg = readConfig(scope);
-    if (activePolicy) {
-      activePolicy.allowedModels = cfg.allowedModels.length ? cfg.allowedModels : [`${cfg.modelProvider}/${cfg.model}`];
-      activePolicy.defaultModel = `${cfg.modelProvider}/${cfg.model}`;
-      activePolicy.maxWallMs = cfg.maxWallMinutes * 60_000;
-      activePolicy.maxConcurrentDispatches = cfg.maxConcurrentDispatches;
-    }
-  }));
+  // 兼容层无 watch:新旧宿主统一用 5s 轻轮询配置指纹(键字段变化才重算策略)
+  let lastSig = '';
+  ctx.effect(() => {
+    const t = setInterval(() => {
+      const next = readConfig(scope);
+      const sig = JSON.stringify([next.allowedModels, next.modelProvider, next.model, next.maxWallMinutes, next.maxConcurrentDispatches]);
+      if (sig === lastSig) return;
+      lastSig = sig;
+      cfg = next;
+      if (activePolicy) {
+        activePolicy.allowedModels = cfg.allowedModels.length ? cfg.allowedModels : [`${cfg.modelProvider}/${cfg.model}`];
+        activePolicy.defaultModel = `${cfg.modelProvider}/${cfg.model}`;
+        activePolicy.maxWallMs = cfg.maxWallMinutes * 60_000;
+        activePolicy.maxConcurrentDispatches = cfg.maxConcurrentDispatches;
+      }
+    }, 5000);
+    t.unref?.();
+    return () => clearInterval(t);
+  });
 
   const memoryTarget = new InMemoryTargetAdapter();
   const legacyTarget = cfg.targetBackend === 'trajectory'
