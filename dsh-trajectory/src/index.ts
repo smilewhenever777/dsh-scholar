@@ -23,6 +23,30 @@ import { registerDispatchOpRoute, registerTrajRoutes } from './routes.js';
 import { registerTrajTools } from './tools.js';
 import { registerTrajPrompt } from './prompt.js';
 
+/** 兼容层:dsh-settings 0.1.5(SettingsProvider.register)与 0.2.0(SettingsForms)
+ * 的双端配置访问。旧端走 register 得 scope;新端插件声明 Config schema(loader
+ * 校验合并进 fiber.config),读值从 fiber.config,写值经 settings.update(带
+ * revision 冲突检测重试)。返回统一形状 { get(), update(patch) }。 */
+export function attachConfigScope(ctx: any, ns: string, schema: any): { get(): any; update(patch: Record<string, unknown>): Promise<void> } {
+  const anySettings = ctx.settings as any;
+  if (typeof anySettings?.register === 'function') {
+    const scope = anySettings.register(ns, schema, {});
+    return { get: () => scope.get(), update: (patch) => scope.update(patch) };
+  }
+  // 0.2.0:读值——fiber.config 已含 profile 默认值(schema 默认在 resolveConfig 时合并)
+  const read = () => {
+    const cfg = ctx.fiber?.config;
+    return cfg && typeof cfg === 'object' ? cfg : {};
+  };
+  const update = async (patch: Record<string, unknown>) => {
+    if (typeof anySettings?.update !== 'function') throw new Error('当前宿主不支持配置写入');
+    // SettingsForms.update 的 ns 是 profile entry id(包名),我们的插件以包名登记
+    const entryId = (ctx as any).fiber?.runtime?.name ?? ns;
+    await anySettings.update(entryId, patch);
+  };
+  return { get: read, update };
+}
+
 export const name = 'dsh-trajectory';
 
 /** Host services this plugin waits for. 服务名是驼峰 `systemPrompt`
@@ -49,7 +73,7 @@ const TrajConfigSchema = z.object({
 });
 
 export function apply(ctx: Context) {
-  const scope = ctx.settings.register(NS, TrajConfigSchema, {});
+  const scope = attachConfigScope(ctx, NS, TrajConfigSchema);
 
   const getConfig = (): TrajConfig => {
     const cfg = scope.get() as TrajConfig | undefined;
