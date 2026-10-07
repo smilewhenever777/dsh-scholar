@@ -8,7 +8,7 @@
  * 安全:路径沙箱(必须在 workspace root 内)、只读、5MB 文件上限、200 文件上限。
  */
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { join, resolve, relative, extname, basename } from 'node:path';
+import { join, resolve, relative, extname, basename, sep } from 'node:path';
 
 export interface ScannedMetric {
   name: string;
@@ -259,4 +259,90 @@ export function docsToSummary(docs: ScannedDoc[], max = 60): Array<{
     conclusion: d.conclusion?.slice(0, 60),
     gate: d.gateVerdict,
   }));
+}
+
+
+/* ═══════════ 实验输出目录扫描(v0.4 traj_scan_runs) ═══════════ */
+
+const RUN_DIR_NAMES = ['runs', 'experiments', 'outputs', 'results', 'output'];
+const RUN_DATE_RE = /(\d{8})/;
+
+export interface ScannedRun {
+  path: string;
+  date?: string;
+  status?: string;
+}
+
+/** 扫描 runs/、experiments/、outputs/ 等目录,发现实验运行。 */
+export async function scanRunDirs(workspaceRoot: string): Promise<ScannedRun[]> {
+  const root = resolve(workspaceRoot);
+  const out: ScannedRun[] = [];
+
+  for (const dirName of RUN_DIR_NAMES) {
+    const dirPath = join(root, dirName);
+    try {
+      const st = await stat(dirPath);
+      if (!st.isDirectory()) continue;
+    } catch { continue; }
+
+    // 递归两层:runs/<experiment>/<run_tag>/ 或 experiments/<Gate>/
+    let level1;
+    try { level1 = await readdir(dirPath, { withFileTypes: true }); } catch { continue; }
+
+    for (const e1 of level1) {
+      if (!e1.isDirectory()) continue;
+      const e1Path = join(dirPath, e1.name);
+      const e1Date = RUN_DATE_RE.exec(e1.name)?.[1];
+
+      // 检查这层是否有 exit_code.txt / status / summary
+      let hasRun = false;
+      let status: string | undefined;
+      try {
+        const files = await readdir(e1Path);
+        for (const f of files) {
+          if (f === 'exit_code.txt' || f.includes('summary') || f.includes('metrics') || f === 'run_manifest.json') {
+            hasRun = true;
+            if (f === 'run_manifest.json') {
+              try {
+                const raw = JSON.parse(await readFile(join(e1Path, f), 'utf8'));
+                status = raw?.status ?? raw?.result_scope;
+              } catch { /* ignore */ }
+            }
+          }
+        }
+      } catch { /* ignore */ }
+
+      if (hasRun) {
+        out.push({
+          path: relative(root, e1Path).split(sep).join('/'),
+          date: e1Date ? fmtDate(e1Date) : undefined,
+          status,
+        });
+        continue;
+      }
+
+      // 再往下一层(run_tag 子目录)
+      if (out.length >= 50) break;
+      try {
+        const level2 = await readdir(e1Path, { withFileTypes: true });
+        for (const e2 of level2) {
+          if (!e2.isDirectory()) continue;
+          const e2Path = join(e1Path, e2.name);
+          const e2Date = RUN_DATE_RE.exec(e2.name)?.[1] ?? e1Date;
+          try {
+            const files = await readdir(e2Path);
+            if (files.some((f) => f.includes('summary') || f.includes('exit_code') || f.includes('metrics'))) {
+              out.push({
+                path: relative(root, e2Path).split(sep).join('/'),
+                date: e2Date ? fmtDate(e2Date) : undefined,
+              });
+            }
+          } catch { /* ignore */ }
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  out.sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+  return out.slice(0, 50);
 }

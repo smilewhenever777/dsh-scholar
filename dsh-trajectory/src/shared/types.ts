@@ -71,6 +71,10 @@ export interface TrajNodeRefs {
   hostId?: string;
   logPath?: string;
   cmdPattern?: string;
+  /** v0.4:关联的源代码文件(相对于工作区根) */
+  sourceFiles?: string[];
+  /** v0.4:实验输出目录(相对于工作区根) */
+  outputDir?: string;
 }
 
 /** 结构化指标(Benchling Results 轻量版):可计算的数据资产,渲染对比表/差值着色。 */

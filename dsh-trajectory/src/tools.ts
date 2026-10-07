@@ -16,7 +16,8 @@ import type { TrajEdgeKind, TrajNode, TrajNodeKind, TrajProject, TrajProjectFile
 import type { TrajStore } from './store.js';
 import { apiBase, fetchDashSnapshots, matchLiveProgress } from './liveprogress.js';
 import { analyzeTrajectory } from './analysis.js';
-import { scanWorkspace, docsToSummary } from './scanner.js';
+import { scanWorkspace, docsToSummary, scanRunDirs } from './scanner.js';
+import { trajAsk } from './askengine.js';
 
 const renderJson = (_args: unknown, value: unknown): ContentBlock[] => [
   { type: 'text', text: JSON.stringify(value, null, 2) },
@@ -184,6 +185,42 @@ export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStor
             documents: toJson(summary),
             hint: '按时间线排列。对 PROGRESS_REPORT / ROUTE_CORRECTION / RESULTS 类型的文档,建议用 Read 工具深读全文后再建主线。',
           });
+        },
+      })),
+
+      /* ---------- v0.4:traj_scan_runs(实验输出目录发现) ---------- */
+      ctx.tools.register(defineTool({
+        name: 'traj_scan_runs',
+        description:
+          '扫描当前工作区的实验输出目录(runs/、experiments/、outputs/),发现已有的实验运行结果。'
+          + '返回每个 run 的路径、日期(从目录名提取)和状态(从 exit_code.txt 或 status 文件)。'
+          + '用于将已有实验结果关联到轨迹节点(refs.outputDir)。',
+        parameters: {},
+        output: { schema: { type: 'object', additionalProperties: true }, render: renderJson },
+        async execute(args: any, exec: any) {
+          const cwd = wsKeyOf(exec);
+          if (!cwd) throw new Error('无法获取当前工作区路径');
+          const runs = await scanRunDirs(cwd);
+          return toJson({ ok: true, runs: toJson(runs) });
+        },
+      })),
+
+      /* ---------- v0.4:traj_ask(对话式研究记忆查询) ---------- */
+      ctx.tools.register(defineTool({
+        name: 'traj_ask',
+        description:
+          '以自然语言查询研究轨迹(研究主线图插件的「研究记忆」)。支持的问题类型:'
+          + '卡在哪(受阻/偏离假设) / 为什么放弃X(证否原因) / 目标变化(版本链) / 进展如何(项目概览) / 哪些还没做(待办列表)。'
+          + '轨迹是你的研究记忆——这个工具让你能回忆和推理,而不只是记录。',
+        parameters: {
+          question: { type: 'string', required: true, description: '自然语言问题' },
+        },
+        output: { schema: { type: 'object', additionalProperties: true }, render: renderJson },
+        presentCall: (args: any) => callView(`查询研究记忆:${String(args.question ?? '').slice(0, 30)}`),
+        async execute(args: any, exec: any) {
+          const store = await getStore();
+          const file = await resolveTarget(store, args, exec);
+          return toJson(trajAsk(file, String(args.question ?? '')));
         },
       })),
 
