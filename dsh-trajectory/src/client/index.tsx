@@ -113,6 +113,12 @@ function computeWs(): WsInfo | null {  try {
     const s = shell.sessions?.list?.getSnapshot?.();
     const currentId = s?.current;
     const cwd = currentId === undefined || currentId === null ? undefined : s?.byId?.[currentId]?.cwd;
+    // 诊断:工作区解析状态(帮助排查 sessions/workspaces 服务不可用的情况)
+    if (!cwd) console.warn('[dsh-trajectory] ws resolve: no cwd from sessions', {
+      hasSessions: !!shell.sessions, hasWorkspaces: !!shell.workspaces,
+      hasList: !!shell.sessions?.list, hasSnapshot: !!shell.sessions?.list?.getSnapshot,
+      currentId, keys: s ? Object.keys(s).slice(0, 5) : 'no snapshot',
+    });
     const w = shell.workspaces?.list?.getSnapshot?.();
     const items = (w?.items ?? []).map((it: any) => ({
       workspaceId: String(it.workspaceId ?? it.path ?? ''),
@@ -125,6 +131,43 @@ function computeWs(): WsInfo | null {  try {
       const base = norm.split('/').pop() || norm;
       return { cwd, title: hit?.title ?? base, items };
     }
+    const recent = items.find((it: any) => it.workspaceId === w?.recentWorkspaceId) ?? items[0];
+    return recent ? { cwd: recent.path, title: recent.title, items } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * DOM fallback:从页面侧栏提取当前工作区(当 sessions/workspaces 服务不可用时的兜底)。
+ * 找 sidebar 中 aria-selected=true 或 .active 的 treeitem,从其文本推断工作区名,
+ * 再匹配 workspaces 列表获取完整路径。
+ */
+function computeWsFromDOM(): WsInfo | null {
+  try {
+    if (!shell.workspaces?.list?.getSnapshot) return null;
+    const w = shell.workspaces.list.getSnapshot();
+    const items = (w?.items ?? []).map((it: any) => ({
+      workspaceId: String(it.workspaceId ?? it.path ?? ''),
+      path: String(it.path ?? ''),
+      title: String(it.title ?? it.path ?? ''),
+    })).filter((it: any) => it.path);
+    if (!items.length) return null;
+
+    // 找侧栏中选中的 treeitem
+    const selected = document.querySelector('[role="treeitem"][aria-selected="true"], [role="treeitem"].active');
+    if (!selected) return null;
+    const text = (selected.textContent || '').trim();
+
+    // 用工作区名匹配
+    const hit = items.find((it: any) =>
+      it.title.toLowerCase() === text.toLowerCase()
+      || text.toLowerCase().startsWith(it.title.toLowerCase())
+      || it.path.split('/').pop()?.toLowerCase() === text.split(/\s/)[0]?.toLowerCase()
+    );
+    if (hit) return { cwd: hit.path, title: hit.title, items };
+
+    // 如果没精确匹配,用最近的 recentWorkspaceId
     const recent = items.find((it: any) => it.workspaceId === w?.recentWorkspaceId) ?? items[0];
     return recent ? { cwd: recent.path, title: recent.title, items } : null;
   } catch {
@@ -1222,7 +1265,16 @@ export function apply(ctx: any) {
     shell.sessions = ctx.get ? ctx.get('sessions') : undefined;
     shell.workspaces = ctx.get ? ctx.get('workspaces') : undefined;
   } catch { shell.sessions = shell.workspaces = undefined; }
-  const recomputeWs = () => wsBus.set(computeWs());
+  const recomputeWs = () => {
+    const primary = computeWs();
+    // fallback:如果 sessions 服务不可用导致 primary 为 null 或无 cwd,尝试 DOM 推断
+    if (!primary?.cwd) {
+      const fallback = computeWsFromDOM();
+      wsBus.set(fallback ?? primary);
+    } else {
+      wsBus.set(primary);
+    }
+  };
   recomputeWs();
   // follow workspace/session switching live
   try {
