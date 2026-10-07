@@ -464,6 +464,27 @@ function DigestNode({ node, progress, t, onOpen, onDelete, onDeleteEntry, onStat
             {node.refs?.paperId ? '▣' : '◆'} <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{truncate(node.refs?.paperLabel || node.refs?.cardLabel || node.refs?.paperId || node.refs?.cardId || '', 18)}</span>
           </button>
         )}
+        {/* v0.4: 源代码/输出目录引用(点击复制路径) */}
+        {(node.refs?.sourceFiles?.length || node.refs?.outputDir) && (
+          <span
+            title={[...(node.refs?.sourceFiles ?? []), node.refs?.outputDir].filter(Boolean).join('\n')}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9,
+              color: T.caption, cursor: 'pointer', maxWidth: 160,
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              const paths = [...(node.refs?.sourceFiles ?? []), node.refs?.outputDir].filter(Boolean);
+              if (paths[0]) {
+                navigator.clipboard?.writeText(paths[0]).catch(() => {});
+              }
+            }}
+          >
+            📁 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {node.refs?.outputDir ?? node.refs?.sourceFiles?.[0] ?? ''}
+            </span>
+          </span>
+        )}
         {!present && entries.length > 0 && (
           <button
             type="button"

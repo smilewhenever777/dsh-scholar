@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TrajStore } from '../dist/store.js';
 import { matchLiveProgress } from '../dist/liveprogress.js';
+import { parseFilename, parseContent, sandboxPath } from '../dist/scanner.js';
+import { trajAsk } from '../dist/askengine.js';
 import {
   applyNodePatch, countsByStatus, createNode, newEdgeValidated, normalizeMainline,
 } from '../dist/domain.js';
@@ -198,7 +200,77 @@ try {
     check('liveprogress dashboard 缺席降级', matchLiveProgress(mkFile({ logPath: '/x' }), null).length === 0);
   }
 
-  /* ---------- stats ---------- */
+  /* ---------- scanner(v0.4 自动摄取)---------- */
+  {
+    check('parseFilename: WEDETECT 模式', (() => {
+      const r = parseFilename('WEDETECT_REF_STAGE5_D4_RESULTS_20260904.md');
+      return r.subsystem === 'WEDETECT_REF_STAGE5_D4' && r.docType === 'RESULTS' && r.date === '2026-09-04';
+    })());
+    check('parseFilename: RAGTRACK 模式', (() => {
+      const r = parseFilename('RAGTRACK_DECISION_20260912.md');
+      return r.subsystem === 'RAGTRACK' && r.docType === 'DECISION' && r.date === '2026-09-12';
+    })());
+    check('parseFilename: 无日期', (() => {
+      const r = parseFilename('README.md');
+      return r.date === undefined;
+    })());
+    check('parseContent: 结论提取', (() => {
+      const r = parseContent(`# Title
+## 结论
+B2 判定 NOGO:小目标加权恢复不足。
+## 下一节
+内容`);
+      return r.conclusion?.includes('NOGO') === true;
+    })());
+    check('parseContent: section 标题', (() => {
+      const r = parseContent(`# T
+## A
+content
+## B
+more`);
+      return r.sectionTitles.length === 2 && r.sectionTitles[0] === 'A';
+    })());
+    check('parseContent: 空', (() => {
+      const r = parseContent('');
+      return r.conclusion === undefined && r.sectionTitles.length === 0;
+    })());
+    check('sandboxPath: 正常', (() => {
+      try { sandboxPath('/root', 'sub/file.md'); return true; } catch { return false; }
+    })());
+    check('sandboxPath: 越界拒绝', (() => {
+      try { sandboxPath('/root', '../etc/passwd'); return false; } catch { return true; }
+    })());
+  }
+
+  /* ---------- askengine(v0.4 对话式)---------- */
+  {
+    const mkFile = () => ({
+      project: { id: 'p_t', name: 'Test', mainline: [], status: 'active', createdAt: 0, updatedAt: 0 },
+      goals: [
+        { id: 'g1', projectId: 'p_t', text: 'Goal v1', version: 1, status: 'superseded', createdAt: 0 },
+        { id: 'g2', projectId: 'p_t', text: 'Goal v2 current', version: 2, status: 'active', createdAt: 1 },
+      ],
+      hypotheses: [
+        { id: 'h1', projectId: 'p_t', goalVersionId: 'g2', text: '卡住的假设', status: 'active', track: 'detour', createdAt: 0, updatedAt: 0 },
+        { id: 'h2', projectId: 'p_t', goalVersionId: 'g2', text: '已证否假设', status: 'falsified', track: 'mainline', outcomeReason: '精度不足', createdAt: 0, updatedAt: 0 },
+      ],
+      goalLog: [],
+      nodes: [
+        { id: 'n1', projectId: 'p_t', hypothesisId: 'h1', kind: 'experiment', title: '受阻实验', status: 'blocked', createdAt: 0, updatedAt: 0 },
+        { id: 'n2', projectId: 'p_t', hypothesisId: 'h2', kind: 'experiment', title: '完成实验', status: 'done', createdAt: 0, updatedAt: 0 },
+        { id: 'n3', projectId: 'p_t', hypothesisId: 'h1', kind: 'experiment', title: '待办实验', status: 'todo', createdAt: 0, updatedAt: 0 },
+      ],
+      edges: [],
+    });
+    check('ask: 卡在哪', trajAsk(mkFile(), '我现在卡在哪').topic === '当前卡点');
+    check('ask: 为什么放弃', trajAsk(mkFile(), '上次为什么放弃计数头').answer.includes('精度不足'));
+    check('ask: 目标变化', trajAsk(mkFile(), '目标经历了哪些变化').answer.includes('v2'));
+    check('ask: 进展', trajAsk(mkFile(), '当前进展如何').topic === '项目进展');
+    check('ask: 待办', trajAsk(mkFile(), '哪些还没做').answer.includes('待办实验'));
+    check('ask: 默认路由', trajAsk(mkFile(), 'random question').topic === '项目概览');
+  }
+
+  /* ---------- stats---------- */
   const store4 = new TrajStore(dir);
   await store4.init();
   check('stats 空态', store4.stats().projects === 0 && store4.stats().nodes === 0);

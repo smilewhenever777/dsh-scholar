@@ -122,5 +122,5 @@ export function apply(ctx: Context) {
   registerTrajTools(ctx, getStore);
   registerTrajPrompt(ctx, { getStore: () => store });
 
-  console.log('[dsh-trajectory] host half ready: settings ns + /traj/* routes + 10 agent tools + systemPrompt');
+  console.log('[dsh-trajectory] host half ready: settings ns + /traj/* routes + 17 agent tools + systemPrompt');
 }
