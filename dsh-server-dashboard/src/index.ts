@@ -108,6 +108,10 @@ const DashboardConfigSchema = z.object({
   staleMinutes: z.number().step(1).min(1).max(1440).default(10),
   alertIdleMin: z.number().step(1).min(1).max(120).default(5),
 });
+// 0.2.0 SettingsForms 写路径要求插件暴露 Config 且字段 volatile 才可运行时编辑;
+// 宿主只认 schema.meta.volatile,本地 schemastery 无 .volatile() 方法,故顶层整体标注
+(DashboardConfigSchema.meta as Record<string, unknown>).volatile = true;
+export const Config = DashboardConfigSchema;
 
 // 0.1.5 起 dsh-settings 移除了 settingsNamespace 包装:命名空间直接以字面量传入
 const NS = 'server-dashboard';
@@ -368,6 +372,10 @@ export interface GpuBusyState {
   busy: boolean[];
   idleSince: number[];
   alerted: boolean[];
+  /** consecutive polls reporting processes — a busy streak of 2+ is required
+   *  to re-arm the crash alert, so one glitchy nvidia-smi (half-dead SSH)
+   *  cannot manufacture a new "episode" and re-toast every idleMinutes */
+  streak?: number[];
 }
 
 export function planGpuAlerts(
@@ -382,6 +390,7 @@ export function planGpuAlerts(
     busy: new Array(n).fill(false),
     idleSince: new Array(n).fill(0),
     alerted: new Array(n).fill(false),
+    streak: new Array(n).fill(0),
   };
   const fired: { gpuIndex: number; min: number }[] = [];
   for (let i = 0; i < n; i++) {
@@ -389,8 +398,15 @@ export function planGpuAlerts(
     const since = state?.idleSince[i] ?? 0;
     const wasAlerted = state?.alerted[i] ?? false;
     st.busy[i] = busy;
+    (st.streak as number[])[i] = busy ? (state?.streak?.[i] ?? 0) + 1 : 0;
     if (busy) {
-      // re-arm on activity
+      if ((state?.streak?.[i] ?? 0) + 1 < 2) {
+        // single-poll glitch (half-dead SSH showing phantom processes):
+        // PRESERVE the episode — resetting here would re-arm and re-toast
+        st.idleSince[i] = since;
+        st.alerted[i] = wasAlerted;
+      }
+      // streak ≥2 = confirmed activity → genuinely re-arm (defaults 0/false)
       continue;
     }
     if (since > 0) {
@@ -425,9 +441,9 @@ export function planLogPathUpdates(
   activity: Record<string, Record<string, LogActivity>>,
   staleMinutes: number,
   now: number,
-): { id: string; logPath: string }[] {
+): { id: string; logPath: string; silent?: boolean }[] {
   const staleMs = staleMinutes * 60_000;
-  const out: { id: string; logPath: string }[] = [];
+  const out: { id: string; logPath: string; silent?: boolean }[] = [];
   for (const hostCfg of config.hosts) {
     const snap = snapshots[hostCfg.id];
     if (!snap || !snap.ok) continue;
@@ -435,7 +451,13 @@ export function planLogPathUpdates(
     if (hostCfg.logPath && snap.log && snap.log.mtimeMs > 0 && snap.log.path === hostCfg.logPath) {
       // stalled = no observed change within the threshold (first observation
       // starts its grace period, so a genuinely old log is not cleared at once)
-      if (!activityFresh(record, hostCfg.logPath, now, staleMs)) out.push({ id: hostCfg.id, logPath: '' });
+      if (!activityFresh(record, hostCfg.logPath, now, staleMs)) {
+        // smart stall: if all GPUs are idle (no compute processes, low util),
+        // the experiment simply finished — clear silently without alerting
+        const gpusBusy = (snap.gpus ?? []).some((g) =>
+          (g.utilPercent ?? 0) >= 5 || (g.processes ?? []).some((p) => (p.memoryMiB ?? 0) > 100));
+        out.push({ id: hostCfg.id, logPath: '', silent: !gpusBusy });
+      }
     } else if (!hostCfg.logPath) {
       // adopt: freshest changed-recently per-GPU log; mtimeMs tiebreak compares
       // clocks of the SAME remote host, so skew cannot reorder the candidates
@@ -628,14 +650,18 @@ export function apply(ctx: Context) {
             if (!p.logPath) {
               // the stalled log is being dropped from the snapshot — record a
               // one-shot notice, otherwise the client can never see the
-              // "unchanged for N minutes" evidence its toast is built on
-              const clearedPath = config.hosts.find((h) => h.id === p.id)?.logPath ?? '';
-              pendingNotices.set(p.id, { path: clearedPath, minutes: config.staleMinutes, at: Date.now() });
-              emitStall(p.id, config.hosts.find((h) => h.id === p.id)?.name ?? p.id, config.staleMinutes);
+              // "unchanged for N minutes" evidence its toast is built on.
+              // silent=true (GPUs idle, experiment finished normally): clear
+              // without the stall toast — finishing an experiment is not an anomaly
+              if (!p.silent) {
+                const clearedPath = config.hosts.find((h) => h.id === p.id)?.logPath ?? '';
+                pendingNotices.set(p.id, { path: clearedPath, minutes: config.staleMinutes, at: Date.now() });
+                emitStall(p.id, config.hosts.find((h) => h.id === p.id)?.name ?? p.id, config.staleMinutes);
+              }
               const cached = cache.get(p.id);
               if (cached) cache.set(p.id, { ...cached, log: undefined, series: undefined });
             }
-            ctx.logger.info(`[dsh-server-dashboard] ${p.id} logPath ${p.logPath ? `自动接管 ${p.logPath}` : '已停滞，自动清除'}`);
+            ctx.logger.info(`[dsh-server-dashboard] ${p.id} logPath ${p.logPath ? `自动接管 ${p.logPath}` : p.silent ? '实验已结束，静默清除' : '已停滞，自动清除'}`);
           }
         }
       } catch (err) {
@@ -1134,7 +1160,7 @@ export function apply(ctx: Context) {
       const deliver = () => {
         res.setHeader('content-type', 'application/json; charset=utf-8');
         res.end(JSON.stringify({
-          events: eventLog.filter((e) => e.seq > since).map((e) => e.payload),
+          events: eventLog.filter((e) => e.seq > since).map((e) => ({ ...(e.payload as object), seq: e.seq })),
           last: eventSeq,
         }));
       };

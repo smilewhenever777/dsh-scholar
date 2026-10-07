@@ -109,6 +109,9 @@ function notifyOS(body: string): void {
   } catch { /* Notification ctor can throw on some platforms — never break polling */ }
 }
 
+/** event seqs already toasted — guards against re-delivered duplicates */
+const seenEventSeqs = new Set<number>();
+
 /** session-scoped alert history for the bell dropdown (capped, newest first) */
 interface AlertCenterEntry {
   id: number;
@@ -366,6 +369,16 @@ function useDashboard(t: TFunc) {
     const onEvents = (events: any[]) => {
       for (const msg of events) {
         if (!mountedRef.current) continue;
+        // event-level dedupe by server seq: re-delivery (reconnect replay,
+        // visibility aborts, multi-poll races) must not re-toast the same
+        // alert — one notification per episode is the contract
+        if (typeof msg?.seq === 'number') {
+          if (seenEventSeqs.has(msg.seq)) continue;
+          seenEventSeqs.add(msg.seq);
+          if (seenEventSeqs.size > 200) {
+            for (const k of [...seenEventSeqs].slice(0, 100)) seenEventSeqs.delete(k);
+          }
+        }
         if (msg?.type === 'stall') {
           pushToasts([{ id: ++toastSeq.current, hostId: msg.hostId, hostName: msg.hostName, minutes: msg.minutes ?? 10 }]);
           notifyOS(`${msg.hostName}: ${tRef.current('log.stale', { minutes: msg.minutes ?? 10 })}`);
@@ -572,22 +585,62 @@ function outerFootprint(selfId: string) {
 	}
 	return { open, width };
 }
-/** 官方右侧栏(0.1.5)是布局内占位而非 overlay:抽屉应让位于它,不能盖在它上面。
- *  测法:从聊天输入框向上找第一棵「右缘离窗口右沿 ≥16px 且高度过半屏」的列,
- *  其右缘缺口即右侧栏宽度;右栏关闭或浮出成窗(浮窗不占布局位)时列级祖先都贴满
- *  宽度 → 返回 0。16px 阈值同时排除窗口滚动条宽度。 */
+/** 官方右侧栏是布局内占位而非 overlay:抽屉应让位于它,不能盖在它上面。
+ *  测法:直接扫描「右缘贴窗口右沿、高度>70%视口」的布局列,取最宽者的右缘缺口。 */
 function officialRightInset(): number {
 	try {
-		const input = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-		if (!input) return 0;
-		let el = input.parentElement;
-		const vw = window.innerWidth;
+		const vw = window.innerWidth, vh = window.innerHeight;
+		let best = 0;
+		for (const el of Array.from(document.querySelectorAll('body *'))) {
+			if (el.closest('[data-dsh-plugin]')) continue;
+			const r = el.getBoundingClientRect();
+			if (r.width < 28 || r.width > vw * .6 || r.height <= vh * .7) continue;
+			if (Math.abs(vw - r.right) > 8 || r.x < vw * .4) continue;
+			const py = Math.round(Math.min(r.top + r.height / 2, vh - 2));
+			const probe = (px: number) => { const hit = document.elementFromPoint(px, py); return !!hit && (el.contains(hit) || hit.contains(el)); };
+			if (!probe(Math.round(Math.min(vw - 2, r.right - Math.min(r.width / 2, 40)))) && !probe(Math.round(Math.min(vw - 2, r.x + Math.min(r.width / 2, 40))))) continue;
+			best = Math.max(best, Math.round(vw - r.x));
+		}
+		return best;
+	} catch {
+		return 0;
+	}
+}
+
+/** 找官方顶栏的「打开/收起右侧边栏」按钮(只认可见的那颗,优先收起钮)。 */
+function findOfficialSidebarToggle(): HTMLButtonElement | null {
+	try {
+		const list = Array.from(document.querySelectorAll('button')).filter(b => {
+			if (!/右侧边栏/.test(b.getAttribute('aria-label') || '')) return false;
+			const r = b.getBoundingClientRect();
+			return r.width > 0 && r.x >= 0 && r.x < window.innerWidth && getComputedStyle(b).visibility !== 'hidden';
+		});
+		return list.find(b => /收起/.test(b.getAttribute('aria-label') || '')) ?? list[0] ?? null;
+	} catch {
+		return null;
+	}
+}
+function officialSidebarOpen(): boolean {
+	return officialRightInset() > 0;
+}
+
+/** 应用顶部两行的总高:抽屉按官方右侧栏同款从顶栏下方开始。 */
+function officialTopInset(): number {
+	try {
+		const btn = Array.from(document.querySelectorAll('button')).find(b => {
+			if (!/右侧边栏/.test(b.getAttribute('aria-label') || '')) return false;
+			const r = b.getBoundingClientRect();
+			return r.width > 0 && r.x >= 0 && r.x < window.innerWidth && getComputedStyle(b).visibility !== 'hidden';
+		});
+		if (!btn) return 0;
+		let best = 0;
+		let el = btn.parentElement;
 		while (el && el !== document.body) {
 			const r = el.getBoundingClientRect();
-			if (r.height > window.innerHeight * .5 && vw - r.right >= 16) return Math.round(vw - r.right);
+			if (r.height > 8 && r.height <= 72 && r.width >= window.innerWidth * .3) best = Math.max(best, Math.round(r.bottom));
 			el = el.parentElement;
 		}
-		return 0;
+		return best;
 	} catch {
 		return 0;
 	}
@@ -596,9 +649,10 @@ function officialRightInset(): number {
 *  at most 60% of the viewport, and never past the absolute max. 窄窗(<500px)
 *  时 60% 上限优先于绝对最小宽,抽屉不会吞掉整个窗口 */
 function clampW(w: number): number {
-	const relative = typeof window === "undefined" ? DRAWER_MAX : Math.floor(window.innerWidth * .6);
-	const min = Math.min(DRAWER_MIN, relative);
-	return Math.max(min, Math.min(Math.max(min, Math.min(DRAWER_MAX, relative)), w));
+	// 宽度上限跟随视口:主内容保 1100(侧栏断点)之内自由拖宽,绝对上限 1200
+	const dyn = typeof window === "undefined" ? DRAWER_MAX : Math.max(DRAWER_MIN, Math.min(1200, window.innerWidth - 1100));
+	const min = Math.min(DRAWER_MIN, dyn);
+	return Math.max(min, Math.min(Math.max(min, dyn), w));
 }
 function Drawer({ t }: { t: TFunc }) {
 	const mode = usePanelMode();
@@ -611,6 +665,48 @@ function Drawer({ t }: { t: TFunc }) {
 	const [dragging, setDragging] = React.useState(false);
 	const [handleHover, setHandleHover] = React.useState(false);
 	const [dashFull, setDashFull] = React.useState(false);
+	// 应用顶部两行高度(1s 轮询):抽屉按官方侧边栏同款从顶栏下方开始
+	const [topInset, setTopInset] = React.useState(() => officialTopInset());
+	React.useEffect(() => {
+		const read = () => setTopInset((cur) => { const next = officialTopInset(); return cur === next ? cur : next; });
+		const timer = setInterval(read, 1000);
+		return () => clearInterval(timer);
+	}, []);
+	const dockTop = topInset > 0 ? `${topInset}px` : "var(--dsh-desktop-titlebar-inset, 0px)";
+	// 压缩让位(squeeze):停靠时把主内容右缘压出全部右舷面板总宽(变量+!important 抗应用重算)
+	React.useEffect(() => {
+		const apply = () => {
+			try {
+				const dock = (window as unknown as { __dshDock?: Record<string, { open: boolean; width: number }> }).__dshDock ?? {};
+				let strip = 0;
+				for (const v of Object.values(dock)) if (v?.open && v.width > 0) strip += v.width;
+				const capped = strip;
+				document.body.style.transition = "margin-right .18s ease";
+				document.body.style.marginRight = capped > 0 ? `${capped}px` : "";
+				let sqStyle = document.getElementById("dsh-squeeze-style") as HTMLStyleElement | null;
+				if (!sqStyle) {
+					sqStyle = document.createElement("style");
+					sqStyle.id = "dsh-squeeze-style";
+					document.head.appendChild(sqStyle);
+				}
+				const frameEl = document.querySelector('[class*="frame"]');
+				if (frameEl) {
+					const token = String(frameEl.className).split(' ')[0];
+					if (token) sqStyle!.textContent = `.${token} { width: calc(100vw - var(--dsh-squeeze, 0px)) !important; transition: width .18s ease; }`;
+				}
+				document.documentElement.style.setProperty("--dsh-squeeze", capped > 0 ? `${capped}px` : "0px");
+			} catch { /* 布局探测失败则退回覆盖式 */ }
+		};
+		apply();
+		window.addEventListener("dsh-dock-change", apply);
+		const timer = setInterval(apply, 1000);
+		return () => {
+			window.removeEventListener("dsh-dock-change", apply);
+			clearInterval(timer);
+			document.body.style.marginRight = "";
+			document.documentElement.style.setProperty("--dsh-squeeze", "0px");
+		};
+	}, [mode, dashFull]);
 	// 浮动窗口几何:fixed 定位 + 头部拖拽 + 角柄缩放,localStorage 记忆
 	const FLOAT_MIN_W = 300, FLOAT_MIN_H = 220; // referenced by clampFloat below
 	const floatGeomRef = React.useRef({ x: 0, y: 0, w: 380, h: 520 });
@@ -767,7 +863,7 @@ function Drawer({ t }: { t: TFunc }) {
 		"data-dsh-plugin": "dsh-server-dashboard",
 		"data-dsh-surface": "drawer",
 		style: {
-			position: "absolute",
+			position: "fixed",
 			inset: 0,
 			pointerEvents: "none",
 			// float 态提层到 115:必须压过全部右舷抽屉(scholar 90/trajectory 110),
@@ -779,7 +875,7 @@ function Drawer({ t }: { t: TFunc }) {
 			style: {
 				position: "absolute",
 					top: "var(--dsh-desktop-titlebar-inset, 0px)",
-					...(squeezed ? { left: 0, right: "auto" } : { right: outerW + officialInset }),
+					...(squeezed ? { left: 0, right: "auto" } : { right: outerW }),
 					bottom: 0,
 					width: 32,
 				pointerEvents: "auto",
@@ -844,7 +940,7 @@ function Drawer({ t }: { t: TFunc }) {
 					top: "var(--dsh-desktop-titlebar-inset, 0px)",
 					// 挤压兜底:右栏+内侧面板把可用宽吃光(<DRAWER_MIN)时改锚左缘——
 					// 宁可盖住会话侧栏,也不能让抽屉整块出屏(否则又是"消失但占位")
-					...(squeezed ? { left: 0, right: "auto" } : { right: dashFull ? 0 : outerW + officialInset, left: dashFull ? 0 : "auto" }),
+					...(squeezed ? { left: 0, right: "auto" } : { right: dashFull ? 0 : outerW, left: dashFull ? 0 : "auto" }),
 					bottom: 0,
 					width: dashFull ? "100vw" : width,
 					pointerEvents: "auto",
@@ -1000,6 +1096,14 @@ function Drawer({ t }: { t: TFunc }) {
 									d: Icons.refresh,
 									size: 15
 								})
+							})
+						}),
+						mode !== "float" && /* @__PURE__ */ (0, React.createElement)(IconButton, {
+							label: officialSidebarOpen() ? "收起官方右侧栏" : "展开官方右侧栏",
+							onClick: () => findOfficialSidebarToggle()?.click(),
+							icon: /* @__PURE__ */ (0, React.createElement)(Icon, {
+								d: Icons.dock,
+								size: 15
 							})
 						}),
 						mode !== "float" && /* @__PURE__ */ (0, React.createElement)(IconButton, {

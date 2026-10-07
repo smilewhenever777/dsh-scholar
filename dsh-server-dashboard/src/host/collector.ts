@@ -71,6 +71,7 @@ function connect(auth: SshAuth, keepalive = false): Promise<import('ssh2').Clien
       password: auth.password,
       readyTimeout: CONNECT_TIMEOUT_MS,
       keepaliveInterval: keepalive ? KEEPALIVE_INTERVAL_MS : 0,
+      keepaliveCountMax: 2, // 15s × 2 = 30s to declare the connection dead
       // F04:主机密钥验证——有已存指纹必须匹配(变化即拒绝,可能被中间人替换);
       // 无指纹时 TOFU 记录并回传持久化。ssh2 默认接受任意主机密钥,加密≠认证。
       hostVerifier: (key: Buffer) => {
@@ -156,6 +157,12 @@ export function disposeState(state: CollectState): void {
     try { state.ssh.conn.end(); } catch { /* already closing */ }
   }
   state.ssh = undefined;
+}
+
+/** exec with ONE silent retry — transient channel drops (the flapping source
+ *  on half-alive pooled connections) recover without a full reconnect */
+function execRetry(conn: import('ssh2').Client, cmd: string): Promise<string> {
+  return exec(conn, cmd).catch((first) => exec(conn, cmd).catch(() => { throw first; }));
 }
 
 function exec(conn: import('ssh2').Client, cmd: string): Promise<string> {
@@ -718,6 +725,8 @@ export interface CollectState extends LogIngestState {
   ssh?: PooledSsh;
   /** consecutive log-read failures on the pooled connection */
   sshFail?: number;
+  /** last known per-GPU process lists — phantom-idle guard reuse */
+  lastProcs?: GpuProcessInfo[][];
   /** in-flight handshake shared by concurrent acquireConn callers (anti double-connect) */
   connecting?: Promise<import('ssh2').Client>;
   /** set by disposeState — later acquireConn attempts fail fast (no post-unload SSH) */
@@ -729,6 +738,25 @@ const MAX_GPU_SERIES = 8;
 const MAX_GPU_POINTS = 150;
 const LOG_CACHE_TTL_MS = 5 * 60_000;
 const LOG_CACHE_MISS_TTL_MS = 60_000;
+
+/**
+ * Phantom-idle guard (pure): a card with significant memory allocated but an
+ * EMPTY process list means the compute-apps query died mid-stream (half-alive
+ * SSH), not that the training vanished — reuse the previous poll's attribution
+ * so the UI and the busy/idle alert engine never see the flap.
+ */
+export function stabilizeProcs(
+  gpus: GpuInfo[],
+  prev: GpuProcessInfo[][] | undefined,
+  memFloorMiB = 200,
+): GpuProcessInfo[][] {
+  return gpus.map((g, i) => {
+    if ((g.processes ?? []).length === 0 && g.memoryUsedMiB > memFloorMiB && prev?.[i]?.length) {
+      return prev[i];
+    }
+    return g.processes ?? [];
+  });
+}
 
 export async function collectSnapshot(runtime: HostRuntimeConfig, state: CollectState): Promise<ServerSnapshot> {
   const snap: ServerSnapshot = { hostId: runtime.id, at: Date.now(), ok: false };
@@ -766,12 +794,12 @@ export async function collectSnapshot(runtime: HostRuntimeConfig, state: Collect
     // connection is half-dead: throw so the retry/reconnect path engages
     // instead of shipping a healthy-looking all-zero snapshot
     const [gpuText, procText, cpuPercent, memText, diskText, loadText] = await Promise.all([
-      exec(conn, CMD_GPUS).catch(() => ''),
-      exec(conn, CMD_PROCS).catch(() => ''),
+      execRetry(conn, CMD_GPUS).catch(() => ''),
+      execRetry(conn, CMD_PROCS).catch(() => ''),
       sampleCpu(conn, state),
-      exec(conn, CMD_MEM).catch(() => ''),
-      exec(conn, CMD_DISK).catch(() => ''),
-      exec(conn, CMD_LOAD).catch(() => ''),
+      execRetry(conn, CMD_MEM).catch(() => ''),
+      execRetry(conn, CMD_DISK).catch(() => ''),
+      execRetry(conn, CMD_LOAD).catch(() => ''),
     ]);
     if (!gpuText.trim() && !memText.trim() && !diskText.trim() && !loadText.trim()) {
       throw new Error('核心读取全部为空（疑似半死连接）');
@@ -809,6 +837,11 @@ export async function collectSnapshot(runtime: HostRuntimeConfig, state: Collect
       }
       for (const gpu of gpus) gpu.processes = byGpu.get(gpu.index) ?? [];
     }
+    // phantom-idle guard: memory allocated + empty list = dead query stream,
+    // not a vanished training — reuse the previous poll's attribution
+    const stable = stabilizeProcs(gpus, state.lastProcs);
+    gpus.forEach((g, i) => { g.processes = stable[i]; });
+    state.lastProcs = stable;
     snap.gpus = gpus;
     const mem = parseMem(memText);
     snap.base = {
