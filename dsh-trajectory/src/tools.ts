@@ -16,6 +16,7 @@ import type { TrajEdgeKind, TrajNode, TrajNodeKind, TrajProject, TrajProjectFile
 import type { TrajStore } from './store.js';
 import { apiBase, fetchDashSnapshots, matchLiveProgress } from './liveprogress.js';
 import { analyzeTrajectory } from './analysis.js';
+import { scanWorkspace, docsToSummary } from './scanner.js';
 
 const renderJson = (_args: unknown, value: unknown): ContentBlock[] => [
   { type: 'text', text: JSON.stringify(value, null, 2) },
@@ -148,6 +149,44 @@ function projectOverview(file: TrajProjectFile) {
 }
 
 export function registerTrajTools(ctx: Context, getStore: () => Promise<TrajStore>): void {
+      /* ---------- v0.4:traj_scan(工作区文档扫描,自动摄取) ---------- */
+      ctx.tools.register(defineTool({
+        name: 'traj_scan',
+        description:
+          '扫描当前工作区目录,自动发现研究文档(*.md/*.csv/*.json)并提取结构化元数据(日期/文档类型/子系统/结论/Gate 判定)。'
+          + '**建主线前必须先调此工具**——它会返回全部研究文档的时间线摘要,你据此判断哪些文档需要用 Read 深读。'
+          + '返回的每条包含:path(相对路径)、date、docType(RESULTS/PROGRESS_REPORT/ROUTE_CORRECTION等)、conclusion(前 60 字)、gate(PASS/FAIL/NOGO)。'
+          + '扫描范围:递归 4 层深度,排除 node_modules/.git/__pycache__;上限 200 文件。'
+          + '典型流程:traj_scan → 挑关键文档 Read 深读 → traj_goal_set → traj_hypothesis_add → traj_node_add + traj_entry_add。',
+        parameters: {
+          since: { type: 'string', description: 'YYYY-MM-DD,只返回此日期之后的文档(可选)' },
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: true },
+          render: renderJson,
+        },
+        presentCall: () => callView('扫描工作区研究文档'),
+        presentResult: (_args: unknown, result: { value?: any; meta?: any }) => {
+          const v: any = result.value ?? {};
+          const docs: any[] = v.documents ?? [];
+          return resultView(`扫描到 ${docs.length} 个研究文档`,
+            docs.slice(0, 5).map((d: any) => `${d.date ?? '?'} [${d.docType ?? '?'}] ${d.path}`).join('\n')
+            + (docs.length > 5 ? `\n…另有 ${docs.length - 5} 个` : ''));
+        },
+        async execute(args: any, exec: any) {
+          const cwd = wsKeyOf(exec);
+          if (!cwd) throw new Error('无法获取当前工作区路径');
+          const docs = await scanWorkspace(cwd, { since: args.since });
+          const summary = docsToSummary(docs);
+          return toJson({
+            ok: true,
+            total: docs.length,
+            documents: toJson(summary),
+            hint: '按时间线排列。对 PROGRESS_REPORT / ROUTE_CORRECTION / RESULTS 类型的文档,建议用 Read 工具深读全文后再建主线。',
+          });
+        },
+      })),
+
       /* ---------- v0.3:traj_review(分析引擎 + 互动提问) ---------- */
       ctx.tools.register(defineTool({
         name: 'traj_review',

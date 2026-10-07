@@ -49,21 +49,61 @@ const wsBus = {
   },
 };
 
-/** 官方右侧栏(0.1.5)是布局内占位而非 overlay:抽屉/全页画布应让位于它,不能盖在上面。
- *  测法:从聊天输入框向上找第一棵「右缘离窗口右沿 ≥16px 且高度过半屏」的列,
- *  其右缘缺口即右侧栏宽度;右栏关闭或浮出成窗(浮窗不占布局位)时返回 0。 */
+/** 官方右侧栏是布局内占位而非 overlay:直接扫描「右缘贴窗口右沿、高度>70%视口」的布局列。 */
 function officialRightInset(): number {
   try {
-    const input = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-    if (!input) return 0;
-    let el = input.parentElement;
-    const vw = window.innerWidth;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let best = 0;
+    for (const el of Array.from(document.querySelectorAll('body *'))) {
+      if (el.closest('[data-dsh-plugin]')) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 28 || r.width > vw * 0.6 || r.height <= vh * 0.7) continue;
+      if (Math.abs(vw - r.right) > 8 || r.x < vw * 0.4) continue;
+      const py = Math.round(Math.min(r.top + r.height / 2, vh - 2));
+      const probe = (px: number) => { const hit = document.elementFromPoint(px, py); return !!hit && (el.contains(hit) || hit.contains(el)); };
+      if (!probe(Math.round(Math.min(vw - 2, r.right - Math.min(r.width / 2, 40)))) && !probe(Math.round(Math.min(vw - 2, r.x + Math.min(r.width / 2, 40))))) continue;
+      best = Math.max(best, Math.round(vw - r.x));
+    }
+    return best;
+  } catch {
+    return 0;
+  }
+}
+
+/** 找官方顶栏的「打开/收起右侧边栏」按钮(只认可见的那颗,优先收起钮)。 */
+function findOfficialSidebarToggle(): HTMLButtonElement | null {
+  try {
+    const list = Array.from(document.querySelectorAll('button')).filter(b => {
+      if (!/右侧边栏/.test(b.getAttribute('aria-label') || '')) return false;
+      const r = b.getBoundingClientRect();
+      return r.width > 0 && r.x >= 0 && r.x < window.innerWidth && getComputedStyle(b).visibility !== 'hidden';
+    });
+    return list.find(b => /收起/.test(b.getAttribute('aria-label') || '')) ?? list[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+function officialSidebarOpen(): boolean {
+  return officialRightInset() > 0;
+}
+
+/** 应用顶部两行的总高:抽屉按官方侧边栏同款从顶栏下方开始。 */
+function officialTopInset(): number {
+  try {
+    const btn = Array.from(document.querySelectorAll('button')).find(b => {
+      if (!/右侧边栏/.test(b.getAttribute('aria-label') || '')) return false;
+      const r = b.getBoundingClientRect();
+      return r.width > 0 && r.x >= 0 && r.x < window.innerWidth && getComputedStyle(b).visibility !== 'hidden';
+    });
+    if (!btn) return 0;
+    let best = 0;
+    let el = btn.parentElement;
     while (el && el !== document.body) {
       const r = el.getBoundingClientRect();
-      if (r.height > window.innerHeight * 0.5 && vw - r.right >= 16) return Math.round(vw - r.right);
+      if (r.height > 8 && r.height <= 72 && r.width >= window.innerWidth * 0.3) best = Math.max(best, Math.round(r.bottom));
       el = el.parentElement;
     }
-    return 0;
+    return best;
   } catch {
     return 0;
   }
@@ -426,7 +466,7 @@ function FullPageOverlay({ t, wsTitle, projectName, graph, story, onExportMd, on
 }
 
 /* ---------- right-docked collapsible drawer (shell.overlay entry) ---------- */
-const DRAWER_MIN = 360;
+const DRAWER_MIN = 300;
 const DRAWER_MAX = 720;
 const DRAWER_DEFAULT = 480;
 
@@ -440,8 +480,10 @@ function clampFloat(g: { x: number; y: number; w: number; h: number }): { x: num
     h: Math.max(220, Math.min(g.h, vh - 16)),
   };
 }
+// 宽度上限跟随视口:主内容保 1100(侧栏断点)之内自由拖宽,绝对上限 1200
 function clampW(w: number): number {
-  return Math.max(DRAWER_MIN, Math.min(DRAWER_MAX, w));
+  const dyn = Math.max(DRAWER_MIN, Math.min(1200, window.innerWidth - 1100));
+  return Math.max(DRAWER_MIN, Math.min(dyn, w));
 }
 
 interface OverviewBody {
@@ -617,17 +659,54 @@ function Drawer({ t }: { t: TFunc }) {
   // 偏移会形成循环约束,三面板同开时两者区间互相包含、低 z 者被整块盖住(看板"消失")。
   // 另让位官方右侧栏(布局内占位,不能盖):其开关不发 dock-change,靠 1s 轻轮询跟随。
   const [dockOffset, setDockOffset] = useState(0);
+  const [topInset, setTopInset] = useState(0);
+  const dockTop = topInset > 0 ? `${topInset}px` : 'var(--dsh-desktop-titlebar-inset, 0px)';
+  // 压缩让位(squeeze):停靠时把主内容右缘压出全部右舷面板总宽(变量+!important 抗应用重算)
+  useEffect(() => {
+    const apply = () => {
+      try {
+        const dock = (window as unknown as { __dshDock?: Record<string, { open: boolean; width: number }> }).__dshDock ?? {};
+        let strip = 0;
+        for (const v of Object.values(dock)) if (v?.open && v.width > 0) strip += v.width;
+        const capped = strip;
+        document.body.style.transition = 'margin-right .18s ease';
+        document.body.style.marginRight = capped > 0 ? `${capped}px` : '';
+        let sqStyle = document.getElementById('dsh-squeeze-style') as HTMLStyleElement | null;
+        if (!sqStyle) {
+          sqStyle = document.createElement('style');
+          sqStyle.id = 'dsh-squeeze-style';
+          document.head.appendChild(sqStyle);
+        }
+        const frameEl = document.querySelector('[class*="frame"]');
+        if (frameEl) {
+          const token = String(frameEl.className).split(' ')[0];
+          if (token) sqStyle.textContent = `.${token} { width: calc(100vw - var(--dsh-squeeze, 0px)) !important; transition: width .18s ease; }`;
+        }
+        document.documentElement.style.setProperty('--dsh-squeeze', capped > 0 ? `${capped}px` : '0px');
+      } catch { /* 布局探测失败则退回覆盖式 */ }
+    };
+    apply();
+    window.addEventListener('dsh-dock-change', apply);
+    const timer = setInterval(apply, 1000);
+    return () => {
+      window.removeEventListener('dsh-dock-change', apply);
+      clearInterval(timer);
+      document.body.style.marginRight = '';
+      document.documentElement.style.setProperty('--dsh-squeeze', '0px');
+    };
+  }, [mode, fullPage]);
   useEffect(() => {
     const INNER_PANELS = new Set(['dsh-scholar']);
     const compute = () => {
       const w = window as unknown as { __dshDock?: Record<string, { open: boolean; width: number }> };
       const dock = w.__dshDock ?? {};
-      let off = officialRightInset();
+      let off = 0;
       for (const [id, v] of Object.entries(dock)) {
         if (id === 'dsh-trajectory') continue;
         if (INNER_PANELS.has(id) && v?.open && v.width > 0) off += v.width;
       }
       setDockOffset((cur) => (cur === off ? cur : off));
+      setTopInset((cur) => { const next = officialTopInset(); return cur === next ? cur : next; });
     };
     compute();
     const timer = setInterval(compute, 1000);
@@ -721,7 +800,7 @@ function Drawer({ t }: { t: TFunc }) {
     <>
       <TrajStyles />
       {mode !== 'closed' && (
-        <div data-dsh-plugin="dsh-trajectory" data-dsh-surface="drawer" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: mode === 'float' ? 115 : Z.drawer }}>
+        <div data-dsh-plugin="dsh-trajectory" data-dsh-surface="drawer" style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: mode === 'float' ? 115 : Z.drawer }}>
           {mode === 'rail' && (
             <div
               data-dsh-part="drawer-rail"
@@ -877,6 +956,7 @@ function Drawer({ t }: { t: TFunc }) {
                       </span>
                     )}
                     <span style={{ flex: 1 }} />
+                    {mode !== 'float' && <IconButton label={officialSidebarOpen() ? '收起官方右侧栏' : '展开官方右侧栏'} onClick={() => findOfficialSidebarToggle()?.click()} icon={<Icon d={Icons.dock} size={15} />} />}
                     <IconButton
                       label={t('graph.fullpage')}
                       onClick={enterFullPage}

@@ -71,6 +71,9 @@ const TrajConfigSchema = z.object({
   // default('') 而非 required():首次注册时空配置会校验失败;空串由 getConfig 兜底
   dataDir: z.string().default(''),
 });
+// 0.2.0 SettingsForms 写路径要求暴露 Config 且 volatile 才可运行时编辑(详见 dashboard 同款注释)
+(TrajConfigSchema.meta as Record<string, unknown>).volatile = true;
+export const Config = TrajConfigSchema;
 
 export function apply(ctx: Context) {
   const scope = attachConfigScope(ctx, NS, TrajConfigSchema);
