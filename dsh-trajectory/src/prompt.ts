@@ -49,6 +49,9 @@ const GUIDANCE = [
   '- 节点间依赖 → `traj_link_add`(enables/feeds/composes)。',
   '- 当前工作区还没有主线 → `traj_project_set` 创建并绑定;研究问题(questions/objective)演进时用它的 researchQuestion 参数更新。',
   '分工:scholar 的 paper_save 存文献、idea_card_create 记想法卡;主线图记「项目进展、实验台账与结构」。节点关联想法卡/论文时传 refs.cardId/paperId。',
+  '**对话式研究记忆**:用户可以直接问研究问题——「我现在卡在哪」「上次为什么放弃 X」「当前目标是什么」「进展如何」「哪些还没做」。'
+  + '这些问题**先调 `traj_ask`** 查询轨迹数据,再结合 `traj_review` 的发现给出有依据的回答。'
+  + '轨迹是你的研究记忆——你不仅能记,还要能回忆和推理。',
   '**重归纳纪律**:如果发现假设只是任务标题(如「实验:xxx」「里程碑:xxx」)而非真正的研究假设(应有「我相信 X 因为 Y」的推断逻辑),**必须**主动重构:'
   + '先 `traj_overview` 分析实验台账,提炼 2-5 个真正的研究假设(从结论中归纳,不是从标题复制),'
   + '用 `traj_hypothesis_add` 创建,再把实验重新挂上去。旧垃圾假设标 superseded。'

@@ -1236,6 +1236,22 @@ export function apply(ctx: any) {
   const wsTimer = setInterval(recomputeWs, 5000);
   ctx.effect(() => () => clearInterval(wsTimer), 'dsh-trajectory: ws timer');
 
+  // v0.4: 原生打开文件(节点卡 📁 点击 → workspaces.openPath)
+  const onOpenFile = (ev: Event) => {
+    try {
+      const detail = (ev as CustomEvent<{ path: string }>).detail;
+      if (!detail?.path) return;
+      // 优先用 DSH 原生 openPath
+      if (shell.workspaces?.openPath) {
+        void shell.workspaces.openPath(detail.path);
+      } else {
+        // fallback:复制到剪贴板(已在 TrajListView 侧做过)
+      }
+    } catch { /* never crash */ }
+  };
+  window.addEventListener('dsh-trajectory-open-file', onOpenFile);
+  ctx.effect(() => () => window.removeEventListener('dsh-trajectory-open-file', onOpenFile), 'dsh-trajectory: file open listener');
+
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',
     // 入口固定排序:服务器 dashboard(10) → 学者(11) → 主线图(12)

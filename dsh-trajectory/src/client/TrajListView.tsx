@@ -475,9 +475,10 @@ function DigestNode({ node, progress, t, onOpen, onDelete, onDeleteEntry, onStat
             onClick={(e) => {
               e.stopPropagation();
               const paths = [...(node.refs?.sourceFiles ?? []), node.refs?.outputDir].filter(Boolean);
-              if (paths[0]) {
-                navigator.clipboard?.writeText(paths[0]).catch(() => {});
-              }
+              if (!paths[0]) return;
+              // 发事件让 index.tsx 用 workspaces.openPath 原生打开;同时复制路径兜底
+              window.dispatchEvent(new CustomEvent('dsh-trajectory-open-file', { detail: { path: paths[0] } }));
+              navigator.clipboard?.writeText(paths[0]).catch(() => {});
             }}
           >
             📁 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
