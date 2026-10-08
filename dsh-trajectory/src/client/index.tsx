@@ -168,7 +168,9 @@ function computeWsFromDOM(): WsInfo | null {
     if (hit) return { cwd: hit.path, title: hit.title, items };
 
     // 如果没精确匹配,用最近的 recentWorkspaceId
-    const recent = items.find((it: any) => it.workspaceId === w?.recentWorkspaceId) ?? items[0];
+    // sessions.current 断裂时:不要盲目 fallback 到 items[0](会锁定错误工作区)。
+    // 先试 recentWorkspaceId,如果也没有,返回 null 让 host 侧追踪接管。
+    const recent = items.find((it: any) => it.workspaceId === w?.recentWorkspaceId);
     return recent ? { cwd: recent.path, title: recent.title, items } : null;
   } catch {
     return null;
@@ -1324,6 +1326,20 @@ export function apply(ctx: any) {
       ctx.effect(() => () => { try { un1?.(); un2?.(); } catch { /* noop */ } }, 'dsh-trajectory: ws watchers');
     }
   } catch { /* polling fallback: Trigger/Drawer re-resolve on their own intervals */ }
+  // v0.4: 观察 document.title 变化——用户点击侧栏会话时标题立即变,不需要发消息
+  let lastTitle = document.title;
+  const titleObserver = new MutationObserver(() => {
+    if (document.title !== lastTitle) {
+      lastTitle = document.title;
+      recomputeWs();
+    }
+  });
+  const titleEl = document.querySelector('title');
+  if (titleEl) {
+    titleObserver.observe(titleEl, { childList: true, characterData: true, subtree: true });
+    ctx.effect(() => () => titleObserver.disconnect(), 'dsh-trajectory: title observer');
+  }
+
   // belt-and-braces: re-resolve periodically in case feeds don't notify
   const wsTimer = setInterval(recomputeWs, 5000);
   ctx.effect(() => () => clearInterval(wsTimer), 'dsh-trajectory: ws timer');
