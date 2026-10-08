@@ -117,6 +117,29 @@ export function apply(ctx: Context) {
     console.warn(`[dsh-trajectory] 数据目录初始化失败: ${err instanceof Error ? err.message : String(err)}`);
   });
 
+  // ── v0.4: host 侧工作区追踪(绕过 client sessions.current 断裂)──
+  // 当 agent 活跃时记录其工作区;任何 traj_* 工具调用也更新。
+  // 客户端通过 /traj/overview 的 lastActiveWs 字段读取,不再依赖 sessions 服务。
+  let lastActiveWs: string | null = null;
+  const ctxAny = ctx as unknown as {
+    on?(event: string, cb: (payload: unknown) => void): (() => void) | undefined;
+  };
+  const offAgentStatus = ctxAny.on?.('agent/status', (payload: unknown) => {
+    try {
+      const p = (payload ?? {}) as { status?: unknown; agent?: { session?: { header?: { cwd?: unknown } } } };
+      const cwd = p.agent?.session?.header?.cwd;
+      if (typeof cwd === 'string' && cwd.trim() && p.status === 'running') {
+        if (lastActiveWs !== cwd) {
+          lastActiveWs = cwd;
+          console.log('[dsh-trajectory] 活跃工作区更新: ' + cwd);
+        }
+      }
+    } catch { /* never crash */ }
+  });
+  if (offAgentStatus) {
+    ctx.effect(() => () => offAgentStatus(), 'dsh-trajectory: agent status tracker');
+  }
+
   registerTrajRoutes(ctx, getStore, getConfig, updateConfig);
 
   registerTrajTools(ctx, getStore);

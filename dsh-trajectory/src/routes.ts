@@ -12,6 +12,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import z from 'schemastery';
 import type { TrajConfig, TrajEdge, TrajNodeKind, TrajStatus } from './shared/types.js';
+import { getLastActiveWs } from './tools.js';
 import { TRAJ_NODE_KINDS, TRAJ_STATUSES } from './shared/types.js';
 import type { TrajStore } from './store.js';
 import { countsByStatus, normalizeWorkspaceKey } from './domain.js';
@@ -275,6 +276,7 @@ export function registerTrajRoutes(
           activeProjectId: active?.project.id ?? null,
           ws: wsRaw ? normalizeWorkspaceKey(wsRaw) : undefined, // 回显复用域层归一化
           wsBound: wsRaw ? !!active : true,
+          lastActiveWs: getLastActiveWs() ?? undefined,
           projects: store.listProjectFiles().map((f) => ({
             id: f.project.id,
             name: f.project.name,

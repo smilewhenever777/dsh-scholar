@@ -63,10 +63,21 @@ const mdList = (items: string[], more = 0): string =>
 function wsKeyOf(exec: any): string | undefined {
   try {
     const cwd = exec?.agent?.session?.header?.cwd;
-    return typeof cwd === 'string' && cwd.trim() ? cwd.trim() : undefined;
+    const ws = typeof cwd === 'string' && cwd.trim() ? cwd.trim() : undefined;
+    if (ws) setLastActiveWs(ws);
+    return ws;
   } catch {
     return undefined;
   }
+}
+
+// host 侧工作区追踪(index.ts 读取,工具调用时更新)
+let _lastActiveWs: string | null = null;
+export function setLastActiveWs(ws: string): void {
+  if (_lastActiveWs !== ws) _lastActiveWs = ws;
+}
+export function getLastActiveWs(): string | null {
+  return _lastActiveWs;
 }
 
 /** cmdPattern 过短提示:太宽的命令特征会匹配到无关进程(进度映射错挂)。 */

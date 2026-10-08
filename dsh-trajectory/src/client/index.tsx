@@ -1286,13 +1286,34 @@ export function apply(ctx: any) {
   } catch { shell.sessions = shell.workspaces = undefined; }
   const recomputeWs = () => {
     const primary = computeWs();
-    // fallback:如果 sessions 服务不可用导致 primary 为 null 或无 cwd,尝试 DOM 推断
-    if (!primary?.cwd) {
-      const fallback = computeWsFromDOM();
-      wsBus.set(fallback ?? primary);
-    } else {
+    if (primary?.cwd) {
       wsBus.set(primary);
+      return;
     }
+    // fallback 1: host 侧追踪的最近活跃工作区(通过 /traj/overview 的 lastActiveWs)
+    // 由 agent/status 事件和 traj_* 工具调用更新,不依赖 client sessions API
+    void api<{ lastActiveWs?: string }>('/traj/overview')
+      .then((ov) => {
+        if (ov.lastActiveWs && wsBus.info?.cwd !== ov.lastActiveWs) {
+          const items = primary?.items ?? [];
+          const hit = items.find((it: any) =>
+            it.path.split('\\').join('/') === (ov.lastActiveWs ?? '').split('\\').join('/'));
+          wsBus.set({
+            cwd: ov.lastActiveWs,
+            title: hit?.title ?? ov.lastActiveWs.split('/').pop() ?? ov.lastActiveWs,
+            items,
+          });
+        } else if (!ov.lastActiveWs) {
+          // fallback 2: DOM 推断
+          const dom = computeWsFromDOM();
+          if (dom) wsBus.set(dom);
+        }
+      })
+      .catch(() => {
+        // fallback 2: DOM 推断
+        const dom = computeWsFromDOM();
+        if (dom) wsBus.set(dom);
+      });
   };
   recomputeWs();
   // follow workspace/session switching live
