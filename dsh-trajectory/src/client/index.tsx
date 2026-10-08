@@ -1018,7 +1018,7 @@ function Drawer({ t }: { t: TFunc }) {
                     <IconButton label={t('drawer.close')} onClick={() => panelBus.set('closed')} icon={<Icon d={Icons.close} size={15} />} />
                   </div>
 
-                  {/* project bar:当前工作区 + 绑定状态 */}
+                  {/* project bar:当前工作区 + 绑定状态 + 手动项目切换 */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 12px 6px', flex: 'none', minWidth: 0 }}>
                     <span
                       title={wsKey || undefined}
@@ -1035,6 +1035,25 @@ function Drawer({ t }: { t: TFunc }) {
                         {ws ? ws.title : t('ws.unknown')}
                       </span>
                     </span>
+                    {/* 手动项目切换:不依赖自动工作区检测,始终显示 */}
+                    <Select
+                      value={activeId ?? ''}
+                      title="切换项目"
+                      onChange={(e) => {
+                        const pid = e.target.value;
+                        if (!pid) return;
+                        // 清除自动工作区绑定,切换到用户选择的项目
+                        void api(`/traj/projects/${encodeURIComponent(pid)}/active`, { method: 'PUT' }).then(() => refresh());
+                      }}
+                      style={{ flex: 'none', maxWidth: 160 }}
+                    >
+                      <option value="">—</option>
+                      {(overview?.projects ?? []).map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} ({p.open}/{p.nodes})
+                        </option>
+                      ))}
+                    </Select>
                     {wsBound && file && (
                       <IconButton
                         label={t('pset.title')}
