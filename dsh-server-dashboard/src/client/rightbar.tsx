@@ -110,7 +110,7 @@ function GpuTabBody({ t }: { t: (key: string, params?: Record<string, unknown>) 
   const stale = !!err && !!data;
 
   return (
-    <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8, minHeight: '100%', overflow: 'auto' }}>
+    <div className="dshwb-surface" style={{ boxSizing: 'border-box', padding: '12px', display: 'flex', flexDirection: 'column', gap: 8, minHeight: '100%', overflow: 'auto' }}>
       {err && !data && (
         <div style={{ fontSize: 11.5, color: 'var(--dsw-alias-state-danger-primary)', lineHeight: 1.6 }}>{err}</div>
       )}

@@ -6,7 +6,11 @@
   "scripts": {
     "build": "node tests/run.mjs --build-only",
     "test": "node tests/run.mjs",
-    "check:release": "node tests/release-check.mjs"
+    "check:release": "node tests/release-check.mjs",
+    "test:desktop": "node tests/desktop-installed.mjs",
+    "test:desktop:contract": "node --test tests/desktop-contract.test.mjs",
+    "test:public": "node tests/run.mjs --public-only",
+    "check:release:public": "node tests/release-check.mjs --public-only"
   },
   "devDependencies": {
     "esbuild": "0.25.12",
@@ -14,5 +18,7 @@
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }

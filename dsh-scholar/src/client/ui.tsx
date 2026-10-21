@@ -1,3 +1,4 @@
+import { workbenchCss, WorkbenchEmpty } from '../../../shared-client/src/Workbench';
 import { useModalFocus } from './modalFocus';
 import React from 'react';
 import { createPortal } from 'react-dom';
@@ -36,6 +37,7 @@ export const Z = { drawer: 70, modal: 2147483100, float: 2147483000 } as const;
 export function SchStyles() {
   return (
     <style>{`
+      ${workbenchCss}
       /* ── 动效 token（NN/g: 微交互 100-200ms / 容器过渡 200-400ms，全程缓动） ── */
       :root { --sch-fast: 120ms; --sch-dur: 190ms; --sch-slow: 260ms;
         --sch-ease: cubic-bezier(.2,.8,.2,1); --sch-spring: cubic-bezier(.34,1.35,.5,1); }
@@ -248,13 +250,14 @@ export function Btn(props: {
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="sch-press"
+      className="sch-press dshwb-button"
+      data-tone={tone}
       style={{
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-        minHeight: 26, padding: '3px 10px', lineHeight: 1.4,
+        minHeight: 30, padding: '3px 10px', lineHeight: 1.4,
         border: `1px solid ${tone === 'primary' || tone === 'soft' ? 'transparent' : 'var(--dsw-alias-border-l2)'}`,
         background,
-        borderRadius: 7, cursor: disabled ? 'default' : 'pointer',
+        borderRadius: 8, cursor: disabled ? 'default' : 'pointer',
         fontSize: 12, fontWeight: tone === 'primary' ? 600 : 400,
         color, opacity: disabled ? 0.5 : 1, whiteSpace: 'nowrap', transition: 'opacity .12s ease', ...style,
       }}
@@ -329,7 +332,7 @@ export function SearchInput({ value, onChange, placeholder }: {
   placeholder: string;
 }) {
   return (
-    <span style={{ position: 'relative', display: 'inline-flex', flex: '1 1 130px', minWidth: 110 }}>
+    <span style={{ position: 'relative', display: 'inline-flex', flex: '1 1 130px', minWidth: 0, width: '100%' }}>
       <span style={{ position: 'absolute', left: 7, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', display: 'inline-flex', color: 'var(--dsw-alias-label-caption)' }}>
         <Icon d={Icons.search} size={12} />
       </span>
@@ -360,25 +363,8 @@ export function Field({ label, children, hint }: { label: string; children: Reac
 }
 
 /** empty-state block: big glyph + one-line title + soft hint */
-export function EmptyState({ icon, title, hint, action }: {
-  icon: React.ReactNode;
-  title: string;
-  hint?: string;
-  action?: React.ReactNode;
-}) {
-  return (
-    <div className="sch-fade" style={{
-      flex: 1, minHeight: 120, display: 'flex', flexDirection: 'column', alignItems: 'center',
-      justifyContent: 'center', textAlign: 'center', padding: '28px 20px', gap: 6,
-    }}>
-      <span style={{ color: 'var(--dsw-alias-label-dimmed, var(--dsw-alias-label-caption))', opacity: .85, marginBottom: 2 }}>
-        {icon}
-      </span>
-      <div style={{ fontSize: 12.5, fontWeight: 600, color: T.secondary }}>{title}</div>
-      {hint && <div style={{ fontSize: 11, color: T.caption, lineHeight: 1.65, maxWidth: 250 }}>{hint}</div>}
-      {action && <div style={{ marginTop: 6 }}>{action}</div>}
-    </div>
-  );
+export function EmptyState(props: { icon: React.ReactNode; title: string; hint?: string; action?: React.ReactNode }) {
+  return <WorkbenchEmpty {...props} />;
 }
 
 /** removable chip for "active filters" rows */
@@ -561,7 +547,7 @@ export function Modal({ title, onClose, children, width = 480 }: {
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
-        className="sch-modal-in"
+        className="sch-modal-in dshwb-surface"
         style={{
           position: 'relative',
           width: `min(${width}px, 90vw)`,

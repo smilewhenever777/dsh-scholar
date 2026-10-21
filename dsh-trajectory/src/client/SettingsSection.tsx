@@ -3,24 +3,28 @@ import type { TrajConfig, TrajStats } from '../shared/types';
 import { api } from './api';
 import type { TFunc } from './nav';
 import { Btn, Field, Icon, Icons, Input, TrajStyles, T } from './ui';
+import { canPickDirectory, pickDirectory } from '../../../shared-client/src/desktop';
 
 export function TrajSettings({ t }: { t: TFunc }) {
   const [config, setConfig] = useState<TrajConfig>({ dataDir: '' });
   const [stats, setStats] = useState<TrajStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [ready, setReady] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
     try {
       setLoading(true);
+      setReady(false);
       const [c, s] = await Promise.all([
         api<{ config: TrajConfig }>('/traj/config'),
         api<TrajStats>('/traj/stats'),
       ]);
       setConfig(c.config);
       setStats(s);
+      setReady(true);
       setError('');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -32,6 +36,7 @@ export function TrajSettings({ t }: { t: TFunc }) {
   useEffect(() => { void load(); }, [load]);
 
   const save = async () => {
+    if (!ready || saving) return;
     try {
       setSaving(true);
       await api('/traj/config', {
@@ -50,13 +55,13 @@ export function TrajSettings({ t }: { t: TFunc }) {
   };
 
   return (
-    <div style={{ padding: '14px 18px', fontSize: 12, maxWidth: 560 }}>
+    <div className="dshwb-surface dshwb-settings">
       <TrajStyles />
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
         <span style={{ fontWeight: 700, fontSize: 13.5 }}>{t('settings.title')}</span>
         <span style={{ flex: 1 }} />
         {message && <span style={{ color: T.success, fontSize: 11.5 }}>✓ {message}</span>}
-        <Btn tone="primary" onClick={() => void save()} disabled={saving || loading}>
+        <Btn tone="primary" onClick={() => void save()} disabled={saving || loading || !ready}>
           {t('settings.save')}
         </Btn>
       </div>
@@ -68,6 +73,7 @@ export function TrajSettings({ t }: { t: TFunc }) {
         <>
           <Field label={t('settings.dataDir')} hint={t('settings.dataDirHint')}>
             <Input value={config.dataDir} onChange={(e) => setConfig({ ...config, dataDir: e.target.value })} />
+            {canPickDirectory() && <Btn disabled={saving} onClick={() => { void pickDirectory().then(path => { if (path) setConfig(current => ({ ...current, dataDir: path })); }).catch(e => setError(String(e instanceof Error ? e.message : e))); }}>{t('settings.chooseDirectory')}</Btn>}
           </Field>
 
           {stats && (

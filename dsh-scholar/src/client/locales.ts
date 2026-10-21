@@ -4,6 +4,8 @@
 import type { CardCategory, CardStatus, GraphEdgeKind } from '../shared/types';
 
 export const zh = {
+  'drawer.officialSidebar': '切换宿主右侧栏',
+  'settings.chooseDirectory': '选择目录…',
   "paper.retry": "重试",
   "card.view.group": "按论文分组",
   "card.view.kanban": "看板",
@@ -18,6 +20,7 @@ export const zh = {
   'drawer.float': '浮为窗口',
   'drawer.dock': '回贴侧栏',
   'drawer.close': '关闭',
+  'drawer.more': '更多面板操作',
   'drawer.resize': '拖拽调整宽度',
 
   'tab.papers': '论文库',
@@ -338,6 +341,8 @@ export const zh = {
 };
 
 export const en: typeof zh = {
+  'drawer.officialSidebar': 'Toggle host right sidebar',
+  'settings.chooseDirectory': 'Choose directory…',
   "paper.retry": "Retry",
   "card.view.group": "Group by paper",
   "card.view.kanban": "Kanban",
@@ -352,6 +357,7 @@ export const en: typeof zh = {
   'drawer.float': 'Float as window',
   'drawer.dock': 'Dock to sidebar',
   'drawer.close': 'Close',
+  'drawer.more': 'More panel actions',
   'drawer.resize': 'Drag to resize',
 
   'tab.papers': 'Papers',

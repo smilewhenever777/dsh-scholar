@@ -10,6 +10,19 @@
 
 本仓库采用单仓库、多 npm 包结构。每个插件有独立的构建入口、配置和 MIT 许可证。
 
+## 全面适配DSH桌面端
+
+当前源码为三个插件提供统一的桌面工作台界面：紧凑标题栏、文字操作菜单、卡片、搜索筛选、表单和空状态，跟随 DSH 明暗主题并支持键盘焦点与减少动态效果。界面样式不加载外部字体、图片或统计脚本。
+
+- **论文库**：分区继续位于左边，论文列表在右边独立滚动；窄面板收紧分区宽度，标题和状态按空间换行。
+- **服务器看板**：运行、异常、空闲状态计数保持可见，资源卡片与其他插件统一；连接、指纹和凭据操作保留原有保护。
+- **研究主线图**：清单、DAG、项目切换与实验台账采用统一的工具栏和卡片样式，并跟随桌面当前会话工作区。
+- **桌面集成**：应用内 PDF/报告预览、原生配置、目录选择、文件定位、对话草稿保护、下载及多个侧栏的空间协调。
+
+Windows 官方桌面版 0.2.1-rc.2 已在隔离环境验证；macOS 尚未做真机验收。安装方式见[官方桌面端](#官方桌面端)，检查范围见[兼容性说明](./tests/DESKTOP-COMPATIBILITY.md)。本次更新提交源码，不替换历史 v0.3.0 Release 安装包。
+
+公开前的隐私、依赖、安装包和界面检查见[提交检查记录](./tests/PUBLICATION-REVIEW.md)。
+
 ## 三个插件如何配合
 
 ```mermaid
@@ -65,7 +78,7 @@ flowchart LR
 
 ## 安装与更新
 
-需要 DSH Web 环境和 Node.js。插件声明的 DSH 依赖基线为 `0.1.5-rc.2`；本轮验证环境为 Windows、Node.js 24 和 Chrome，其他平台需结合宿主环境验证。
+支持 DSH Web 与官方 DSH Desktop。桌面适配已在 Windows 官方桌面版 **0.2.1-rc.2** 的隔离环境验证；插件保留旧版 SettingsProvider 的兼容入口。开发需要 Node.js 20 或以上，桌面运行使用宿主自带的运行时。
 
 ### npm 已发布版本
 
@@ -86,7 +99,6 @@ dsh plugin --profile web add dsh-trajectory
 ```sh
 git clone https://github.com/smilewhenever777/dsh-scholar.git
 cd dsh-scholar
-git checkout v0.3.0
 npm ci --prefix dsh-scholar
 npm ci --prefix dsh-server-dashboard
 npm ci --prefix dsh-trajectory
@@ -101,6 +113,27 @@ dsh plugin --profile web add ./dsh-trajectory
 只需要一个插件时，只执行对应的安装、构建和注册命令。部分宿主版本对含空格的本地路径处理不完整，排查方式见插件安装说明。
 
 看板本轮采用带 `revision` 的配置协议，应同时加载新宿主与新客户端。遇到配置冲突请重新加载并核对草稿。
+
+### 官方桌面端
+
+本轮桌面适配位于当前源码，历史 `v0.3.0` 标签和 Release 安装包不包含这些新增改动。先启动桌面端一次以初始化 profile，并从托盘完整退出。按上面的源码步骤安装依赖、构建，再使用桌面应用“管理 dsh 命令”提供的 CLI。在 PowerShell 的仓库根目录执行：
+
+```powershell
+$pluginRoot = (Get-Location).Path.Replace('\', '/')
+dsh plugin --profile desktop add "link:$pluginRoot/dsh-scholar"
+dsh plugin --profile desktop add "link:$pluginRoot/dsh-server-dashboard"
+dsh plugin --profile desktop add "link:$pluginRoot/dsh-trajectory"
+```
+
+桌面端使用独立的 `desktop` profile。只安装到 `web` profile 不会为官方桌面端启用插件。安装后从托盘菜单完整退出 DSH，再重新启动；关闭窗口可能只是隐藏应用。
+
+- 三个插件共用抽屉布局；空间不足时保留最近展开的面板，其他面板收成可点击的窄栏。原生右栏展开后若无法并排，插件抽屉退回左侧入口；重新展开插件会让原生右栏收起。
+- 学者工作台在应用内预览 PDF 和报告，保留报告脚本沙箱；不会将应用内文档链接交给外部浏览器。
+- 主线图跟随桌面实际显示的会话工作区，文件引用使用宿主“显示文件位置”能力；不可用时明确提示复制结果。
+- 学者与主线设置可调用宿主目录选择器；选择目录后仍需保存。Web 环境保留手工填写方式。
+- 桌面与 Web 的设置、凭据属于各自的宿主配置；迁移时核对数据目录和凭据，不会自动复制另一份 profile 的服务器密钥。
+
+适配细节、审查结果和验证范围见 [桌面兼容性说明](./tests/DESKTOP-COMPATIBILITY.md)。
 
 ## 数据存在哪里，哪些操作会联网
 

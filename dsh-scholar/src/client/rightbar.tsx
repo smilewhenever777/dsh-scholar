@@ -85,7 +85,7 @@ function PaperSearch({ t, onPick }: { t: (key: string, params?: Record<string, u
   }, [debounced]);
 
   return (
-    <div style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10, minHeight: '100%' }}>
+    <div className="dshwb-surface" style={{ boxSizing: 'border-box', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10, minHeight: '100%' }}>
       <input
         value={q}
         onChange={(e) => setQ(e.target.value)}
@@ -136,7 +136,7 @@ function PaperDetail({ id, t, onBack }: { id: string; t: (key: string, params?: 
   const link = { color: 'var(--dsw-alias-state-business-primary, #4d6bfe)', textDecorationLine: 'underline', fontSize: 12 } as const;
 
   return (
-    <div style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 9, minHeight: '100%', overflow: 'auto' }}>
+    <div className="dshwb-surface" style={{ boxSizing: 'border-box', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 9, minHeight: '100%', overflow: 'auto' }}>
       <button type="button" onClick={onBack} style={{ alignSelf: 'flex-start', cursor: 'pointer', border: 0, background: 'none',
         color: 'var(--dsw-alias-label-caption)', fontSize: 11, padding: 0 }}>{t('rightbar.back')}</button>
       {err && <div style={{ fontSize: 12, color: 'var(--dsw-alias-state-danger-primary)' }}>{err}</div>}

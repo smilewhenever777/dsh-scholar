@@ -1,3 +1,6 @@
+import { PanelHeader } from '../../../shared-client/src/Workbench';
+import { PanelMenu } from '../../../shared-client/src/PanelMenu';
+import { clampDockWidth, DOCK_TOP, bindDesktopServices, toggleOfficialSidebar, registerDockPanel, installDockLayout } from '../../../shared-client/src/desktop';
 import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { zh, en } from './locales';
 import { PaperLibraryView } from './PaperLibraryView';
@@ -8,8 +11,10 @@ import { GraphView } from './GraphView';
 import { ScholarSettings } from './SettingsSection';
 import { Icon, IconButton, Icons, SchStyles, T, Z } from './ui';
 import { api } from './api';
+import { clampFloat } from '../../../shared-client/src/index';
 import { navBus, useNav, type TabId, type TFunc } from './nav';
 import { registerScholarRightbar } from './rightbar';
+import { DocumentPreview, installDocumentPreview } from './DocumentPreview';
 
 const NS = 'scholar';
 
@@ -110,50 +115,78 @@ function Trigger({ t, wide }: { t: TFunc; wide?: boolean }) {
 }
 
 /* ---------- right-docked collapsible drawer (shell.overlay entry) ---------- */
-const DRAWER_MIN = 340;
+const DRAWER_MIN = 300;
 const DRAWER_MAX = 680;
 const DRAWER_DEFAULT = 440;
 
 /** 浮动窗口几何夹取:不越出视口、不小于可读下限 */
-function clampFloat(g: { x: number; y: number; w: number; h: number }): { x: number; y: number; w: number; h: number } {
-  const vw = window.innerWidth, vh = window.innerHeight;
-  return {
-    x: Math.max(8, Math.min(g.x, vw - 80)),
-    y: Math.max(8, Math.min(g.y, vh - 60)),
-    w: Math.max(300, Math.min(g.w, vw - 16)),
-    h: Math.max(220, Math.min(g.h, vh - 16)),
-  };
-}
 
-/** 官方右侧栏(0.1.5)是布局内占位而非 overlay:抽屉应让位于它,不能盖在它上面。
- *  测法:从聊天输入框向上找第一棵「右缘离窗口右沿 ≥16px 且高度过半屏」的列,
- *  其右缘缺口即右侧栏宽度;右栏关闭或浮出成窗(浮窗不占布局位)时返回 0。 */
+/** 官方右侧栏是布局内占位而非 overlay:抽屉应让位于它,不能盖在它上面。
+ *  测法:直接扫描「右缘贴窗口右沿、高度>70%视口」的布局列,取最宽者的右缘缺口。
+ *  (旧测法从输入框向上找列,在桌面端 0.1.7 首页布局下输入框祖先列高度不足半屏,
+ *  恒返回 0,抽屉贴右盖住顶栏「打开右侧边栏」与官方右栏。)
+ *  插件自己的面([data-dsh-plugin])排除;右栏收起成图标列(~34px)也算;
+ *  宽度上限 60% 视口防止把主对话列误判成右栏。 */
 function officialRightInset(): number {
   try {
-    const input = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-    if (!input) return 0;
-    let el = input.parentElement;
-    const vw = window.innerWidth;
-    while (el && el !== document.body) {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let best = 0;
+    for (const el of Array.from(document.querySelectorAll('body *'))) {
+      if (el.closest('[data-dsh-plugin]')) continue;
       const r = el.getBoundingClientRect();
-      if (r.height > window.innerHeight * 0.5 && vw - r.right >= 16) return Math.round(vw - r.right);
-      el = el.parentElement;
+      if (r.width < 28 || r.width > vw * 0.6 || r.height <= vh * 0.7) continue;
+      if (Math.abs(vw - r.right) > 8 || r.x < vw * 0.4) continue;
+      // 桌面端关闭右栏时面板盒子仍在原位、被主内容盖住——列内取点做命中测试,
+      // 命中到列外说明视觉上不存在,跳过。取点左右各一点:右点会被我们自己的
+      // 右舷抽屉盖住(自致盲),左点在抽屉左缘之外仍能命中列本体,任一命中即可见
+      const py = Math.round(Math.min(r.top + r.height / 2, vh - 2));
+      const probe = (px: number) => { const hit = document.elementFromPoint(px, py); return !!hit && (el.contains(hit) || hit.contains(el)); };
+      if (!probe(Math.round(Math.min(vw - 2, r.right - Math.min(r.width / 2, 40)))) && !probe(Math.round(Math.min(vw - 2, r.x + Math.min(r.width / 2, 40))))) continue;
+      best = Math.max(best, Math.round(vw - r.x));
     }
-    return 0;
+    return best;
   } catch {
     return 0;
   }
 }
 
-function clampW(w: number): number {  return Math.max(DRAWER_MIN, Math.min(DRAWER_MAX, w));
+/** 找官方顶栏的「打开/收起右侧边栏」按钮(桌面端 DOM 里同时存在隐藏的
+ *  收起钮停在屏外,只认可见的那颗)。贴右满高抽屉会盖住它,但 .click()
+ *  不受遮挡影响,抽屉头部用这颗真按钮提供等价开关入口。 */
+function findOfficialSidebarToggle(): HTMLButtonElement | null {
+  try {
+    const list = Array.from(document.querySelectorAll('button')).filter(b => {
+      if (!/右侧边栏|right sidebar/i.test(b.getAttribute('aria-label') || '')) return false;
+      const r = b.getBoundingClientRect();
+      return r.width > 0 && r.x >= 0 && r.x < window.innerWidth && getComputedStyle(b).visibility !== 'hidden';
+    });
+    // 优先收起钮:右栏开启时与屏外隐藏的打开钮共存,语义随实际状态走
+    return list.find(b => /收起/.test(b.getAttribute('aria-label') || '')) ?? list[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+// 状态按测量判定:官方两颗开关钮的可见性/文案在桌面端语义不稳,但 inset>0 即右栏可见
+function officialSidebarOpen(): boolean {
+  return officialRightInset() > 0;
+}
+
+
+
+// 宽度上限按原生导航和对话最小宽度计算，不再强制预留 1100px。
+function clampW(w: number): number { return clampDockWidth(w);
 }
 
 function Drawer({ t }: { t: TFunc }) {
   const mode = usePanelMode();
+  const dockTop = DOCK_TOP;
   const nav = useNav();
   const counts = useCounts();
   const [width, setWidth] = useState(DRAWER_DEFAULT);
   const [full, setFull] = useState(false);
+
+  useEffect(() => registerDockPanel('dsh-scholar', (mode) => panelBus.set(mode ?? 'rail'), 34), []);
+  useEffect(() => installDockLayout(), []);
   const [dragging, setDragging] = useState(false);
   const [handleHover, setHandleHover] = useState(false);
   const dragOrigin = useRef({ x: 0, w: DRAWER_DEFAULT });
@@ -261,27 +294,16 @@ function Drawer({ t }: { t: TFunc }) {
   // full 模式实际占满 100vw、rail 实际宽 34(见下方 rail 渲染),如实发布
   const selfW = mode === 'open' ? (full ? window.innerWidth : width) : mode === 'rail' ? 34 : 0;
 
-  // 官方右侧栏是布局内占位(非 overlay):抽屉让位于它而不是盖在上面。
-  // 右栏开关不发 dock-change,靠 1s 轻轮询跟随;关闭/浮出成窗时 inset=0。
-  const [officialInset, setOfficialInset] = useState(() => officialRightInset());
-  useEffect(() => {
-    const read = () => setOfficialInset((cur) => {
-      const next = officialRightInset();
-      return cur === next ? cur : next;
-    });
-    const timer = setInterval(read, 1000);
-    return () => clearInterval(timer);
-  }, []);
 
   useEffect(() => {
-    const w = window as unknown as { __dshDock?: Record<string, { open: boolean; width: number }> };
-    w.__dshDock = { ...(w.__dshDock ?? {}), 'dsh-scholar': { open: mode === 'open' || mode === 'rail', width: selfW } };
-    window.dispatchEvent(new CustomEvent('dsh-dock-change'));
-  }, [mode, selfW]);
+    const w = window as unknown as { __dshDock?: Record<string, { open: boolean; width: number; overlay?: boolean }> };
+    w.__dshDock = { ...(w.__dshDock ?? {}), 'dsh-scholar': { open: mode === 'open' || mode === 'rail', width: selfW, overlay: mode === 'open' && full } };
+    window.dispatchEvent(new CustomEvent('dsh-dock-change', { detail: { id: 'dsh-scholar' } }));
+  }, [mode, selfW, full]);
   useEffect(() => () => {
-    const w = window as unknown as { __dshDock?: Record<string, { open: boolean; width: number }> };
+    const w = window as unknown as { __dshDock?: Record<string, { open: boolean; width: number; overlay?: boolean }> };
     w.__dshDock = { ...(w.__dshDock ?? {}), 'dsh-scholar': { open: false, width: 0 } };
-    window.dispatchEvent(new CustomEvent('dsh-dock-change'));
+    window.dispatchEvent(new CustomEvent('dsh-dock-change', { detail: { id: 'dsh-scholar' } }));
   }, []);
 
   const tabs: { id: TabId; label: string; icon: string; badge?: number }[] = [
@@ -294,12 +316,12 @@ function Drawer({ t }: { t: TFunc }) {
     <>
       <SchStyles />
       {mode !== 'closed' && (
-        <div data-dsh-plugin="dsh-scholar" data-dsh-surface="drawer" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: mode === 'float' ? 115 : Z.drawer }}>
+        <div data-dsh-plugin="dsh-scholar" data-dsh-surface="drawer" style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: mode === 'float' ? 115 : Z.drawer }}>
           {mode === 'rail' && (
             <div
               data-dsh-part="drawer-rail"
               style={{
-                position: 'absolute', top: 'var(--dsh-desktop-titlebar-inset, 0px)', right: officialInset, bottom: 0, width: 34, pointerEvents: 'auto',
+                position: 'absolute', top: dockTop, right: 0, bottom: 0, width: 34, pointerEvents: 'auto',
                 display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, padding: '10px 0',
                 borderLeft: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-base)',
                 backdropFilter: 'blur(16px) saturate(1.08)', WebkitBackdropFilter: 'blur(16px) saturate(1.08)',
@@ -324,12 +346,12 @@ function Drawer({ t }: { t: TFunc }) {
           )}
           {(mode === 'open' || mode === 'float') && (
             <div
-              className="sch-fade"
+              className="sch-fade dshwb-surface"
               data-dsh-part="drawer-panel"
               style={{
                 ...(mode === 'float'
                   ? { position: 'fixed' as const, top: floatGeom.y, left: floatGeom.x, width: floatGeom.w, height: floatGeom.h, pointerEvents: 'auto' as const, zIndex: 2, borderRadius: 12, border: '1px solid var(--dsw-alias-border-l2)', boxShadow: 'var(--dsw-shadow-lv3, 0 12px 40px rgba(0,0,0,.35))', overflow: 'hidden' }
-                  : { position: 'absolute' as const, top: 'var(--dsh-desktop-titlebar-inset, 0px)', right: officialInset, bottom: 0, width, pointerEvents: 'auto' as const, ...(full ? { left: 0, width: '100vw' } : {}) }),
+                  : { position: 'absolute' as const, top: dockTop, right: 0, bottom: 0, width, pointerEvents: 'auto' as const, ...(full ? { left: 0, width: '100vw' } : {}) }),
                 display: 'flex', flexDirection: 'column', background: 'var(--dsw-alias-bg-base)',
                 backdropFilter: 'blur(16px) saturate(1.08)', WebkitBackdropFilter: 'blur(16px) saturate(1.08)',
                 borderLeft: '1px solid var(--dsw-alias-border-l2)',
@@ -376,7 +398,7 @@ function Drawer({ t }: { t: TFunc }) {
               {/* body = left icon rail + content column */}
               <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
                 {/* icon rail */}
-                <nav style={{
+                <nav className="dshwb-nav" style={{
                   width: 46, flex: 'none', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
                   padding: '10px 0', borderRight: '1px solid var(--dsw-alias-border-l2)',
                   background: 'var(--dsw-alias-bg-layer-1, rgba(127,127,127,.05))',
@@ -387,6 +409,7 @@ function Drawer({ t }: { t: TFunc }) {
                       <button
                         key={id}
                         type="button"
+                        aria-current={active ? 'page' : undefined}
                         title={tabs.find((x) => x.id === id)?.label}
                         onClick={() => navBus.go(id)}
                         className="sch-press"
@@ -434,34 +457,24 @@ function Drawer({ t }: { t: TFunc }) {
                 {/* content */}
                 <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
                   {/* content header: current view name + window controls */}
-                  <div className="sch-fade" key={nav.tab}
+                  <PanelHeader icon={<Icon d={tabs.find(x => x.id === nav.tab)?.icon ?? Icons.book} size={15} />}
+                    title={tabs.find(x => x.id === nav.tab)?.label ?? t('nav.title')} count={nav.tab === 'papers' && counts.papers > 0 ? counts.papers : nav.tab === 'cards' && counts.cards > 0 ? counts.cards : undefined}
                     onPointerDown={mode === 'float' ? onFloatDragDown : undefined}
                     onPointerMove={mode === 'float' ? onFloatDragMove : undefined}
                     onPointerUp={mode === 'float' ? onFloatDragUp : undefined}
-                    style={{
-                    display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px 8px', flex: 'none',
-                    cursor: mode === 'float' ? (floatMoving ? 'grabbing' : 'grab') : undefined,
-                    userSelect: floatMoving ? 'none' : undefined,
-                    touchAction: mode === 'float' ? 'none' : undefined,
-                  }}>
-                    <span aria-hidden style={{
-                      width: 4, alignSelf: 'stretch', borderRadius: 2, flex: 'none',
-                      background: 'linear-gradient(180deg, var(--dsw-alias-state-business-primary, #4d6bfe), transparent)',
-                    }} />
-                    <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: '.015em' }}>
-                      {tabs.find((x) => x.id === nav.tab)?.label}
-                    </span>
-                    <span style={{ fontSize: 10.5, color: 'var(--dsw-alias-label-caption)', marginTop: 1 }}>
-                      {nav.tab === 'papers' && counts.papers > 0 && t('paper.count', { count: counts.papers })}
-                      {nav.tab === 'cards' && counts.cards > 0 && t('card.count', { count: counts.cards })}
-                    </span>
-                    <span style={{ flex: 1 }} />
-                    {mode !== 'float' && <IconButton label={full ? t('drawer.restore') : t('drawer.expand')} active={full} onClick={() => setFull(!full)} icon={<Icon d={Icons.expand} size={15} />} />}
-                    {mode !== 'float' && <IconButton label={t('drawer.float')} onClick={() => { setFull(false); panelBus.set('float'); }} icon={<Icon d={Icons.popout} size={15} />} />}
-                    {mode === 'float' && <IconButton label={t('drawer.dock')} onClick={() => { setFull(false); panelBus.set('open'); }} icon={<Icon d={Icons.dock} size={15} />} />}
-                    {mode !== 'float' && <IconButton label={t('drawer.collapse')} onClick={() => { setFull(false); panelBus.set('rail'); }} icon={<Icon d={Icons.collapseRight} size={15} />} />}
-                    <IconButton label={t('drawer.close')} onClick={() => panelBus.set('closed')} icon={<Icon d={Icons.close} size={15} />} />
-                  </div>
+                    style={{ cursor: mode === 'float' ? (floatMoving ? 'grabbing' : 'grab') : undefined, userSelect: floatMoving ? 'none' : undefined, touchAction: mode === 'float' ? 'none' : undefined }}
+>
+                      <PanelMenu label={t('drawer.more')} actions={[
+                        ...(mode !== 'float' ? [
+                          { label: t('drawer.officialSidebar'), run: toggleOfficialSidebar },
+                          { label: full ? t('drawer.restore') : t('drawer.expand'), run: () => setFull(!full) },
+                          { label: t('drawer.float'), run: () => { setFull(false); panelBus.set('float'); } },
+                        ] : [{ label: t('drawer.dock'), run: () => { setFull(false); panelBus.set('open'); } }]),
+                      ]} />
+                      {mode !== 'float' && <IconButton label={t('drawer.collapse')} onClick={() => { setFull(false); panelBus.set('rail'); }} icon={<Icon d={Icons.collapseRight} size={15} />} />}
+                      <IconButton label={t('drawer.close')} onClick={() => panelBus.set('closed')} icon={<Icon d={Icons.close} size={15} />} />
+
+                  </PanelHeader>
                   {/* 后台精读实时进度（轮询 /scholar/read/status，完成广播刷新） */}
                   <ReadProgressBanner t={t} />
                   {/* views */}
@@ -506,6 +519,9 @@ export function apply(ctx: any) {
   ctx.effect(() => () => window.removeEventListener('dsh-scholar-nav', onDeepLink), 'dsh-scholar: deep-link listener');
   // 官方右侧 Sidebar 页签(0.1.5+):旧宿主无该服务时静默跳过
   registerScholarRightbar(ctx);
+  bindDesktopServices(ctx);
+  ctx.effect(installDocumentPreview, 'dsh-scholar: desktop document links');
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'dsh-scholar-document-preview', order: 120 }, DocumentPreview));
   // 对话输入框左侧 📚 精读入口（单/多篇精读任务面板）
   ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
     name: 'conversation.input.left',

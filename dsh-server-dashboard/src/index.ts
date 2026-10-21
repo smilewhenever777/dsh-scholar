@@ -13,7 +13,7 @@
  * /api prefix (RPC bridge) and would swallow it.
  */
 import type { Context } from '@deepseek-ai/cordis';
-import z from 'schemastery';
+import z from '@deepseek-ai/schemastery';
 import { createHash } from 'node:crypto';
 import { credentialRef } from '@deepseek-ai/dsh-credentials';
 // 仅加载 dsh-settings 的 Context 类型增强(ctx.settings);0.1.5 起无值导出需要
@@ -28,23 +28,32 @@ import type { LogTail, ServerSnapshot } from './client/types.js';
 /** 兼容层:dsh-settings 0.1.5(SettingsProvider.register)与 0.2.0(SettingsForms)
  * 的双端配置访问。旧端走 register 得 scope;新端插件声明 Config schema(loader
  * 校验合并进 fiber.config),读值从 fiber.config,写值经 settings.update(带
- * revision 冲突检测重试)。返回统一形状 { get(), update(patch) }。 */
+ * revision 冲突检测)。返回统一形状 { get(), update(patch) }。 */
 export function attachConfigScope(ctx: any, ns: string, schema: any): { get(): any; update(patch: Record<string, unknown>): Promise<void> } {
   const anySettings = ctx.settings as any;
   if (typeof anySettings?.register === 'function') {
     const scope = anySettings.register(ns, schema, {});
     return { get: () => scope.get(), update: (patch) => scope.update(patch) };
   }
-  // 0.2.0:读值——fiber.config 已含 profile 默认值(schema 默认在 resolveConfig 时合并)
+  // Native Loader configs are stable VolatileRef objects; read the reference
+  // directly. SettingsForms supplies entry identity, revision and legacy fallback.
+  const entryId = () => {
+    try {
+      const own = ctx.configEditor?.entries?.().find((entry: any) => entry.fiber === ctx.fiber);
+      if (own?.options?.id) return own.options.id;
+    } catch { /* Older compositions do not expose the optional editor to plugins. */ }
+    return ctx.fiber?.runtime?.name ?? ns;
+  };
+  const descriptor = () => anySettings.describe?.().find((row: any) => row.ns === entryId());
   const read = () => {
-    const cfg = ctx.fiber?.config;
-    return cfg && typeof cfg === 'object' ? cfg : {};
+    const raw = ctx.fiber?.config;
+    const value = raw && typeof raw.get === 'function' ? raw.get() : descriptor()?.value ?? raw;
+    return value && typeof value === 'object' ? value : {};
   };
   const update = async (patch: Record<string, unknown>) => {
     if (typeof anySettings?.update !== 'function') throw new Error('当前宿主不支持配置写入');
-    // SettingsForms.update 的 ns 是 profile entry id(包名),我们的插件以包名登记
-    const entryId = (ctx as any).fiber?.runtime?.name ?? ns;
-    await anySettings.update(entryId, patch);
+    const revision = descriptor()?.revision;
+    await anySettings.update(entryId(), patch, revision);
   };
   return { get: read, update };
 }
@@ -109,9 +118,8 @@ const DashboardConfigSchema = z.object({
   alertIdleMin: z.number().step(1).min(1).max(120).default(5),
 });
 // 0.2.0 SettingsForms 写路径要求插件暴露 Config 且字段 volatile 才可运行时编辑;
-// 宿主只认 schema.meta.volatile,本地 schemastery 无 .volatile() 方法,故顶层整体标注
-(DashboardConfigSchema.meta as Record<string, unknown>).volatile = true;
-export const Config = DashboardConfigSchema;
+// The modern Loader updates VolatileRef values, not plain objects carrying a meta flag.
+export const Config = DashboardConfigSchema.volatile();
 
 // 0.1.5 起 dsh-settings 移除了 settingsNamespace 包装:命名空间直接以字面量传入
 const NS = 'server-dashboard';
@@ -715,6 +723,11 @@ export function apply(ctx: Context) {
 
   /** 403 unless loopback; returns false when the response is already sent */
   const guard = (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse): boolean => {
+  const site = String(req.headers['sec-fetch-site'] ?? '').toLowerCase();
+  if (site && site !== 'same-origin' && site !== 'none') {
+    sendJson(res, 403, { error: '跨源浏览器请求被拒绝' });
+    return false;
+  }
   // F02:Host 必须是回环域——DNS rebinding 把外域解析到 127.0.0.1 时 Host 是外域名
   const hostRaw = String(req.headers.host ?? '').toLowerCase();
   let hostName = hostRaw;

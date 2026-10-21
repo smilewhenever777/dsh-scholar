@@ -638,7 +638,7 @@ export function GraphView({ t }: { t: TFunc }) {
   const noMatch = !!filter && !!searchLit && searchLit.matched === 0;
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+    <div className="dshwb-surface" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       <SchStyles />
       {/* toolbar */}
       <div style={{ padding: '8px 10px 6px', display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>

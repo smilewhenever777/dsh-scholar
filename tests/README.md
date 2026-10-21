@@ -11,20 +11,46 @@ npm ci --prefix dsh-scholar
 npm ci --prefix dsh-server-dashboard
 npm ci --prefix dsh-trajectory
 npx playwright install chromium
-npm test
-npm run check:release
+npm run test:public
+npm run check:release:public
 ```
 
 On Linux, Playwright may also need browser system dependencies (`npx playwright install --with-deps chromium`).
-`npm test` builds all three plugins, runs their smoke/alert checks, then the backend,
+`npm run test:public` builds the three public plugins, runs their smoke/alert checks, then the backend,
 credential compatibility, browser, config-contract and scrolling suites. Logs and JSON
 results are saved under an ignored `.verify/<timestamp>/` directory; set `DSH_TEST_OUTPUT`
-to use a different directory. `npm run build` only builds the three plugins.
+to use a different directory. `npm test` and `npm run build` cover these three plugins.
 
 `check:release` checks Git candidates (including untracked, non-ignored files), common
 secret patterns in the checkout and Git history, public Markdown links, and npm dry-run
-package manifests. It does not stage, commit, push or publish. Pattern scanning is not a
+package manifests and the actual text contents of generated package files. Add `-- --staged`
+to `npm run check:release:public` to read the proposed commit from the Git index instead of
+the working copy; public links are resolved against the future checkout. It does not stage, commit, push or publish. Pattern scanning is not a
 guarantee that every type of sensitive information has been detected; review the final diff.
+
+## Official Desktop acceptance
+
+For the three public plugins only, use `npm run test:public` and `npm run check:release:public`.
+`npm run test:public` also runs the 13 native configuration and client contract tests, plus the
+12 browser-trust assertions. Run the native contracts alone,
+after building the plugins, with `npm run test:desktop:contract`.
+
+An installed official Desktop can be checked in a separate synthetic home:
+
+```powershell
+$env:DSH_DESKTOP_EXE = 'C:/Path/DeepSeek Harness/DeepSeek Harness.exe'
+$env:DSH_TEST_OUTPUT = '.verify/desktop-acceptance'
+npm run test:desktop
+```
+
+Build all three plugins first. The test uses Playwright's Electron launcher, a unique
+`DSH_HOME` and Electron user directory, synthetic paper/project data, and a clearly fake
+model key to enter the local workspace. It sends no model prompts and configures no SSH
+hosts. It preserves screenshots, downloaded Markdown, and `desktop-results.json` in the
+output directory, then closes only its own application. This does not migrate user data,
+change the real desktop profile, or update the installed application.
+
+See [Desktop compatibility review](./DESKTOP-COMPATIBILITY.md) for findings and limits.
 
 ## Individual checks
 
@@ -81,3 +107,9 @@ clipped panel at widths 420, 699, 700 and 1000, with the collection rail open an
 closed. It uses real wheel input to reach the last paper and checks the scroll
 container again after returning from details. The default output is
 `repair-scroll-2026-09-21/`; `DSH_TEST_OUTPUT` can preserve separate before/after runs.
+
+## Unified workbench visuals
+
+`node tests/workbench-visual.mjs` checks the three workbench views at 300, 440 and 900px
+in light/dark themes with reduced motion. Its 18 cases check horizontal overflow,
+left collection placement and fleet summary counts, saving synthetic screenshots in `.verify/`.

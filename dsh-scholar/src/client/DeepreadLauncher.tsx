@@ -12,6 +12,7 @@ import { api } from './api';
 import { ACADEMIC_LENS } from '../shared/lens';
 import type { TFunc } from './nav';
 import { Btn, Icon, Icons, Modal, SchStyles, SearchInput, T, Textarea, truncate } from './ui';
+import { tryFillComposer } from '../../../shared-client/src/desktop';
 
 type ComposerDelivery = 'sent' | 'filled' | 'clipboard' | 'failed';
 
@@ -22,15 +23,18 @@ type ComposerDelivery = 'sent' | 'filled' | 'clipboard' | 'failed';
 // E07:非破坏交付——宿主输入框为空且唯一可识别才填入(不自动点发送);
 // 已有草稿/附件/多编辑器时降级为剪贴板复制,绝不覆盖用户未发送的内容。
 export function deliverToComposer(text: string, done: (r: ComposerDelivery) => void): void {
-  const visible = (el: Element): boolean => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
-  const inPlugin = (el: Element): boolean => !!el.closest('[data-dsh-plugin]');
-  const ces = [...document.querySelectorAll('[contenteditable]:not([contenteditable="false"])')].filter((el) => visible(el) && !inPlugin(el));
-  const tas = [...document.querySelectorAll('textarea')].filter((el) => visible(el) && !inPlugin(el));
   const copy = () => {
     if (!navigator.clipboard?.writeText) { done('failed'); return; }
     try { void navigator.clipboard.writeText(text).then(() => done('clipboard'), () => done('failed')); }
     catch { done('failed'); }
   };
+  const native = tryFillComposer(text);
+  if (native === 'filled') { done('filled'); return; }
+  if (native === 'blocked') { copy(); return; }
+  const visible = (el: Element): boolean => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+  const inPlugin = (el: Element): boolean => !!el.closest('[data-dsh-plugin]');
+  const ces = [...document.querySelectorAll('[contenteditable]:not([contenteditable="false"])')].filter((el) => visible(el) && !inPlugin(el));
+  const tas = [...document.querySelectorAll('textarea')].filter((el) => visible(el) && !inPlugin(el));
   // All candidates count, including a textarea beside rich-text editors.
   if (ces.length + tas.length !== 1) { copy(); return; }
   const ce = ces[0] as HTMLElement | undefined;

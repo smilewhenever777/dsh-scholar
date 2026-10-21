@@ -1,14 +1,17 @@
 // Publication checks inspect Git candidates and npm manifests, never local vaults.
 import { execFileSync } from 'node:child_process';
-import { readFile, mkdir, writeFile, stat } from 'node:fs/promises';
+import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const out = resolve(process.env.DSH_TEST_OUTPUT ?? resolve(root, '.verify', 'release'));
 await mkdir(out, { recursive: true });
 const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true });
-const files = [...new Set(git('ls-files', '--cached', '--others', '--exclude-standard', '-z').split('\0').filter(Boolean))];
-const published = new Set(files), issues = [], packages = [];
+const staged = process.argv.includes('--staged');
+const candidates = staged ? git('diff', '--cached', '--name-only', '--diff-filter=ACMR', '-z') : git('ls-files', '--cached', '--others', '--exclude-standard', '-z');
+const files = [...new Set(candidates.split('\0').filter(Boolean))];
+// Staged mode reads index bytes and resolves links against the future checkout.
+const published = new Set((staged ? git('ls-files', '--cached', '-z').split('\0').filter(Boolean) : files)), issues = [], packages = [];
 const rules = [
  ['private-key', /-----BEGIN (?:OPENSSH |RSA |EC |DSA |ENCRYPTED )?PRIVATE KEY-----/g],
  ['api-token', /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|sk-[A-Za-z0-9_-]{24,}|AKIA[0-9A-Z]{16})\b/g],
@@ -26,14 +29,18 @@ const inspect = (file, source) => {
 for (const file of files) {
  if (/(?:^|\/)(?:node_modules|\.verify|dist-client|\.credentials|settings\.yaml|server\.log|\.env)(?:\/|\.|$)|\.(?:tgz|pem|key)$/i.test(file)) issues.push({ file, rule: 'private-or-generated-file' });
  let text;
- try { if ((await stat(resolve(root, file))).size > 4 * 1024 * 1024) { issues.push({ file, rule: 'large-file-review' }); continue; } text = await readFile(resolve(root, file), 'utf8'); }
+ try {
+  if (staged) text = git('show', ':' + file);
+  else text = await readFile(resolve(root, file), 'utf8');
+  if (Buffer.byteLength(text) > 4 * 1024 * 1024) { issues.push({ file, rule: 'large-file-review' }); continue; }
+ }
  catch (error) { if (error.code === 'ENOENT') continue; throw error; }
  inspect(file, text);
  if (file.endsWith('.md')) for (const m of text.replace(/```[\s\S]*?```|`[^`\n]+`/g, '').matchAll(/\]\(<?([^\s)>]+)>?\)/g)) {
   const target = m[1].split('#')[0];
   if (!target || /^[a-z]+:|^\//i.test(target)) continue;
   const relative = posix.normalize(posix.join(posix.dirname(file), decodeURIComponent(target)));
-  if (!published.has(relative) && !files.some(f => f.startsWith(relative.replace(/\/$/, '') + '/'))) issues.push({ file, rule: 'broken-public-link', target: relative });
+  if (!published.has(relative) && ![...published].some(f => f.startsWith(relative.replace(/\/$/, '') + '/'))) issues.push({ file, rule: 'broken-public-link', target: relative });
  }
 }
 // Historical checks are reported separately: old paths need not block a fixed checkout,
@@ -50,9 +57,16 @@ for (const plugin of ['dsh-scholar', 'dsh-server-dashboard', 'dsh-trajectory']) 
   if (!names.has(expected)) currentIssues.push({ file: plugin, rule: 'missing-package-file', target: expected });
  }
  for (const name of names) if (!/^(?:dist\/|package\.json$|LICENSE$|README\.md$|cordis\.patch\.yml$)/.test(name)) currentIssues.push({ file: plugin + '/' + name, rule: 'unexpected-package-file' });
+ // dist is Git-ignored: checking source alone misses leaked literals in bundles.
+ for (const name of names) {
+  const packed = await readFile(resolve(cwd, name));
+  if (packed.length > 4 * 1024 * 1024) currentIssues.push({ file: plugin + '/' + name, rule: 'large-package-file-review' });
+  else if (!/\.(?:png|jpe?g|webp|ico|woff2?|pdf)$/i.test(name)) inspect('npm-package:' + plugin + '/' + name, packed.toString('utf8'));
+ }
  packages.push({ name: pkg.name, version: pkg.version, files: pack.files.length, bytes: pack.unpackedSize, paths: [...names] });
 }
-const report = { candidates: files.length, currentIssues, historyIssues, packages };
+currentIssues.push(...issues.splice(0));
+const report = { scope: 'scholar-dashboard-trajectory-and-shared-tests', source: staged ? 'git-index' : 'working-tree', candidates: files.length, currentIssues, historyIssues, packages };
 await writeFile(resolve(out, 'release-check.json'), JSON.stringify(report, null, 2));
 console.log(JSON.stringify({ candidates: files.length, currentIssues, historyIssues, packages: packages.map(({ paths, ...p }) => p) }, null, 2));
 process.exitCode = currentIssues.length || historyIssues.some(x => x.rule !== 'personal-absolute-path') ? 1 : 0;

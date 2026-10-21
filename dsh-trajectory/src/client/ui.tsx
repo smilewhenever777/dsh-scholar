@@ -1,3 +1,4 @@
+import { workbenchCss, WorkbenchEmpty } from '../../../shared-client/src/Workbench';
 import { useModalFocus } from './modalFocus';
 import React from 'react';
 import { createPortal } from 'react-dom';
@@ -37,6 +38,7 @@ export const Z = { drawer: 70, modal: 2147483100, float: 2147483000 } as const;
 export function TrajStyles() {
   return (
     <style>{`
+      ${workbenchCss}
       /* ---- 动效令牌(Material 3 时长/缓动分层;系统"减少动态"可整体关断)---- */
       :root {
         --traj-dur-fast: 140ms;
@@ -252,13 +254,14 @@ export function Btn(props: {
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="traj-press"
+      className="traj-press dshwb-button"
+      data-tone={tone}
       style={{
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-        minHeight: 26, padding: '3px 10px', lineHeight: 1.4,
+        minHeight: 30, padding: '3px 10px', lineHeight: 1.4,
         border: `1px solid ${tone === 'primary' || tone === 'soft' ? 'transparent' : 'var(--dsw-alias-border-l2)'}`,
         background,
-        borderRadius: 7, cursor: disabled ? 'default' : 'pointer',
+        borderRadius: 8, cursor: disabled ? 'default' : 'pointer',
         fontSize: 12, fontWeight: tone === 'primary' ? 600 : 400,
         color, opacity: disabled ? 0.5 : 1, whiteSpace: 'nowrap', transition: 'opacity .12s ease', ...style,
       }}
@@ -364,25 +367,8 @@ export function Field({ label, children, hint }: { label: React.ReactNode; child
 }
 
 /** empty-state block: big glyph + one-line title + soft hint */
-export function EmptyState({ icon, title, hint, action }: {
-  icon: React.ReactNode;
-  title: string;
-  hint?: string;
-  action?: React.ReactNode;
-}) {
-  return (
-    <div className="traj-fade" style={{
-      flex: 1, minHeight: 120, display: 'flex', flexDirection: 'column', alignItems: 'center',
-      justifyContent: 'center', textAlign: 'center', padding: '28px 20px', gap: 6,
-    }}>
-      <span style={{ color: 'var(--dsw-alias-label-dimmed, var(--dsw-alias-label-caption))', opacity: .85, marginBottom: 2 }}>
-        {icon}
-      </span>
-      <div style={{ fontSize: 12.5, fontWeight: 600, color: T.secondary }}>{title}</div>
-      {hint && <div style={{ fontSize: 11, color: T.caption, lineHeight: 1.65, maxWidth: 260 }}>{hint}</div>}
-      {action && <div style={{ marginTop: 6 }}>{action}</div>}
-    </div>
-  );
+export function EmptyState(props: { icon: React.ReactNode; title: string; hint?: string; action?: React.ReactNode }) {
+  return <WorkbenchEmpty {...props} />;
 }
 
 /** bordered section card used across detail pages */

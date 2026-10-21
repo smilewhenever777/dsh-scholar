@@ -41,7 +41,7 @@
     "@deepseek-ai/dsh-host-webserver": ">=0.1.5-rc.2 <0.3.0",
     "@deepseek-ai/dsh-settings": ">=0.1.5-rc.2 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.1.5-rc.2 <0.3.0",
-    "schemastery": "^3.18.0"
+    "@deepseek-ai/schemastery": "^3.18.4"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
@@ -56,9 +56,9 @@
     "@types/node": "^22.10.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
-    "schemastery": "^3.18.0",
     "tsdown": "^0.22.14",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "@deepseek-ai/schemastery": "3.18.4"
   },
   "engines": {
     "node": ">=20"

@@ -1,3 +1,4 @@
+import { WorkbenchStyles, WorkbenchEmpty } from '../../../shared-client/src/Workbench';
 import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import type { ServerSnapshot, GpuInfo, MetricSeries } from './types';
@@ -978,7 +979,7 @@ function HostCard({ snap, displayName, collapsed, staleMinutes, t, focused, focu
 
   if (!snap || !snap.ok) {
     return (
-      <div ref={cardRef} style={{ ...cardStyle, opacity: archived ? 0.5 : 0.7, padding: '10px 12px' }}>
+      <div className="dshwb-card" ref={cardRef} style={{ ...cardStyle, opacity: archived ? 0.5 : 0.7, padding: '10px 12px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <Dot tone="err" size={7} />
           <span style={{ flex: 1, fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={displayName}>{displayName}</span>
@@ -1060,7 +1061,7 @@ function HostCard({ snap, displayName, collapsed, staleMinutes, t, focused, focu
   }
 
   return (
-    <div ref={cardRef} style={cardStyle}>
+    <div className="dshwb-card" ref={cardRef} style={cardStyle}>
       {/* header (click to expand/collapse) */}
       <button
         type="button"
@@ -1345,22 +1346,12 @@ function FleetOverview({ hosts, snapshots, staleMinutes, t, onPick }: {
   ];
   return (
     <div style={{ flex: 'none', paddingBottom: 6, borderBottom: `1px solid ${T.borderL2}`, marginBottom: 2 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}>
-        <span style={{ fontSize: 9, color: 'var(--dsw-alias-label-caption)', letterSpacing: 1 }}>{t('overview.title')}</span>
-        <span style={{ flex: 1 }} />
-        {badges.filter((b) => b.n > 0).map((b) => (
-          <span
-            key={b.key}
-            title={`${b.label} ${b.n}`}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 4, padding: '0 7px', height: 15,
-              borderRadius: 999, fontSize: 9.5, fontVariantNumeric: 'tabular-nums',
-              background: `color-mix(in srgb, ${b.tone} 14%, transparent)`, color: b.tone,
-            }}
-          >
-            <span style={{ width: 5, height: 5, borderRadius: 5, background: b.tone }} />{b.n}
-          </span>
-        ))}
+      <div style={{ fontSize: 11, fontWeight: 600, color: T.secondary, marginBottom: 8 }}>{t('overview.title')}</div>
+      <div data-dsh-part="fleet-summary" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 6, marginBottom: 12 }}>
+        {badges.map(b => <div key={b.key} style={{ padding: '8px', borderRadius: 9, background: `color-mix(in srgb, ${b.tone} 6%, var(--dsw-alias-bg-base))`, border: `1px solid color-mix(in srgb, ${b.tone} 16%, var(--dsw-alias-border-l2))` }}>
+          <div style={{ fontSize: 20, fontWeight: 650, fontVariantNumeric: 'tabular-nums', color: b.tone, lineHeight: 1.3 }}>{b.n}</div>
+          <div style={{ fontSize: 10, color: T.secondary, marginTop: 3 }}>{b.label}</div>
+        </div>)}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
         {hosts.map((h) => {
@@ -1556,13 +1547,9 @@ export function DashboardPanel({ hosts, snapshots, staleMinutes, t, onRetryHost,
   const othersAnomaly = others.filter((h) => hostAnomalies(snapshots[h.id], staleMinutes).any).length;
 
   return (
-    <div ref={rootRef} style={{ padding: '8px 10px 12px', display: 'flex', flexDirection: 'column', gap: 8, height: '100%', overflow: 'auto', color: 'var(--dsw-alias-label-primary)' }}>
-      {hosts.length === 0 && (
-        <div style={{ marginTop: 56, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, textAlign: 'center' }}>
-          <span aria-hidden style={{ fontSize: 30, opacity: 0.35 }}>🖥️</span>
-          <span style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--dsw-alias-label-caption)', maxWidth: 240 }}>{t('panel.empty')}</span>
-        </div>
-      )}
+    <div className="dshwb-surface dshwb-scroll" ref={rootRef} style={{ boxSizing: 'border-box', padding: '12px', display: 'flex', flexDirection: 'column', gap: 8, height: '100%', overflow: 'auto', color: 'var(--dsw-alias-label-primary)' }}>
+      <WorkbenchStyles />
+      {hosts.length === 0 && <WorkbenchEmpty icon={<Icon d={Icons.monitor} size={26} />} title={t('panel.emptyTitle')} hint={t('panel.empty')} />}
       <FleetOverview hosts={hosts} snapshots={snapshots} staleMinutes={staleMinutes} t={t} onPick={pickFromOverview} />
       {main.map((h) => <HostCard key={h.id} snap={snapshots[h.id]} displayName={h.name || h.id} collapsed={false} staleMinutes={staleMinutes} t={t} focused={focusId === h.id} focusGpuIndex={focusId === h.id ? focusGpu : undefined} onRetry={retry} pinned={h.pinned} onTogglePin={() => void togglePin(h.id)} archived={false} onToggleArchive={() => void toggleArchive(h.id)} wideGpuGrid={wide} />)}
       {others.length > 0 && (

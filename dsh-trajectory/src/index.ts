@@ -14,7 +14,7 @@
  * produced in conversation — the host never calls an LLM itself.
  */
 import type { Context } from '@deepseek-ai/cordis';
-import z from 'schemastery';
+import z from '@deepseek-ai/schemastery';
 // 仅加载 dsh-settings 的 Context 类型增强(ctx.settings);0.1.5 起无值导出需要
 import type {} from '@deepseek-ai/dsh-settings';
 import type { TrajConfig } from './shared/types.js';
@@ -26,23 +26,32 @@ import { registerTrajPrompt } from './prompt.js';
 /** 兼容层:dsh-settings 0.1.5(SettingsProvider.register)与 0.2.0(SettingsForms)
  * 的双端配置访问。旧端走 register 得 scope;新端插件声明 Config schema(loader
  * 校验合并进 fiber.config),读值从 fiber.config,写值经 settings.update(带
- * revision 冲突检测重试)。返回统一形状 { get(), update(patch) }。 */
+ * revision 冲突检测)。返回统一形状 { get(), update(patch) }。 */
 export function attachConfigScope(ctx: any, ns: string, schema: any): { get(): any; update(patch: Record<string, unknown>): Promise<void> } {
   const anySettings = ctx.settings as any;
   if (typeof anySettings?.register === 'function') {
     const scope = anySettings.register(ns, schema, {});
     return { get: () => scope.get(), update: (patch) => scope.update(patch) };
   }
-  // 0.2.0:读值——fiber.config 已含 profile 默认值(schema 默认在 resolveConfig 时合并)
+  // Native Loader configs are stable VolatileRef objects; read the reference
+  // directly. SettingsForms supplies entry identity, revision and legacy fallback.
+  const entryId = () => {
+    try {
+      const own = ctx.configEditor?.entries?.().find((entry: any) => entry.fiber === ctx.fiber);
+      if (own?.options?.id) return own.options.id;
+    } catch { /* Older compositions do not expose the optional editor to plugins. */ }
+    return ctx.fiber?.runtime?.name ?? ns;
+  };
+  const descriptor = () => anySettings.describe?.().find((row: any) => row.ns === entryId());
   const read = () => {
-    const cfg = ctx.fiber?.config;
-    return cfg && typeof cfg === 'object' ? cfg : {};
+    const raw = ctx.fiber?.config;
+    const value = raw && typeof raw.get === 'function' ? raw.get() : descriptor()?.value ?? raw;
+    return value && typeof value === 'object' ? value : {};
   };
   const update = async (patch: Record<string, unknown>) => {
     if (typeof anySettings?.update !== 'function') throw new Error('当前宿主不支持配置写入');
-    // SettingsForms.update 的 ns 是 profile entry id(包名),我们的插件以包名登记
-    const entryId = (ctx as any).fiber?.runtime?.name ?? ns;
-    await anySettings.update(entryId, patch);
+    const revision = descriptor()?.revision;
+    await anySettings.update(entryId(), patch, revision);
   };
   return { get: read, update };
 }
@@ -72,8 +81,8 @@ const TrajConfigSchema = z.object({
   dataDir: z.string().default(''),
 });
 // 0.2.0 SettingsForms 写路径要求暴露 Config 且 volatile 才可运行时编辑(详见 dashboard 同款注释)
-(TrajConfigSchema.meta as Record<string, unknown>).volatile = true;
-export const Config = TrajConfigSchema;
+// The modern Loader updates VolatileRef values, not plain objects carrying a meta flag.
+export const Config = TrajConfigSchema.volatile();
 
 export function apply(ctx: Context) {
   const scope = attachConfigScope(ctx, NS, TrajConfigSchema);

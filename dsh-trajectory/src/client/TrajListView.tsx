@@ -3,8 +3,9 @@ import type { TrajEntry, TrajGoal, TrajGoalLog, TrajHypothesis, TrajMetric, Traj
 import { TRAJ_STATUSES } from '../shared/types';
 import type { DashProgress } from './dash';
 import type { TFunc } from './nav';
-import { Icon, Icons, relTime, SearchInput, statusColor, T, TrajStyles, truncate } from './ui';
+import { EmptyState, Icon, Icons, relTime, SearchInput, statusColor, T, TrajStyles, truncate } from './ui';
 import { NODE_KIND_LABELS, STATUS_LABELS } from './locales';
+import { revealHostPath } from '../../../shared-client/src/desktop';
 
 const HYP_STATUS_ZH: Record<string, string> = {
   active: '进行中', validated: '已证实', falsified: '已证否', superseded: '已替代', parked: '已搁置',
@@ -52,7 +53,7 @@ function CountUp({ value, duration = 600 }: { value: number; duration?: number }
 /** 加载骨架:研究问题卡 + 工具栏 + 三张节点卡的 shimmer 轮廓 */
 function ListSkeleton() {
   return (
-    <div data-dsh-part="trajectory-list" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '6px 12px 14px' }}>
+    <div className="dshwb-surface" data-dsh-part="trajectory-list" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '6px 12px 14px' }}>
       <TrajStyles />
       <div className="traj-skel" style={{ height: 92, borderRadius: 11, marginBottom: 12 }} />
       <div className="traj-skel" style={{ height: 22, width: '68%', marginBottom: 10 }} />
@@ -373,11 +374,12 @@ function DigestNode({ node, progress, t, onOpen, onDelete, onDeleteEntry, onStat
   present?: boolean;
 }) {
   const [open, setOpen] = React.useState(defaultOpen ?? false);
+  const [pathNotice, setPathNotice] = React.useState('');
   const prog = progress.get(node.id);
   const entries = [...(node.entries ?? [])].sort((a, b) => b.ts - a.ts);
   return (
     <div
-      className="traj-card"
+      className="dshwb-card traj-card"
       data-dsh-part="digest-node"
       style={{
         borderRadius: 10, border: '1px solid var(--dsw-alias-border-l2)',
@@ -466,26 +468,26 @@ function DigestNode({ node, progress, t, onOpen, onDelete, onDeleteEntry, onStat
         )}
         {/* v0.4: 源代码/输出目录引用(点击复制路径) */}
         {(node.refs?.sourceFiles?.length || node.refs?.outputDir) && (
-          <span
+          <button
+            type="button"
             title={[...(node.refs?.sourceFiles ?? []), node.refs?.outputDir].filter(Boolean).join('\n')}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9,
-              color: T.caption, cursor: 'pointer', maxWidth: 160,
+              color: T.caption, cursor: 'pointer', maxWidth: 160, background: 'none', border: 0, padding: 0,
             }}
             onClick={(e) => {
               e.stopPropagation();
-              const paths = [...(node.refs?.sourceFiles ?? []), node.refs?.outputDir].filter(Boolean);
-              if (!paths[0]) return;
-              // 发事件让 index.tsx 用 workspaces.openPath 原生打开;同时复制路径兜底
-              window.dispatchEvent(new CustomEvent('dsh-trajectory-open-file', { detail: { path: paths[0] } }));
-              navigator.clipboard?.writeText(paths[0]).catch(() => {});
+              const path = node.refs?.outputDir || node.refs?.sourceFiles?.[0];
+              if (!path) return;
+              void revealHostPath(path).then(result => setPathNotice(t(result === 'revealed' ? 'file.revealed' : 'file.copied'))).catch(() => setPathNotice(t('file.failed')));
             }}
           >
             📁 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {node.refs?.outputDir ?? node.refs?.sourceFiles?.[0] ?? ''}
             </span>
-          </span>
+          </button>
         )}
+        {pathNotice && <span role="status" style={{ fontSize: 10, color: T.caption }}>{pathNotice}</span>}
         {!present && entries.length > 0 && (
           <button
             type="button"
@@ -566,7 +568,7 @@ export function TrajListView({ t, file, progress, onOpen, onDelete, onDeleteEntr
   const filtered = q !== '' || statusFilter !== 'all';
 
   return (
-    <div className="traj-scroll" data-dsh-plugin="dsh-trajectory" data-dsh-part="trajectory-list"
+    <div className="traj-scroll dshwb-surface" data-dsh-plugin="dsh-trajectory" data-dsh-part="trajectory-list"
       style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '6px 12px 14px' }}>
       <TrajStyles />
       <GoalHeader t={t} file={file} goalLog={file.goalLog ?? []} />
@@ -663,9 +665,7 @@ export function TrajListView({ t, file, progress, onOpen, onDelete, onDeleteEntr
         </div>
       )}
       {file.nodes.length === 0 && (
-        <div style={{ textAlign: 'center', color: T.caption, fontSize: 11.5, padding: '40px 0' }}>
-          {t('common.empty')}
-        </div>
+        <EmptyState icon={<Icon d={Icons.list} />} title={t('common.empty')} />
       )}
     </div>
   );

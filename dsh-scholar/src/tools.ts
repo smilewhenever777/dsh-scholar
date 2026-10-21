@@ -360,10 +360,8 @@ export function registerScholarTools(
           const html = String(args.html ?? '');
           if (!html.trim()) return { ok: false, error: 'html 内容为空' };
           if (html.length > 20 * 1024 * 1024) return { ok: false, error: '报告超过 20MB 上限' };
-          const dir = join(store.dir, 'reports');
-          await mkdir(dir, { recursive: true });
-          const name = `${safeName(paper.id)}-${Date.now()}.html`;
-          await writeFile(join(dir, name), html, 'utf8');
+          // 共享租约+实例队列内原子发布（外部 HTML 归档与同步/本地写互斥）
+          const name = await store.publishReportFile(`${safeName(paper.id)}-${Date.now()}.html`, Buffer.from(html, 'utf8'));
           return { ok: true, file: name, title: paper.title };
         },
       })),

@@ -1,3 +1,4 @@
+import { WorkbenchStyles } from '../../../shared-client/src/Workbench';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 interface HostRow {
@@ -36,12 +37,12 @@ type T = (key: string, params?: Record<string, unknown>) => string;
 
 const input: React.CSSProperties = {
   display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, marginBottom: 8,
-  padding: '4px 8px', borderRadius: 6, border: '1px solid var(--dsw-alias-border-l2)',
+  minHeight: 30, padding: '5px 9px', borderRadius: 8, border: '1px solid var(--dsw-alias-border-l2)',
   background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'var(--dsw-alias-label-primary)', fontSize: 12,
 };
 const btn: React.CSSProperties = {
-  border: '1px solid var(--dsw-alias-border-l2)', background: 'none', borderRadius: 6,
-  padding: '3px 10px', cursor: 'pointer', fontSize: 12, color: 'var(--dsw-alias-label-primary)',
+  border: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-base)', borderRadius: 8,
+  minHeight: 30, padding: '4px 10px', cursor: 'pointer', fontSize: 12, color: 'var(--dsw-alias-label-primary)',
 };
 const label: React.CSSProperties = { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', display: 'block' };
 
@@ -315,7 +316,8 @@ export function ServerDashboardSettings({ t }: { t: T }) {
     : hosts;
 
   return (
-    <div style={{ padding: '12px 16px', fontSize: 12, maxWidth: 560, minWidth: 0, boxSizing: 'border-box', width: '100%' }}>
+    <div className="dshwb-surface dshwb-settings" style={{ padding: '12px 16px', fontSize: 12, maxWidth: 560, minWidth: 0, boxSizing: 'border-box', width: '100%' }}>
+      <WorkbenchStyles />
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 10 }}>
         <span style={{ fontWeight: 600, fontSize: 13 }}>{t('settings.nav')}</span>
         <span style={{ flex: 1 }} />

@@ -1,3 +1,6 @@
+import { PanelHeader } from '../../../shared-client/src/Workbench';
+import { PanelMenu } from '../../../shared-client/src/PanelMenu';
+import { clampDockWidth, DOCK_TOP, bindDesktopServices, toggleOfficialSidebar, registerDockPanel, installDockLayout, selectedWorkspace } from '../../../shared-client/src/desktop';
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import type { TrajNode, TrajProjectSummary, TrajProjectFile, TrajStatus } from '../shared/types';
@@ -7,6 +10,7 @@ import { TrajListView, TrajStoryView } from './TrajListView';
 import { NodeEditorModal, ProjectModal, ProjectSettingsModal } from './NodeEditor';
 import { TrajSettings } from './SettingsSection';
 import { api, qs } from './api';
+import { clampFloat } from '../../../shared-client/src/index';
 import { navBus, useNav, type TFunc } from './nav';
 import { Btn, EmptyState, Icon, IconButton, Icons, Select, T, TrajStyles, Z } from './ui';
 import { useDashProgress } from './dash';
@@ -24,7 +28,7 @@ export const inject = ['slots', 'locale', 'sessions', 'workspaces'];
  * sessions.list  → { current, byId: { [id]: { cwd } } }
  * workspaces.list → { items: [{ workspaceId, path, title }], recentWorkspaceId }
  */
-const shell: { sessions?: any; workspaces?: any } = {};
+const shell: { sessions?: any; workspaces?: any; sidebarRight?: any } = {};
 
 interface WsInfo {
   cwd: string;
@@ -42,7 +46,7 @@ const wsBus = {
   },
   set(next: WsInfo | null) {
     const cur = wsBus.info;
-    if (cur?.cwd !== next?.cwd || cur?.title !== next?.title || cur?.items?.length !== next?.items?.length) {
+    if (cur?.cwd !== next?.cwd || cur?.title !== next?.title || JSON.stringify(cur?.items) !== JSON.stringify(next?.items)) {
       wsBus.info = next;
       for (const l of wsBus.listeners) l();
     }
@@ -74,7 +78,7 @@ function officialRightInset(): number {
 function findOfficialSidebarToggle(): HTMLButtonElement | null {
   try {
     const list = Array.from(document.querySelectorAll('button')).filter(b => {
-      if (!/右侧边栏/.test(b.getAttribute('aria-label') || '')) return false;
+      if (!/右侧边栏|right sidebar/i.test(b.getAttribute('aria-label') || '')) return false;
       const r = b.getBoundingClientRect();
       return r.width > 0 && r.x >= 0 && r.x < window.innerWidth && getComputedStyle(b).visibility !== 'hidden';
     });
@@ -87,94 +91,11 @@ function officialSidebarOpen(): boolean {
   return officialRightInset() > 0;
 }
 
-/** 应用顶部两行的总高:抽屉按官方侧边栏同款从顶栏下方开始。 */
-function officialTopInset(): number {
-  try {
-    const btn = Array.from(document.querySelectorAll('button')).find(b => {
-      if (!/右侧边栏/.test(b.getAttribute('aria-label') || '')) return false;
-      const r = b.getBoundingClientRect();
-      return r.width > 0 && r.x >= 0 && r.x < window.innerWidth && getComputedStyle(b).visibility !== 'hidden';
-    });
-    if (!btn) return 0;
-    let best = 0;
-    let el = btn.parentElement;
-    while (el && el !== document.body) {
-      const r = el.getBoundingClientRect();
-      if (r.height > 8 && r.height <= 72 && r.width >= window.innerWidth * 0.3) best = Math.max(best, Math.round(r.bottom));
-      el = el.parentElement;
-    }
-    return best;
-  } catch {
-    return 0;
-  }
-}
 
-function computeWs(): WsInfo | null {  try {
-    const s = shell.sessions?.list?.getSnapshot?.();
-    const currentId = s?.current;
-    const cwd = currentId === undefined || currentId === null ? undefined : s?.byId?.[currentId]?.cwd;
-    // 诊断:工作区解析状态(帮助排查 sessions/workspaces 服务不可用的情况)
-    if (!cwd) console.warn('[dsh-trajectory] ws resolve: no cwd from sessions', {
-      hasSessions: !!shell.sessions, hasWorkspaces: !!shell.workspaces,
-      hasList: !!shell.sessions?.list, hasSnapshot: !!shell.sessions?.list?.getSnapshot,
-      currentId, keys: s ? Object.keys(s).slice(0, 5) : 'no snapshot',
-    });
-    const w = shell.workspaces?.list?.getSnapshot?.();
-    const items = (w?.items ?? []).map((it: any) => ({
-      workspaceId: String(it.workspaceId ?? it.path ?? ''),
-      path: String(it.path ?? ''),
-      title: String(it.title ?? it.path ?? ''),
-    })).filter((it: any) => it.path);
-    if (typeof cwd === 'string' && cwd) {
-      const norm = cwd.replace(/\\/g, '/').replace(/\/+$/, '');
-      const hit = items.find((it: any) => it.path.replace(/\\/g, '/') === norm);
-      const base = norm.split('/').pop() || norm;
-      return { cwd, title: hit?.title ?? base, items };
-    }
-    const recent = items.find((it: any) => it.workspaceId === w?.recentWorkspaceId) ?? items[0];
-    return recent ? { cwd: recent.path, title: recent.title, items } : null;
-  } catch {
-    return null;
-  }
-}
 
-/**
- * DOM fallback:从页面侧栏提取当前工作区(当 sessions/workspaces 服务不可用时的兜底)。
- * 找 sidebar 中 aria-selected=true 或 .active 的 treeitem,从其文本推断工作区名,
- * 再匹配 workspaces 列表获取完整路径。
- */
-function computeWsFromDOM(): WsInfo | null {
-  try {
-    if (!shell.workspaces?.list?.getSnapshot) return null;
-    const w = shell.workspaces.list.getSnapshot();
-    const items = (w?.items ?? []).map((it: any) => ({
-      workspaceId: String(it.workspaceId ?? it.path ?? ''),
-      path: String(it.path ?? ''),
-      title: String(it.title ?? it.path ?? ''),
-    })).filter((it: any) => it.path);
-    if (!items.length) return null;
-
-    // 找侧栏中选中的 treeitem
-    const selected = document.querySelector('[role="treeitem"][aria-selected="true"], [role="treeitem"].active');
-    if (!selected) return null;
-    const text = (selected.textContent || '').trim();
-
-    // 用工作区名匹配
-    const hit = items.find((it: any) =>
-      it.title.toLowerCase() === text.toLowerCase()
-      || text.toLowerCase().startsWith(it.title.toLowerCase())
-      || it.path.split('/').pop()?.toLowerCase() === text.split(/\s/)[0]?.toLowerCase()
-    );
-    if (hit) return { cwd: hit.path, title: hit.title, items };
-
-    // 如果没精确匹配,用最近的 recentWorkspaceId
-    // sessions.current 断裂时:不要盲目 fallback 到 items[0](会锁定错误工作区)。
-    // 先试 recentWorkspaceId,如果也没有,返回 null 让 host 侧追踪接管。
-    const recent = items.find((it: any) => it.workspaceId === w?.recentWorkspaceId);
-    return recent ? { cwd: recent.path, title: recent.title, items } : null;
-  } catch {
-    return null;
-  }
+function computeWs(): WsInfo | null {
+  try { return selectedWorkspace(shell.sessions, shell.workspaces, shell.sidebarRight); }
+  catch { return null; }
 }
 
 function useWsInfo(): WsInfo | null {
@@ -415,7 +336,7 @@ function FullPageOverlay({ t, wsTitle, projectName, graph, story, onExportMd, on
         if (r.height > window.innerHeight * 0.7 && r.left <= 4) { left = r.right; break; }
       }
       let right = officialRightInset();
-      const dock = (window as unknown as { __dshDock?: Record<string, { open: boolean; width: number }> }).__dshDock ?? {};
+      const dock = (window as unknown as { __dshDock?: Record<string, { open: boolean; width: number; overlay?: boolean }> }).__dshDock ?? {};
       // 全页画布右边界 = 官方右侧栏占位 + 全部停靠列总宽:自己的 rail(全页期间 32px)
       // + 内侧的 scholar + 外侧的 dashboard(dashboard 停在本面板 rail 左侧,画布必须再让出它)
       for (const [id, v] of Object.entries(dock)) {
@@ -461,9 +382,9 @@ function FullPageOverlay({ t, wsTitle, projectName, graph, story, onExportMd, on
 
   return createPortal(
     <div
-      className="traj-zoomin"
+      className="traj-zoomin dshwb-surface"
       style={{
-        position: 'fixed', top: 0, left: bounds.left, right: bounds.right, bottom: 0,
+        position: 'fixed', top: DOCK_TOP, left: bounds.left, right: bounds.right, bottom: 0,
         zIndex: 80, display: 'flex', flexDirection: 'column',
       }}
     >
@@ -516,19 +437,8 @@ const DRAWER_MAX = 720;
 const DRAWER_DEFAULT = 480;
 
 /** 浮动窗口几何夹取:不越出视口、不小于可读下限(与 dashboard/scholar 同款模板) */
-function clampFloat(g: { x: number; y: number; w: number; h: number }): { x: number; y: number; w: number; h: number } {
-  const vw = window.innerWidth, vh = window.innerHeight;
-  return {
-    x: Math.max(8, Math.min(g.x, vw - 80)),
-    y: Math.max(8, Math.min(g.y, vh - 60)),
-    w: Math.max(300, Math.min(g.w, vw - 16)),
-    h: Math.max(220, Math.min(g.h, vh - 16)),
-  };
-}
-// 宽度上限跟随视口:主内容保 1100(侧栏断点)之内自由拖宽,绝对上限 1200
-function clampW(w: number): number {
-  const dyn = Math.max(DRAWER_MIN, Math.min(1200, window.innerWidth - 1100));
-  return Math.max(DRAWER_MIN, Math.min(dyn, w));
+// 宽度上限按原生导航和对话最小宽度计算，不再强制预留 1100px。
+function clampW(w: number): number { return clampDockWidth(w);
 }
 
 interface OverviewBody {
@@ -704,46 +614,13 @@ function Drawer({ t }: { t: TFunc }) {
   // 偏移会形成循环约束,三面板同开时两者区间互相包含、低 z 者被整块盖住(看板"消失")。
   // 另让位官方右侧栏(布局内占位,不能盖):其开关不发 dock-change,靠 1s 轻轮询跟随。
   const [dockOffset, setDockOffset] = useState(0);
-  const [topInset, setTopInset] = useState(0);
-  const dockTop = topInset > 0 ? `${topInset}px` : 'var(--dsh-desktop-titlebar-inset, 0px)';
-  // 压缩让位(squeeze):停靠时把主内容右缘压出全部右舷面板总宽(变量+!important 抗应用重算)
-  useEffect(() => {
-    const apply = () => {
-      try {
-        const dock = (window as unknown as { __dshDock?: Record<string, { open: boolean; width: number }> }).__dshDock ?? {};
-        let strip = 0;
-        for (const v of Object.values(dock)) if (v?.open && v.width > 0) strip += v.width;
-        const capped = strip;
-        document.body.style.transition = 'margin-right .18s ease';
-        document.body.style.marginRight = capped > 0 ? `${capped}px` : '';
-        let sqStyle = document.getElementById('dsh-squeeze-style') as HTMLStyleElement | null;
-        if (!sqStyle) {
-          sqStyle = document.createElement('style');
-          sqStyle.id = 'dsh-squeeze-style';
-          document.head.appendChild(sqStyle);
-        }
-        const frameEl = document.querySelector('[class*="frame"]');
-        if (frameEl) {
-          const token = String(frameEl.className).split(' ')[0];
-          if (token) sqStyle.textContent = `.${token} { width: calc(100vw - var(--dsh-squeeze, 0px)) !important; transition: width .18s ease; }`;
-        }
-        document.documentElement.style.setProperty('--dsh-squeeze', capped > 0 ? `${capped}px` : '0px');
-      } catch { /* 布局探测失败则退回覆盖式 */ }
-    };
-    apply();
-    window.addEventListener('dsh-dock-change', apply);
-    const timer = setInterval(apply, 1000);
-    return () => {
-      window.removeEventListener('dsh-dock-change', apply);
-      clearInterval(timer);
-      document.body.style.marginRight = '';
-      document.documentElement.style.setProperty('--dsh-squeeze', '0px');
-    };
-  }, [mode, fullPage]);
+  const dockTop = DOCK_TOP;
+  useEffect(() => registerDockPanel('dsh-trajectory', (mode) => panelBus.set(mode ?? 'rail'), 34), []);
+  useEffect(() => installDockLayout(), []);
   useEffect(() => {
     const INNER_PANELS = new Set(['dsh-scholar']);
     const compute = () => {
-      const w = window as unknown as { __dshDock?: Record<string, { open: boolean; width: number }> };
+      const w = window as unknown as { __dshDock?: Record<string, { open: boolean; width: number; overlay?: boolean }> };
       const dock = w.__dshDock ?? {};
       let off = 0;
       for (const [id, v] of Object.entries(dock)) {
@@ -751,7 +628,7 @@ function Drawer({ t }: { t: TFunc }) {
         if (INNER_PANELS.has(id) && v?.open && v.width > 0) off += v.width;
       }
       setDockOffset((cur) => (cur === off ? cur : off));
-      setTopInset((cur) => { const next = officialTopInset(); return cur === next ? cur : next; });
+
     };
     compute();
     const timer = setInterval(compute, 1000);
@@ -765,14 +642,14 @@ function Drawer({ t }: { t: TFunc }) {
   // publish footprint so sibling right-docked panels can dock around us
   const selfW = mode === 'open' ? width : mode === 'rail' ? 32 : 0;
   useEffect(() => {
-    const w = window as unknown as { __dshDock?: Record<string, { open: boolean; width: number }> };
-    w.__dshDock = { ...(w.__dshDock ?? {}), 'dsh-trajectory': { open: mode === 'open' || mode === 'rail', width: selfW } };
-    window.dispatchEvent(new CustomEvent('dsh-dock-change'));
-  }, [mode, selfW]);
+    const w = window as unknown as { __dshDock?: Record<string, { open: boolean; width: number; overlay?: boolean }> };
+    w.__dshDock = { ...(w.__dshDock ?? {}), 'dsh-trajectory': { open: mode === 'open' || mode === 'rail', width: selfW, overlay: mode === 'open' && fullPage } };
+    window.dispatchEvent(new CustomEvent('dsh-dock-change', { detail: { id: 'dsh-trajectory' } }));
+  }, [mode, selfW, fullPage]);
   useEffect(() => () => {
-    const w = window as unknown as { __dshDock?: Record<string, { open: boolean; width: number }> };
+    const w = window as unknown as { __dshDock?: Record<string, { open: boolean; width: number; overlay?: boolean }> };
     w.__dshDock = { ...(w.__dshDock ?? {}), 'dsh-trajectory': { open: false, width: 0 } };
-    window.dispatchEvent(new CustomEvent('dsh-dock-change'));
+    window.dispatchEvent(new CustomEvent('dsh-dock-change', { detail: { id: 'dsh-trajectory' } }));
   }, []);
 
   /* mutations */
@@ -850,7 +727,7 @@ function Drawer({ t }: { t: TFunc }) {
             <div
               data-dsh-part="drawer-rail"
               style={{
-                position: 'absolute', top: 'var(--dsh-desktop-titlebar-inset, 0px)', right: dockOffset, bottom: 0, width: 34, pointerEvents: 'auto',
+                position: 'absolute', top: dockTop, right: dockOffset, bottom: 0, width: 34, pointerEvents: 'auto',
                 display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, padding: '10px 0',
                 borderLeft: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-base)',
                 backdropFilter: 'blur(16px) saturate(1.08)', WebkitBackdropFilter: 'blur(16px) saturate(1.08)',
@@ -875,12 +752,12 @@ function Drawer({ t }: { t: TFunc }) {
           )}
           {(mode === 'open' || mode === 'float') && (
             <div
-              className="traj-slide"
+              className="traj-slide dshwb-surface"
               data-dsh-part="drawer-panel"
               style={{
                 ...(mode === 'float'
                   ? { position: 'fixed' as React.CSSProperties['position'], top: floatGeom.y, left: floatGeom.x, width: floatGeom.w, height: floatGeom.h, pointerEvents: 'auto' as const, zIndex: 2, borderRadius: 12, border: '1px solid var(--dsw-alias-border-l2)', boxShadow: 'var(--dsw-shadow-lv3, 0 12px 40px rgba(0,0,0,.35))', overflow: 'hidden', display: 'flex' as const, flexDirection: 'column' as const, background: 'var(--dsw-alias-bg-base)' }
-                  : { position: 'absolute' as React.CSSProperties['position'], top: 'var(--dsh-desktop-titlebar-inset, 0px)', right: dockOffset, bottom: 0, width, pointerEvents: 'auto' as const }),
+                  : { position: 'absolute' as React.CSSProperties['position'], top: dockTop, right: dockOffset, bottom: 0, width, pointerEvents: 'auto' as const }),
                 display: 'flex', flexDirection: 'column', background: 'var(--dsw-alias-bg-base)',
                 backdropFilter: 'blur(16px) saturate(1.08)', WebkitBackdropFilter: 'blur(16px) saturate(1.08)',
                 borderLeft: '1px solid var(--dsw-alias-border-l2)',
@@ -924,7 +801,7 @@ function Drawer({ t }: { t: TFunc }) {
 
               {/* body = left icon rail + content column */}
               <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-                <nav style={{
+                <nav className="dshwb-nav" style={{
                   width: 46, flex: 'none', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
                   padding: '10px 0', borderRight: '1px solid var(--dsw-alias-border-l2)',
                   background: 'var(--dsw-alias-bg-layer-1, rgba(127,127,127,.05))',
@@ -978,50 +855,27 @@ function Drawer({ t }: { t: TFunc }) {
                 {/* content column */}
                 <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
                   {/* header: view name + window controls */}
-                  <div className="traj-fade"
+                  <PanelHeader icon={<Icon d={tabs.find(x => x.id === nav.tab)?.icon ?? Icons.traj} size={15} />}
+                    title={tabs.find(x => x.id === nav.tab)?.label ?? t('nav.title')} count={wsBound && file ? file.project.name : undefined}
                     onPointerDown={mode === 'float' ? onFloatDragDown : undefined}
                     onPointerMove={mode === 'float' ? onFloatDragMove : undefined}
                     onPointerUp={mode === 'float' ? onFloatDragUp : undefined}
-                    style={{
-                    display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px 4px', flex: 'none',
-                    cursor: mode === 'float' ? (floatMoving ? 'grabbing' : 'grab') : undefined,
-                    userSelect: floatMoving ? 'none' : undefined,
-                    touchAction: mode === 'float' ? 'none' : undefined,
-                  }}>
-                    <span aria-hidden style={{
-                      width: 4, alignSelf: 'stretch', borderRadius: 2, flex: 'none',
-                      background: 'linear-gradient(180deg, var(--dsw-alias-state-business-primary, #4d6bfe), transparent)',
-                    }} />
-                    <span style={{ fontWeight: 700, fontSize: 13.5, letterSpacing: '.01em' }}>
-                      {tabs.find((x) => x.id === nav.tab)?.label}
-                    </span>
-                    {wsBound && file && (
-                      <span style={{ fontSize: 10.5, color: T.caption, marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {file.project.name}
-                      </span>
-                    )}
-                    <span style={{ flex: 1 }} />
-                    {mode !== 'float' && <IconButton label={officialSidebarOpen() ? '收起官方右侧栏' : '展开官方右侧栏'} onClick={() => findOfficialSidebarToggle()?.click()} icon={<Icon d={Icons.dock} size={15} />} />}
-                    <IconButton
-                      label={t('graph.fullpage')}
-                      onClick={enterFullPage}
-                      icon={<Icon d={Icons.expand} size={15} />}
-                    />
-                    {rightbarAvailable() && (
-                      <IconButton
-                        label={t('rightbar.follow')}
-                        onClick={openMainlineInRightbar}
-                        icon={<Icon d={Icons.sidebarRight} size={15} />}
-                      />
-                    )}
-                    {mode !== 'float' && <IconButton label={t('drawer.float')} onClick={() => { setFullPage(false); panelBus.set('float'); }} icon={<Icon d={Icons.popout} size={15} />} />}
-                    {mode === 'float' && <IconButton label={t('drawer.dock')} onClick={() => { setFullPage(false); panelBus.set('open'); }} icon={<Icon d={Icons.dock} size={15} />} />}
+                    style={{ cursor: mode === 'float' ? (floatMoving ? 'grabbing' : 'grab') : undefined, userSelect: floatMoving ? 'none' : undefined, touchAction: mode === 'float' ? 'none' : undefined }}
+>
+                    <PanelMenu label={t('drawer.more')} actions={[
+                      { label: t('graph.fullpage'), run: enterFullPage },
+                      ...(mode !== 'float' ? [
+                        { label: t('drawer.officialSidebar'), run: toggleOfficialSidebar },
+                        { label: t('drawer.float'), run: () => { setFullPage(false); panelBus.set('float'); } },
+                      ] : [{ label: t('drawer.dock'), run: () => { setFullPage(false); panelBus.set('open'); } }]),
+                      ...(rightbarAvailable() ? [{ label: t('rightbar.follow'), run: openMainlineInRightbar }] : []),
+                    ]} />
                     {mode !== 'float' && <IconButton label={t('drawer.collapse')} onClick={() => panelBus.set('rail')} icon={<Icon d={Icons.collapseRight} size={15} />} />}
                     <IconButton label={t('drawer.close')} onClick={() => panelBus.set('closed')} icon={<Icon d={Icons.close} size={15} />} />
-                  </div>
+                  </PanelHeader>
 
                   {/* project bar:当前工作区 + 绑定状态 + 手动项目切换 */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 12px 6px', flex: 'none', minWidth: 0 }}>
+                  <div className="dshwb-toolbar" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, padding: '8px 10px', flex: 'none', minWidth: 0 }}>
                     <span
                       title={wsKey || undefined}
                       style={{
@@ -1275,48 +1129,30 @@ export function apply(ctx: any) {
   // 字典可能在上一次 fiber 已注册(fiber 卸载顺序不保证反注册先于重挂),
   // 重复注册会抛错让整个 loader entry 失败——这里必须容忍重复。
   try {
-    ctx.locale.register(NS, { zh, en });
+    ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-trajectory: dictionaries');
   } catch { /* already registered by a previous apply — fine */ }
   // 官方右侧 Sidebar 页签(0.1.5+):旧宿主无该服务时静默跳过
   registerTrajRightbar(ctx);
+  bindDesktopServices(ctx);
 
 
-  // capture shell services for workspace resolution (kanban pattern)
+  ctx.effect(() => () => { shell.sessions = undefined; shell.workspaces = undefined; shell.sidebarRight = undefined; wsBus.set(null); }, 'dsh-trajectory: release shell services');
+  // capture shell services for workspace resolution
   try {
     shell.sessions = ctx.get ? ctx.get('sessions') : undefined;
     shell.workspaces = ctx.get ? ctx.get('workspaces') : undefined;
   } catch { shell.sessions = shell.workspaces = undefined; }
-  const recomputeWs = () => {
-    const primary = computeWs();
-    if (primary?.cwd) {
-      wsBus.set(primary);
-      return;
-    }
-    // fallback 1: host 侧追踪的最近活跃工作区(通过 /traj/overview 的 lastActiveWs)
-    // 由 agent/status 事件和 traj_* 工具调用更新,不依赖 client sessions API
-    void api<{ lastActiveWs?: string }>('/traj/overview')
-      .then((ov) => {
-        if (ov.lastActiveWs && wsBus.info?.cwd !== ov.lastActiveWs) {
-          const items = primary?.items ?? [];
-          const hit = items.find((it: any) =>
-            it.path.split('\\').join('/') === (ov.lastActiveWs ?? '').split('\\').join('/'));
-          wsBus.set({
-            cwd: ov.lastActiveWs,
-            title: hit?.title ?? ov.lastActiveWs.split('/').pop() ?? ov.lastActiveWs,
-            items,
-          });
-        } else if (!ov.lastActiveWs) {
-          // fallback 2: DOM 推断
-          const dom = computeWsFromDOM();
-          if (dom) wsBus.set(dom);
-        }
-      })
-      .catch(() => {
-        // fallback 2: DOM 推断
-        const dom = computeWsFromDOM();
-        if (dom) wsBus.set(dom);
-      });
-  };
+  const recomputeWs = () => wsBus.set(computeWs());
+  ctx.inject(['sidebarRight'], (child: any) => {
+    const service = child.sidebarRight;
+    shell.sidebarRight = service;
+    const off = service.mounted?.subscribe?.(recomputeWs);
+    recomputeWs();
+    return () => {
+      off?.();
+      if (shell.sidebarRight === service) { shell.sidebarRight = undefined; recomputeWs(); }
+    };
+  });
   recomputeWs();
   // follow workspace/session switching live
   try {
@@ -1343,22 +1179,6 @@ export function apply(ctx: any) {
   // belt-and-braces: re-resolve periodically in case feeds don't notify
   const wsTimer = setInterval(recomputeWs, 5000);
   ctx.effect(() => () => clearInterval(wsTimer), 'dsh-trajectory: ws timer');
-
-  // v0.4: 原生打开文件(节点卡 📁 点击 → workspaces.openPath)
-  const onOpenFile = (ev: Event) => {
-    try {
-      const detail = (ev as CustomEvent<{ path: string }>).detail;
-      if (!detail?.path) return;
-      // 优先用 DSH 原生 openPath
-      if (shell.workspaces?.openPath) {
-        void shell.workspaces.openPath(detail.path);
-      } else {
-        // fallback:复制到剪贴板(已在 TrajListView 侧做过)
-      }
-    } catch { /* never crash */ }
-  };
-  window.addEventListener('dsh-trajectory-open-file', onOpenFile);
-  ctx.effect(() => () => window.removeEventListener('dsh-trajectory-open-file', onOpenFile), 'dsh-trajectory: file open listener');
 
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',

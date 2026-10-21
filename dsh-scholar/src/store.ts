@@ -17,6 +17,9 @@ import type {
   CardQuery, GraphEdge, GraphEdgeKind, GraphNode, IdeaCard, KnowledgeGraph, Paper, PaperCollection, PaperQuery,
 } from './shared/types.js';
 import { GRAPH_EDGE_KINDS } from './shared/types.js';
+import { withLibraryLease } from './library-peer.js';
+import { isPeerProtocolEnrolled } from './library-peer.js';
+import { libraryMetadataFingerprint, writeCacheAck } from './library-peer.js';
 export const EMPTY_GRAPH: KnowledgeGraph = { nodes: [], edges: [] };
 
 const MAX_GRAPH_NODES = 2000;
@@ -313,8 +316,131 @@ export class PaperStore {
   }
 
   /** 存储目录被切换时由宿主调用；在途请求的后续写操作会显式报错。 */
+  /** 供桥/宿主只读判断：本实例是否仍存活（未 dispose）。 */
+  get peerLive(): boolean {
+    return !this.disposed;
+  }
+
   dispose(): void {
     this.disposed = true;
+  }
+
+  /** 在共享租约+实例队列内原子发布报告文件（reports/<name>）：外部 HTML 归档不再裸写。 */
+  async publishReportFile(fileName: string, bytes: Buffer): Promise<string> {
+    this.assertLive();
+    return this.exclusive(async () => {
+      const dir = join(this.dir, 'reports');
+      await mkdir(dir, { recursive: true });
+      const name = safeName(fileName);
+      const tmp = join(dir, `.${randomUUID().slice(0, 8)}.tmp`);
+      await writeFile(tmp, bytes);
+      await this.renameReplacing(tmp, join(dir, name));
+      return name;
+    });
+  }
+
+  /** 在共享租约+实例队列内删除报告文件（含同名 .json sidecar）。 */
+  async deleteReportFile(fileName: string): Promise<boolean> {
+    this.assertLive();
+    return this.exclusive(async () => {
+      const dir = join(this.dir, 'reports');
+      const name = safeName(fileName);
+      const removed = await unlink(join(dir, name)).then(() => true, () => false);
+      await unlink(join(dir, name.replace(/\.html$/, '.json'))).catch(() => {});
+      return removed;
+    });
+  }
+
+  /** 外部同步桥：批次在本地写互斥队列内执行（与本地变更绝不交错），
+   *  批后无论成败都以只读 refreshUnlocked 重载 maps，保证内存视图与磁盘一致。 */
+  async withExternalSync<T>(fn: () => Promise<T>): Promise<T> {
+    this.assertLive();
+    return this.exclusive((async () => {
+      this.assertLive();
+      try { return await fn(); }
+      finally { await this.refreshUnlocked(); }
+}));
+  }
+
+  /** 只读磁盘重载：刷新 papers/cards/graph/collections 与损坏清单。
+   *  在共享租约 + 实例队列内执行（一致快照）；不 mkdir、不触发 orphan 自愈写。 */
+  async refreshFromDisk(): Promise<void> {
+    this.assertLive();
+    await withLibraryLease(this.dir, { side: 'scholar' }, () => this.withLock(() => this.refreshUnlocked()));
+  }
+
+  /** 旧端 peer 桥专用：共享租约内原子完成 只读重载 + 元数据指纹快照 + cache-ack 写入。
+   *  三步一个租约——重载与指纹之间不可能插入外部写，杜绝"旧 maps 配新指纹"的假 cacheReady；
+   *  单飞（并发调用共享同一批）。生命周期闭环：await 之后（重载后/指纹后/发布 rename 前）
+   *  都断言未 dispose——已弃 store 的迟发布一律拒绝，绝不产生"当前缓存已确认"的假声明。 */
+  async refreshAndAckPeerCache(instanceUuid: string): Promise<string> {
+    this.assertLive();
+    if (this.peerAckInFlight) return this.peerAckInFlight;
+    const run = withLibraryLease(this.dir, { side: 'scholar' }, () => this.withLock(async () => {
+      this.assertLive();
+      await this.refreshUnlocked();
+      this.assertLive(); // 重载 await 期间可能被 dispose
+      const fingerprint = await libraryMetadataFingerprint(this.dir);
+      this.assertLive(); // 指纹计算后、发布前再核
+      // 发布 rename 前的最后防线：写入期间被 dispose 也不得落地迟到的 ack
+      await writeCacheAck(this.dir, instanceUuid, fingerprint, () => !this.disposed);
+      return fingerprint;
+    }));
+    this.peerAckInFlight = run.finally(() => { this.peerAckInFlight = null; });
+    return this.peerAckInFlight;
+  }
+
+  private peerAckInFlight: Promise<string> | null = null;
+
+  private async refreshUnlocked(): Promise<void> {
+    const papers = new Map<string, Paper>();
+    const cards = new Map<string, IdeaCard>();
+    const collections = new Map<string, PaperCollection>();
+    const corrupt: string[] = [];
+    let graph: KnowledgeGraph = EMPTY_GRAPH;
+    for (const f of await readdir(join(this.dir, 'papers')).catch(() => [] as string[])) {
+      if (!f.endsWith('.json')) continue;
+      try {
+        const p = JSON.parse(await readFile(join(this.dir, 'papers', f), 'utf8')) as Paper;
+        if (p && typeof p.id === 'string' && typeof p.title === 'string' && p.title) papers.set(p.id, p);
+      } catch { corrupt.push(`papers/${f}`); }
+    }
+    for (const f of await readdir(join(this.dir, 'cards')).catch(() => [] as string[])) {
+      if (!f.endsWith('.json')) continue;
+      try {
+        const c = JSON.parse(await readFile(join(this.dir, 'cards', f), 'utf8')) as IdeaCard;
+        if (c && typeof c.id === 'string' && typeof c.title === 'string' && c.title) cards.set(c.id, c);
+      } catch { corrupt.push(`cards/${f}`); }
+    }
+    try {
+      const g = JSON.parse(await readFile(join(this.dir, 'graph.json'), 'utf8')) as KnowledgeGraph;
+      if (g && Array.isArray(g.nodes) && Array.isArray(g.edges)) graph = g;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') corrupt.push('graph.json');
+    }
+    try {
+      const raw = JSON.parse(await readFile(join(this.dir, 'collections.json'), 'utf8')) as { collections?: PaperCollection[] };
+      for (const c of Array.isArray(raw?.collections) ? raw.collections : []) {
+        if (c && typeof c.id === 'string' && typeof c.name === 'string' && c.name) collections.set(c.id, c);
+      }
+    } catch { /* 缺失或损坏：分区视图为空 */ }
+    // 世代推进：外部内容变化/删除使旧 snapshot 失效（迟到 commitPaperArtifacts 拒绝）；
+    // 字节级相同则保留旧对象，避免误伤在途本地事务。
+    for (const id of new Set([...this.papers.keys(), ...papers.keys()])) {
+      const before = this.papers.get(id), after = papers.get(id);
+      if (before === after) continue;
+      if (before && after && JSON.stringify(before) === JSON.stringify(after)) { papers.set(id, before); continue; }
+      this.paperGenerations.set(id, (this.paperGenerations.get(id) ?? 0) + 1);
+    }
+    // 重载后的当前对象盖版本戳：刚同步进来的论文立即可提交派生文件（generation 匹配）
+    for (const p of papers.values()) {
+      this.paperVersions.set(p, this.paperGenerations.get(p.id) ?? 0);
+    }
+    this.papers = papers;
+    this.cards = cards;
+    this.collections = collections;
+    this.graph = graph;
+    this.corruptFiles = corrupt;
   }
 
   /** 把异步操作串到互斥链上（非重入：持锁期间只能调用私有的 *_unlocked 实现）。 */
@@ -324,11 +450,34 @@ export class PaperStore {
     return run;
   }
 
+  /** 库级互斥：先取跨进程共享租约（.peer-lease，进程内可重入），租约内再走实例写队列。
+   *  所有本地读-改-写（含 init 的孤儿自愈）与外部同步批都经此串行化，避免跨进程覆盖。 */
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    return withLibraryLease(this.dir, { side: 'scholar' }, () => this.withLock(fn));
+  }
+
+  /** 读-改-写专用：共享租约 + 实例队列内，先只读刷新当前盘面再执行变换——
+   *  另一端/另一缓存刚写入的字段绝不被本实例的旧缓存覆盖；refreshUnlocked 对字节级
+   *  未变的记录保留原对象与世代（在途快照不误伤），外部已变/已删则推进世代使迟到提交失效。 */
+  private exclusiveRmw<T>(fn: () => Promise<T>): Promise<T> {
+    return withLibraryLease(this.dir, { side: 'scholar' }, () => this.withLock(async () => {
+      await this.refreshUnlocked();
+      return fn();
+    }));
+  }
+
   private assertLive(): void {
     if (this.disposed) throw new Error('存储目录已切换，请重试');
   }
 
+  /** 初始化（含孤儿自愈写）整体在共享租约 + 实例队列内执行：与外部同步/另一端进程互斥。 */
   async init(): Promise<void> {
+    // 库根本身由 init 创建（原始行为）；建根在取租约之前——租约要求根已存在
+    await mkdir(this.dir, { recursive: true }).catch(() => {});
+    await this.exclusive(() => this.initUnlocked());
+  }
+
+  private async initUnlocked(): Promise<void> {
     await mkdir(join(this.dir, 'papers'), { recursive: true });
     await mkdir(join(this.dir, 'cards'), { recursive: true });
     await mkdir(join(this.dir, 'attachments'), { recursive: true });
@@ -368,13 +517,21 @@ export class PaperStore {
       this.graph = EMPTY_GRAPH;
     }
 
-    // self-heal legacy orphans: cards pointing at papers that no longer exist
-    for (const c of [...this.cards.values()]) {
-      if (!c.paperId || this.papers.has(c.paperId)) continue;
-      const fixed: IdeaCard = { ...c, paperId: undefined, updatedAt: Date.now() };
-      this.cards.set(c.id, fixed);
-      await this.atomicWrite(this.cardPath(c.id), fixed);
-      console.warn(`[dsh-scholar] 卡片 ${c.id} 引用的论文 ${c.paperId} 已不存在，解除关联`);
+    // self-heal legacy orphans: cards pointing at papers that no longer exist.
+    // 同步对端在册（协议标记存在）时跳过自愈写：卡片引用"暂未到达"的论文属于
+    // 逐记录同步的过渡态，init 绝不能据此解除关联破坏对端数据。
+    const peerEnrolled = await isPeerProtocolEnrolled(this.dir);
+    if (!peerEnrolled) {
+      for (const c of [...this.cards.values()]) {
+        if (!c.paperId || this.papers.has(c.paperId)) continue;
+        const fixed: IdeaCard = { ...c, paperId: undefined, updatedAt: Date.now() };
+        this.cards.set(c.id, fixed);
+        await this.atomicWrite(this.cardPath(c.id), fixed);
+        console.warn(`[dsh-scholar] 卡片 ${c.id} 引用的论文 ${c.paperId} 已不存在，解除关联`);
+      }
+    } else {
+      const orphans = [...this.cards.values()].filter((c) => c.paperId && !this.papers.has(c.paperId)).length;
+      if (orphans > 0) console.warn(`[dsh-scholar] 检测到 ${orphans} 张卡片引用暂缺论文；同步对端在册，跳过孤儿自愈`);
     }
 
     try {
@@ -406,7 +563,7 @@ export class PaperStore {
    */
   async upsertCollection(name: string, color?: string): Promise<{ collection: PaperCollection; existed: boolean }> {
     this.assertLive();
-    return this.withLock(() => this.upsertCollectionUnlocked(name, color));
+    return this.exclusiveRmw((() => this.upsertCollectionUnlocked(name, color)));
   }
 
   private async upsertCollectionUnlocked(name: string, color?: string): Promise<{ collection: PaperCollection; existed: boolean }> {
@@ -428,7 +585,7 @@ export class PaperStore {
 
   async renameCollection(id: string, patch: { name?: string; color?: string }): Promise<PaperCollection | undefined> {
     this.assertLive();
-    return this.withLock(async () => {
+    return this.exclusiveRmw((async () => {
       const cur = this.collections.get(id);
       if (!cur) return undefined;
       if (patch.name !== undefined && !patch.name.trim()) throw new Error('分区名称不能为空');
@@ -441,13 +598,13 @@ export class PaperStore {
       this.collections.set(id, next);
       await this.saveCollectionsJson();
       return next;
-    });
+}));
   }
 
   /** Delete a collection and strip its id from every member paper. */
   async deleteCollection(id: string): Promise<boolean> {
     this.assertLive();
-    return this.withLock(async () => {
+    return this.exclusiveRmw((async () => {
       if (!this.collections.delete(id)) return false;
       await this.saveCollectionsJson();
       for (const p of this.papers.values()) {
@@ -458,7 +615,7 @@ export class PaperStore {
         await this.atomicWrite(this.paperPath(p.id), next);
       }
       return true;
-    });
+}));
   }
 
   /**
@@ -467,7 +624,7 @@ export class PaperStore {
    */
   async ensureCollectionNames(names: string[]): Promise<string[]> {
     this.assertLive();
-    return this.withLock(async () => {
+    return this.exclusiveRmw((async () => {
       const ids: string[] = [];
       for (const raw of names) {
         const n = raw.trim();
@@ -477,7 +634,7 @@ export class PaperStore {
         if (!ids.includes(id)) ids.push(id);
       }
       return ids;
-    });
+}));
   }
 
   /** Keep only collection ids that actually exist. */
@@ -485,12 +642,27 @@ export class PaperStore {
     return [...new Set(ids.filter((id) => this.collections.has(id)))];
   }
 
+  /** Windows 并发读句柄会让 rename 报 EPERM/EACCES（读方微秒级持锁）：有界重试而非失败。 */
+  private async renameReplacing(tmp: string, file: string): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      try { await rename(tmp, file); return; }
+      catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if ((code === 'EPERM' || code === 'EACCES' || code === 'ENOTEMPTY') && attempt < 10) {
+          await new Promise((r) => setTimeout(r, 25));
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
   private async atomicWrite(file: string, data: unknown): Promise<void> {
     // 随机后缀：并发写不再共用同一 tmp 名（撕裂体/ENOENT 竞态）
     const tmp = `${file}.${randomUUID().slice(0, 8)}.tmp`;
     try {
       await writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
-      await rename(tmp, file);
+      await this.renameReplacing(tmp, file);
     } catch (err) {
       await unlink(tmp).catch(() => {}); // rename 失败也要回收 tmp，避免残留
       throw err;
@@ -507,7 +679,7 @@ export class PaperStore {
    *  记录已不存在(删除后迟到的后台归档因此自然失效,不再经 upsert 隐式复活)。 */
   async updatePaperTx(id: string, apply: (cur: Paper) => Paper | null): Promise<Paper | null> {
     this.assertLive();
-    return this.withLock(async () => {
+    return this.exclusiveRmw((async () => {
       this.assertLive();
       const cur = this.papers.get(id);
       if (!cur) return null;
@@ -517,7 +689,7 @@ export class PaperStore {
       await this.atomicWrite(this.paperPath(next.id), next);
       await this.ensurePaperNode(next);
       return next;
-    });
+}));
   }
 
   /** Commit derived files and optional metadata under the deletion lock. The
@@ -525,7 +697,7 @@ export class PaperStore {
    * Paper snapshots also prevent an old task from writing into a re-created id. */
   async commitPaperArtifacts<T>(papers: readonly Paper[], write: () => Promise<T>,
     patch?: { id: string; apply: (current: Paper) => Paper }): Promise<T | null> {
-    return this.withLock(async () => {
+    return this.exclusiveRmw((async () => {
       this.assertLive();
       if (!papers.every(p => this.papers.has(p.id)
         && this.paperVersions.get(p) === (this.paperGenerations.get(p.id) ?? 0))) return null;
@@ -539,17 +711,17 @@ export class PaperStore {
         await this.ensurePaperNode(next);
       }
       return result;
-    });
+}));
   }
 
   async upsertPaper(paper: Paper): Promise<Paper> {
     this.assertLive();
-    return this.withLock(async () => {
+    return this.exclusiveRmw((async () => {
       this.rememberPaper(paper);
       await this.atomicWrite(this.paperPath(paper.id), paper);
       await this.ensurePaperNode(paper);
       return paper;
-    });
+}));
   }
 
   /** Keep the graph aware of every library paper: auto-add (or relabel) the
@@ -655,7 +827,7 @@ export class PaperStore {
 
   async deletePaper(id: string): Promise<boolean> {
     this.assertLive();
-    return this.withLock(async () => {
+    return this.exclusiveRmw((async () => {
       if (!this.papers.delete(id)) return false;
       this.paperGenerations.set(id, (this.paperGenerations.get(id) ?? 0) + 1);
       await unlink(this.paperPath(id)).catch(() => {});
@@ -685,7 +857,7 @@ export class PaperStore {
         }
       } catch { /* 目录缺失静默跳过 */ }
       return true;
-    });
+}));
   }
 
   /** Clear paperId on cards that referenced a deleted paper (no orphan refs). */
@@ -747,7 +919,7 @@ export class PaperStore {
 
   async upsertCard(card: IdeaCard): Promise<IdeaCard> {
     this.assertLive();
-    return this.withLock(async () => {
+    return this.exclusiveRmw((async () => {
       this.cards.set(card.id, card);
       await this.atomicWrite(this.cardPath(card.id), card);
       // F11:先清该卡不再成立的自动边(改来源/改标签/改关联后旧边残留会污染图谱)
@@ -758,12 +930,12 @@ export class PaperStore {
         await this.saveGraphUnlocked(mergeGraph(this.graph, patch, 'append', new Set(this.papers.keys())));
       }
       return card;
-    });
+}));
   }
 
   async deleteCard(id: string): Promise<boolean> {
     this.assertLive();
-    return this.withLock(async () => {
+    return this.exclusiveRmw((async () => {
       if (!this.cards.delete(id)) return false;
       await unlink(this.cardPath(id)).catch(() => {});
       // strip dangling relations from cards that referenced this one
@@ -777,7 +949,7 @@ export class PaperStore {
       // 图谱级联：想法节点 + 触及它的所有边（derives_from/uses/related）
       await this.removeIdeaFromGraph(id);
       return true;
-    });
+}));
   }
 
   private async removeIdeaFromGraph(id: string): Promise<void> {
@@ -798,7 +970,7 @@ export class PaperStore {
 
   async saveGraph(graph: KnowledgeGraph): Promise<KnowledgeGraph> {
     this.assertLive();
-    return this.withLock(() => this.saveGraphUnlocked(graph));
+    return this.exclusiveRmw((() => this.saveGraphUnlocked(graph)));
   }
 
   private async saveGraphUnlocked(graph: KnowledgeGraph): Promise<KnowledgeGraph> {
@@ -813,10 +985,10 @@ export class PaperStore {
    */
   async saveGraphRebuild(graph: KnowledgeGraph): Promise<KnowledgeGraph> {
     this.assertLive();
-    return this.withLock(async () => {
+    return this.exclusiveRmw((async () => {
       await copyFile(join(this.dir, 'graph.json'), join(this.dir, 'graph.json.bak')).catch(() => {});
       return this.saveGraphUnlocked(graph);
-    });
+}));
   }
 
   stats(): {

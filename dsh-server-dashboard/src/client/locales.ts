@@ -1,5 +1,6 @@
 /** zh/en dictionaries for the serverDashboard namespace (zh is the key source of truth). */
 export const zh = {
+  'drawer.officialSidebar': '切换宿主右侧栏',
   'settings.hostRemoved': '该主机已被其他窗口删除，请核对后重新添加；编辑草稿已保留。',
   "settings.reload": "重新加载配置（保留编辑草稿）",
   "settings.reloadRequired": "配置缺少版本，请更新插件并重新加载",
@@ -9,6 +10,7 @@ export const zh = {
   'settings.confirmFingerprint': '将改变或清除已信任的 SSH 主机指纹。请先通过可信渠道核对服务器身份，确认继续？',
   'nav.label': '服务器',
   'nav.title': '服务器看板',
+  'panel.emptyTitle': '连接你的研究服务器',
   // 侧栏触发器悬浮摘要(聚合异常状态)
   'nav.sumOffline': '{count} 台离线',
   'nav.sumHot': '{count} 卡高温/满载',
@@ -151,6 +153,7 @@ export const zh = {
   'drawer.restore': '恢复停靠',
   'drawer.collapse': '收起为侧边标签',
   'drawer.close': '关闭',
+  'drawer.more': '更多面板操作',
   'drawer.resize': '拖动调整宽度',
   'rightbar.tabTitle': 'GPU 监控',
   'rightbar.guideDesc': '各服务器 GPU 温度与利用率一行流，常驻侧栏',
@@ -166,6 +169,7 @@ export const zh = {
 } as const;
 
 export const en: Record<keyof typeof zh, string> = {
+  'drawer.officialSidebar': 'Toggle host right sidebar',
   'settings.hostRemoved': 'This host was removed elsewhere. Review it before adding again; your draft is kept.',
   "settings.reload": "Reload config (keep draft)",
   "settings.reloadRequired": "Configuration version missing. Update the plugin and reload.",
@@ -315,6 +319,8 @@ export const en: Record<keyof typeof zh, string> = {
   'drawer.restore': 'Restore dock',
   'drawer.collapse': 'Collapse to rail',
   'drawer.close': 'Close',
+  'drawer.more': 'More panel actions',
+  'panel.emptyTitle': 'Connect your research servers',
   'drawer.resize': 'Drag to resize',
   'rightbar.tabTitle': 'GPU Monitor',
   'rightbar.guideDesc': 'One-line GPU temp & utilization per server, pinned in the right sidebar',

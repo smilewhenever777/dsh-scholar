@@ -7,9 +7,19 @@
 !/dsh-server-dashboard/
 !/dsh-trajectory/
 !/tests/
+!/shared-client/
 !/package.json
 !/package-lock.json
 
 # 内部开发日志（含研究方向/真实论文/会话细节，不公开）
 dsh-scholar/AUDIT-*.md
 dsh-scholar/REQUIREMENTS.md
+
+# Local runtime secrets and profiles must never become publication candidates.
+.env
+.env.*
+.credentials/
+*.pem
+*.key
+settings.yaml
+server.log

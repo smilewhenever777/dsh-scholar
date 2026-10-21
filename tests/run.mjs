@@ -22,12 +22,16 @@ async function run(name, args, cwd = root, npm = false) {
   await writeFile(resolve(out, 'run-results.json'), JSON.stringify({ results }, null, 2));
   if (code !== 0) throw Error(`${name} failed; see ${out}`);
 }
-for (const plugin of ['dsh-scholar', 'dsh-server-dashboard', 'dsh-trajectory']) await run(plugin + '-build', ['run', 'build'], resolve(root, plugin), true);
+const plugins = ['dsh-scholar', 'dsh-server-dashboard', 'dsh-trajectory'];
+for (const plugin of plugins) await run(plugin + '-build', ['run', 'build'], resolve(root, plugin), true);
 if (!process.argv.includes('--build-only')) {
   for (const [plugin, script] of [['dsh-scholar','smoke-test.mjs'], ['dsh-server-dashboard','test-alerts.mjs'], ['dsh-trajectory','smoke-test.mjs']]) await run(plugin + '-smoke', ['scripts/' + script], resolve(root, plugin));
   for (const test of ['regression', 'interaction-backend', 'dashboard-credential-compat']) await run(test, ['--experimental-vm-modules', 'tests/' + test + '.mjs']);
   await run('ui', ['tests/ui-regression.mjs']);
   await run('config-contract', ['--experimental-vm-modules', 'tests/config-contract.mjs']);
   await run('library-scroll', ['tests/library-scroll.mjs']);
+  await run('workbench-visual', ['tests/workbench-visual.mjs']);
+  await run('desktop-contract', ['--test', 'tests/desktop-contract.test.mjs']);
+  await run('browser-trust', ['--experimental-vm-modules', 'tests/browser-trust.mjs']);
 }
 console.log(`\nVerification artifacts: ${out}`);

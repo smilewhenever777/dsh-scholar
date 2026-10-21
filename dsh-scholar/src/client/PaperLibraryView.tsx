@@ -162,7 +162,7 @@ function PaperReports({ paperId, notify, t }: { paperId: string; notify?: (msg: 
         {reports.map((r) => (
           <div
             key={r.file}
-            className="sch-card"
+            className="dshwb-card sch-card"
             style={{
               display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5,
               border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 9,
@@ -812,7 +812,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
   /* ---------- form (new / edit) ---------- */
   if (form) {
     return (
-      <div className="sch-scroll sch-fade" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '10px 12px', fontSize: 12 }}>
+      <div className="dshwb-surface sch-scroll sch-fade" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '10px 12px', fontSize: 12 }}>
         <SchStyles />
         <div style={{ display: 'flex', alignItems: 'center', marginBottom: 4 }}>
           <Btn onClick={closeForm}><Icon d={Icons.back} size={12} /> {t('common.back')}</Btn>
@@ -837,7 +837,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
   /* ---------- detail ---------- */
   if (selected) {
     return (
-      <div className="sch-scroll sch-fade" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '10px 12px 14px', fontSize: 12 }} key={selected.id}>
+      <div className="dshwb-surface sch-scroll sch-fade" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '10px 12px 14px', fontSize: 12 }} key={selected.id}>
         <SchStyles />
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
           <Btn onClick={leavePaper}><Icon d={Icons.back} size={12} /> {t('common.back')}</Btn>
@@ -1102,7 +1102,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
                 type="button"
                 data-dsh-plugin="dsh-scholar"
                 data-dsh-part="idea-card-ref"
-                className="sch-card sch-press"
+                className="dshwb-card sch-card sch-press"
                 onClick={() => navBus.go('cards', undefined, c.id)}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left',
@@ -1192,7 +1192,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
         type="button"
         data-dsh-plugin="dsh-scholar"
         data-dsh-part="paper-card"
-        className="sch-card sch-press"
+        className="dshwb-card sch-card sch-press"
         onClick={() => { setActionError(''); void openPaper(p.id); }}
         style={{
           display: 'block', width: '100%', textAlign: 'left',
@@ -1206,8 +1206,8 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
           ['--sch-i' as string]: Math.min(schI, 20),
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
-          <span style={{
+        <div className="dshwb-paper-heading" style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+          <span className="dshwb-paper-title" style={{
             flex: 1, fontWeight: 600, fontSize: 13.2, lineHeight: 1.42, letterSpacing: '.003em',
             display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
           }}>{p.title}</span>
@@ -1255,7 +1255,7 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
 
   /* ---------- list ---------- */
   return (
-    <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+    <div className="dshwb-surface" style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       <SchStyles />
       <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'row' }}>
         {/* collection rail（Zotero 式分区导航 + 保存的筛选） */}
@@ -1380,11 +1380,9 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
               {railStats.years.map(([y, n]) => (
                 <div key={y} style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}>
                   <span style={{ width: 28, flex: 'none', fontVariantNumeric: 'tabular-nums' }}>{y}</span>
-                  <span aria-hidden style={{
-                    flex: 'none', height: 6, borderRadius: 3,
-                    width: `${Math.round((n / railStats.maxYear) * 84)}px`,
-                    background: 'color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 55%, transparent)',
-                  }} />
+                  <span aria-hidden style={{ flex: 1, minWidth: 0, height: 6 }}>
+                    <span style={{ display: 'block', height: '100%', borderRadius: 3, width: `${Math.round((n / railStats.maxYear) * 100)}%`, background: 'color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 55%, transparent)' }} />
+                  </span>
                   <span style={{ fontVariantNumeric: 'tabular-nums' }}>{n}</span>
                 </div>
               ))}
@@ -1413,14 +1411,14 @@ export function PaperLibraryView({ t }: { t: TFunc }) {
         {/* Keep the list constrained to the panel so papers scroll independently of the collection rail. */}
         <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           {/* toolbar */}
-          <div style={{ padding: '8px 10px 6px', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+          <div className="dshwb-toolbar" style={{ padding: '10px', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
             <IconButton
               label={t('paper.rail')}
               active={railOpen}
               onClick={() => setRailOpen(!railOpen)}
               icon={<Icon d={Icons.rail} size={13} />}
             />
-            <SearchInput value={q} onChange={setQ} placeholder={t('paper.searchPh')} />
+            <div className="dshwb-library-search" style={{ flex: '1 1 160px', minWidth: 0 }}><SearchInput value={q} onChange={setQ} placeholder={t('paper.searchPh')} /></div>
             <IconButton
               label={t('paper.filters')}
               active={filtersOpen || filtersActive}
@@ -1549,11 +1547,12 @@ function RailItem({ label, count, color, active, dim, onClick }: {
       type="button"
       data-dsh-plugin="dsh-scholar"
       data-dsh-part="rail-item"
+      aria-current={active ? 'page' : undefined}
       onClick={onClick}
       style={{
         display: 'flex', alignItems: 'center', gap: 6, width: '100%', textAlign: 'left',
         padding: '5px 7px', borderRadius: 8, marginBottom: 1,
-        background: active ? 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14))' : 'transparent',
+        background: active ? 'color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 9%, transparent)' : 'transparent',
         border: 'none', cursor: 'pointer',
         color: dim ? T.secondary : 'var(--dsw-alias-label-primary)',
         fontSize: 11.5, fontWeight: active ? 600 : 400,

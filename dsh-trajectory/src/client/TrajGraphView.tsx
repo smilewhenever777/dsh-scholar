@@ -147,7 +147,7 @@ export function TrajGraphView({ t, file, progress, filter, onFilter, statusFilte
   /** 进入全页视图(可省:清单/内嵌场景) */
   onFullPage?: () => void;
 }) {
-  const [size, setSize] = useState({ w: 380, h: 300 });
+  const [size, setSize] = useState({ w: 0, h: 0 }); // 0=未量测:fit 须等真实容器尺寸,否则挂载时用占位值适配导致图偏在左上角
   const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [dragNode, setDragNode] = useState<string | null>(null);
@@ -390,7 +390,7 @@ export function TrajGraphView({ t, file, progress, filter, onFilter, statusFilte
   const spineNodes = mainlineList.map((id) => byId.get(id)!).filter(Boolean);
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+    <div className="dshwb-surface" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       <TrajStyles />
       {/* toolbar */}
       <div className="traj-noprint" style={{ padding: '4px 10px 6px', display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -596,6 +596,7 @@ export function TrajGraphView({ t, file, progress, filter, onFilter, statusFilte
                 const onSpine = mainlineSet.has(node.id);
                 const spineIdx = onSpine ? mainlineList.indexOf(node.id) : -1;
                 const prog = progress.get(node.id);
+
                 const op = dim(node.id);
                 const done = node.status === 'done';
                 const blocked = node.status === 'blocked';

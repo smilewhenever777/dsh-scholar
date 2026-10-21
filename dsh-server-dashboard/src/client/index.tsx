@@ -1,4 +1,8 @@
+import { PanelHeader, WorkbenchStyles } from '../../../shared-client/src/Workbench';
+import { PanelMenu } from '../../../shared-client/src/PanelMenu';
+import { clampDockWidth, DOCK_TOP, bindDesktopServices, registerDockPanel, installDockLayout, toggleOfficialSidebar } from '../../../shared-client/src/desktop';
 import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { clampFloat } from '../../../shared-client/src/index';
 import ReactDOM from 'react-dom';
 import { zh, en } from './locales';
 import { DashboardPanel } from './DashboardPanel';
@@ -12,7 +16,7 @@ import type { ServerSnapshot } from './types';
 // 跨插件停靠让位协议的全局足迹表(与 dsh-scholar/dsh-trajectory 约定一致)
 declare global {
 	interface Window {
-		__dshDock?: Record<string, { open: boolean; width: number }>;
+		__dshDock?: Record<string, { open: boolean; width: number; overlay?: boolean }>;
 	}
 }
 
@@ -552,24 +556,15 @@ const DRAWER_MIN = 300;
 const DRAWER_MAX = 520;
 const DRAWER_DEFAULT = 360;
 /** 浮动窗口几何夹取:不越出视口、不小于可读下限 */
-function clampFloat(g: { x: number; y: number; w: number; h: number }): { x: number; y: number; w: number; h: number } {
-	const vw = window.innerWidth, vh = window.innerHeight;
-	return {
-		x: Math.max(8, Math.min(g.x, vw - 80)),
-		y: Math.max(8, Math.min(g.y, vh - 60)),
-		w: Math.max(300, Math.min(g.w, vw - 16)),
-		h: Math.max(220, Math.min(g.h, vh - 16)),
-	};
-}
 /** collapsed-rail width, published so sibling panels can dock around us */
 const RAIL_W = 32;
-function publishDock(id: string, fp: { open: boolean; width: number }) {
+function publishDock(id: string, fp: { open: boolean; width: number; overlay?: boolean }) {
 	const w = window;
 	w.__dshDock = {
 		...w.__dshDock ?? {},
 		[id]: fp
 	};
-	window.dispatchEvent(new CustomEvent("dsh-dock-change"));
+	window.dispatchEvent(new CustomEvent("dsh-dock-change", { detail: { id } }));
 }
 function outerFootprint(selfId: string) {
 	const w = window;
@@ -611,7 +606,7 @@ function officialRightInset(): number {
 function findOfficialSidebarToggle(): HTMLButtonElement | null {
 	try {
 		const list = Array.from(document.querySelectorAll('button')).filter(b => {
-			if (!/右侧边栏/.test(b.getAttribute('aria-label') || '')) return false;
+			if (!/右侧边栏|right sidebar/i.test(b.getAttribute('aria-label') || '')) return false;
 			const r = b.getBoundingClientRect();
 			return r.width > 0 && r.x >= 0 && r.x < window.innerWidth && getComputedStyle(b).visibility !== 'hidden';
 		});
@@ -624,35 +619,11 @@ function officialSidebarOpen(): boolean {
 	return officialRightInset() > 0;
 }
 
-/** 应用顶部两行的总高:抽屉按官方右侧栏同款从顶栏下方开始。 */
-function officialTopInset(): number {
-	try {
-		const btn = Array.from(document.querySelectorAll('button')).find(b => {
-			if (!/右侧边栏/.test(b.getAttribute('aria-label') || '')) return false;
-			const r = b.getBoundingClientRect();
-			return r.width > 0 && r.x >= 0 && r.x < window.innerWidth && getComputedStyle(b).visibility !== 'hidden';
-		});
-		if (!btn) return 0;
-		let best = 0;
-		let el = btn.parentElement;
-		while (el && el !== document.body) {
-			const r = el.getBoundingClientRect();
-			if (r.height > 8 && r.height <= 72 && r.width >= window.innerWidth * .3) best = Math.max(best, Math.round(r.bottom));
-			el = el.parentElement;
-		}
-		return best;
-	} catch {
-		return 0;
-	}
-}
+
 /** clamp with a RELATIVE cap: the drawer must never swallow a narrow window —
 *  at most 60% of the viewport, and never past the absolute max. 窄窗(<500px)
 *  时 60% 上限优先于绝对最小宽,抽屉不会吞掉整个窗口 */
-function clampW(w: number): number {
-	// 宽度上限跟随视口:主内容保 1100(侧栏断点)之内自由拖宽,绝对上限 1200
-	const dyn = typeof window === "undefined" ? DRAWER_MAX : Math.max(DRAWER_MIN, Math.min(1200, window.innerWidth - 1100));
-	const min = Math.min(DRAWER_MIN, dyn);
-	return Math.max(min, Math.min(Math.max(min, dyn), w));
+function clampW(w: number): number { return clampDockWidth(w);
 }
 function Drawer({ t }: { t: TFunc }) {
 	const mode = usePanelMode();
@@ -665,48 +636,9 @@ function Drawer({ t }: { t: TFunc }) {
 	const [dragging, setDragging] = React.useState(false);
 	const [handleHover, setHandleHover] = React.useState(false);
 	const [dashFull, setDashFull] = React.useState(false);
-	// 应用顶部两行高度(1s 轮询):抽屉按官方侧边栏同款从顶栏下方开始
-	const [topInset, setTopInset] = React.useState(() => officialTopInset());
-	React.useEffect(() => {
-		const read = () => setTopInset((cur) => { const next = officialTopInset(); return cur === next ? cur : next; });
-		const timer = setInterval(read, 1000);
-		return () => clearInterval(timer);
-	}, []);
-	const dockTop = topInset > 0 ? `${topInset}px` : "var(--dsh-desktop-titlebar-inset, 0px)";
-	// 压缩让位(squeeze):停靠时把主内容右缘压出全部右舷面板总宽(变量+!important 抗应用重算)
-	React.useEffect(() => {
-		const apply = () => {
-			try {
-				const dock = (window as unknown as { __dshDock?: Record<string, { open: boolean; width: number }> }).__dshDock ?? {};
-				let strip = 0;
-				for (const v of Object.values(dock)) if (v?.open && v.width > 0) strip += v.width;
-				const capped = strip;
-				document.body.style.transition = "margin-right .18s ease";
-				document.body.style.marginRight = capped > 0 ? `${capped}px` : "";
-				let sqStyle = document.getElementById("dsh-squeeze-style") as HTMLStyleElement | null;
-				if (!sqStyle) {
-					sqStyle = document.createElement("style");
-					sqStyle.id = "dsh-squeeze-style";
-					document.head.appendChild(sqStyle);
-				}
-				const frameEl = document.querySelector('[class*="frame"]');
-				if (frameEl) {
-					const token = String(frameEl.className).split(' ')[0];
-					if (token) sqStyle!.textContent = `.${token} { width: calc(100vw - var(--dsh-squeeze, 0px)) !important; transition: width .18s ease; }`;
-				}
-				document.documentElement.style.setProperty("--dsh-squeeze", capped > 0 ? `${capped}px` : "0px");
-			} catch { /* 布局探测失败则退回覆盖式 */ }
-		};
-		apply();
-		window.addEventListener("dsh-dock-change", apply);
-		const timer = setInterval(apply, 1000);
-		return () => {
-			window.removeEventListener("dsh-dock-change", apply);
-			clearInterval(timer);
-			document.body.style.marginRight = "";
-			document.documentElement.style.setProperty("--dsh-squeeze", "0px");
-		};
-	}, [mode, dashFull]);
+  const dockTop = DOCK_TOP;
+  useEffect(() => registerDockPanel('server-dashboard', (mode) => panelBus.set(mode ?? 'rail'), 32), []);
+  useEffect(() => installDockLayout(), []);
 	// 浮动窗口几何:fixed 定位 + 头部拖拽 + 角柄缩放,localStorage 记忆
 	const FLOAT_MIN_W = 300, FLOAT_MIN_H = 220; // referenced by clampFloat below
 	const floatGeomRef = React.useRef({ x: 0, y: 0, w: 380, h: 520 });
@@ -840,9 +772,9 @@ function Drawer({ t }: { t: TFunc }) {
 		// float 态退出右舷停靠链(让其他面板收回空间)
 		publishDock("server-dashboard", {
 			open: mode === "open" || mode === "rail",
-			width: selfW
+			width: selfW, overlay: mode === "open" && dashFull
 		});
-	}, [mode, selfW, dragging]);
+	}, [mode, selfW, dragging, dashFull]);
 	React.useEffect(() => () => publishDock("server-dashboard", {
 		open: false,
 		width: 0
@@ -859,7 +791,7 @@ function Drawer({ t }: { t: TFunc }) {
 		window.addEventListener("resize", onResize);
 		return () => window.removeEventListener("resize", onResize);
 	}, [outerW, officialInset]);
-	return /* @__PURE__ */ (0, React.createElement)(Fragment, { children: [mode !== "closed" && /* @__PURE__ */ (0, React.createElement)("div", {
+	return /* @__PURE__ */ (0, React.createElement)(Fragment, { children: [<WorkbenchStyles key="styles" />, mode !== "closed" && /* @__PURE__ */ (0, React.createElement)("div", {
 		"data-dsh-plugin": "dsh-server-dashboard",
 		"data-dsh-surface": "drawer",
 		style: {
@@ -874,7 +806,7 @@ function Drawer({ t }: { t: TFunc }) {
 			"data-dsh-part": "drawer-rail",
 			style: {
 				position: "absolute",
-					top: "var(--dsh-desktop-titlebar-inset, 0px)",
+					top: dockTop,
 					...(squeezed ? { left: 0, right: "auto" } : { right: outerW }),
 					bottom: 0,
 					width: 32,
@@ -918,6 +850,7 @@ function Drawer({ t }: { t: TFunc }) {
 			]
 			}), (mode === "open" || mode === "float") && /* @__PURE__ */ (0, React.createElement)("div", {
 				"data-dsh-part": "drawer-panel",
+                className: "dshwb-surface",
 				style: mode === "float" ? {
 					position: "fixed",
 					left: floatGeom.x,
@@ -937,7 +870,7 @@ function Drawer({ t }: { t: TFunc }) {
 					color: "var(--dsw-alias-label-primary)"
 				} : {
 					position: "absolute",
-					top: "var(--dsh-desktop-titlebar-inset, 0px)",
+					top: dockTop,
 					// 挤压兜底:右栏+内侧面板把可用宽吃光(<DRAWER_MIN)时改锚左缘——
 					// 宁可盖住会话侧栏,也不能让抽屉整块出屏(否则又是"消失但占位")
 					...(squeezed ? { left: 0, right: "auto" } : { right: dashFull ? 0 : outerW, left: dashFull ? 0 : "auto" }),
@@ -1019,51 +952,31 @@ function Drawer({ t }: { t: TFunc }) {
 						transition: "opacity .15s"
 					} })
 				}),
-				/* @__PURE__ */ (0, React.createElement)("div", {
-					onPointerDown: mode === "float" ? onFloatDragDown : undefined,
-					onPointerMove: mode === "float" ? onFloatDragMove : undefined,
-					onPointerUp: mode === "float" ? onFloatDragUp : undefined,
-					style: {
-						display: "flex",
-						alignItems: "center",
-						gap: 2,
-						padding: "8px 6px 8px 12px",
-						borderBottom: "1px solid var(--dsw-alias-border-l2)",
-						flex: "none",
-						cursor: mode === "float" ? (floatMoving ? "grabbing" : "grab") : undefined,
-						userSelect: floatMoving ? "none" : undefined,
-						touchAction: mode === "float" ? "none" : undefined
-					},
-					children: [
-						/* @__PURE__ */ (0, React.createElement)("span", {
-							"aria-hidden": true,
-							style: {
-								display: "inline-flex",
-								color: "var(--dsw-alias-label-secondary)"
-							},
-							children: /* @__PURE__ */ (0, React.createElement)(Icon, {
-								d: Icons.monitor,
-								size: 15
-							})
-						}),
-						/* @__PURE__ */ (0, React.createElement)("span", {
-							style: {
-								fontWeight: 600,
-								fontSize: 13,
-								marginLeft: 6,
-								overflow: "hidden",
-								textOverflow: "ellipsis",
-								whiteSpace: "nowrap"
-							},
-							children: t("nav.title")
-						}),
-						/* @__PURE__ */ (0, React.createElement)("span", { style: { flex: 1 } }),
-						/* @__PURE__ */ (0, React.createElement)("span", {
+                <PanelHeader icon={<Icon d={Icons.monitor} size={15} />} title={t('nav.title')}
+                  onPointerDown={mode === 'float' ? onFloatDragDown : undefined}
+                  onPointerMove={mode === 'float' ? onFloatDragMove : undefined}
+                  onPointerUp={mode === 'float' ? onFloatDragUp : undefined}
+                  style={{ cursor: mode === 'float' ? (floatMoving ? 'grabbing' : 'grab') : undefined, userSelect: floatMoving ? 'none' : undefined, touchAction: mode === 'float' ? 'none' : undefined }}>
+                  <AlertBell t={t} />
+                  <IconButton label={t('panel.refresh')} onClick={() => void refresh(true)} disabled={refreshing}
+                    icon={<span style={{ display: 'inline-flex', animation: refreshing ? 'dsh-dash-spin .9s linear infinite' : undefined }}><Icon d={Icons.refresh} size={15} /></span>} />
+                  <PanelMenu label={t('drawer.more')} actions={[
+                    ...(mode !== 'float' ? [
+                      { label: t('drawer.officialSidebar'), run: toggleOfficialSidebar },
+                      { label: dashFull ? t('drawer.restore') : t('drawer.expand'), run: () => setDashFull(!dashFull) },
+                      { label: t('drawer.float'), run: () => { setDashFull(false); panelBus.set('float'); } },
+                    ] : [{ label: t('drawer.dock'), run: () => { setDashFull(false); panelBus.set('open'); } }]),
+                    ...(rightbarAvailable() ? [{ label: t('rightbar.follow'), run: () => openGpuInRightbar() }] : []),
+                  ]} />
+                  <IconButton label={t('drawer.collapse')} onClick={() => { setDashFull(false); panelBus.set('rail'); }} icon={<Icon d={Icons.collapseRight} size={15} />} />
+                  <IconButton label={t('drawer.close')} onClick={() => { setDashFull(false); panelBus.set('closed'); }} icon={<Icon d={Icons.close} size={15} />} />
+                </PanelHeader>,
+                (at > 0 || hostError) && /* @__PURE__ */ (0, React.createElement)("span", {
 							style: {
 								fontSize: 10,
 								color: "var(--dsw-alias-label-caption)",
 								whiteSpace: "nowrap",
-								marginRight: 4,
+								padding: "0 12px 7px",
 								display: "inline-flex",
 								alignItems: "center",
 								gap: 4
@@ -1082,92 +995,6 @@ function Drawer({ t }: { t: TFunc }) {
 								})
 							]
 						}),
-						/* @__PURE__ */ (0, React.createElement)(AlertBell, { t }),
-						/* @__PURE__ */ (0, React.createElement)(IconButton, {
-							label: t("panel.refresh"),
-							onClick: () => void refresh(true),
-							disabled: refreshing,
-							icon: /* @__PURE__ */ (0, React.createElement)("span", {
-								style: {
-									display: "inline-flex",
-									animation: refreshing ? "dsh-dash-spin 0.9s linear infinite" : void 0
-								},
-								children: /* @__PURE__ */ (0, React.createElement)(Icon, {
-									d: Icons.refresh,
-									size: 15
-								})
-							})
-						}),
-						mode !== "float" && /* @__PURE__ */ (0, React.createElement)(IconButton, {
-							label: officialSidebarOpen() ? "收起官方右侧栏" : "展开官方右侧栏",
-							onClick: () => findOfficialSidebarToggle()?.click(),
-							icon: /* @__PURE__ */ (0, React.createElement)(Icon, {
-								d: Icons.dock,
-								size: 15
-							})
-						}),
-						mode !== "float" && /* @__PURE__ */ (0, React.createElement)(IconButton, {
-							label: dashFull ? t("drawer.restore") : t("drawer.expand"),
-							onClick: () => setDashFull(!dashFull),
-							icon: /* @__PURE__ */ (0, React.createElement)(Icon, {
-								d: Icons.expand,
-								size: 15
-							})
-						}),
-						mode !== "float" && /* @__PURE__ */ (0, React.createElement)(IconButton, {
-							label: t("drawer.float"),
-							onClick: () => {
-								setDashFull(false);
-								panelBus.set("float");
-							},
-							icon: /* @__PURE__ */ (0, React.createElement)(Icon, {
-								d: Icons.popout,
-								size: 15
-							})
-						}),
-						mode === "float" && /* @__PURE__ */ (0, React.createElement)(IconButton, {
-							label: t("drawer.dock"),
-							onClick: () => {
-								setDashFull(false);
-								panelBus.set("open");
-							},
-							icon: /* @__PURE__ */ (0, React.createElement)(Icon, {
-								d: Icons.dock,
-								size: 15
-							})
-						}),
-						rightbarAvailable() && /* @__PURE__ */ (0, React.createElement)(IconButton, {
-							label: t("rightbar.follow"),
-							onClick: () => openGpuInRightbar(),
-							icon: /* @__PURE__ */ (0, React.createElement)(Icon, {
-								d: Icons.sidebarRight,
-								size: 15
-							})
-						}),
-						/* @__PURE__ */ (0, React.createElement)(IconButton, {
-							label: t("drawer.collapse"),
-							onClick: () => {
-								setDashFull(false);
-								panelBus.set("rail");
-							},
-							icon: /* @__PURE__ */ (0, React.createElement)(Icon, {
-								d: Icons.collapseRight,
-								size: 15
-							})
-						}),
-						/* @__PURE__ */ (0, React.createElement)(IconButton, {
-							label: t("drawer.close"),
-							onClick: () => {
-								setDashFull(false);
-								panelBus.set("closed");
-							},
-							icon: /* @__PURE__ */ (0, React.createElement)(Icon, {
-								d: Icons.close,
-								size: 15
-							})
-						})
-					]
-				}),
 				/* @__PURE__ */ (0, React.createElement)("div", {
 					style: {
 						flex: 1,
@@ -1459,6 +1286,7 @@ function apply(ctx: any) {
 	}), "server-dashboard: dictionaries");
 	// 官方右侧栏「GPU 监控」页签(0.1.5+;旧宿主无服务时静默跳过)
 	registerDashboardRightbar(ctx);
+	bindDesktopServices(ctx);
 	ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
 		name: "sidebar.footer.action",
 		id: "server-dashboard",

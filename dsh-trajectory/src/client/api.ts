@@ -1,19 +1,2 @@
-/** Shared fetch helper for /traj/* routes (and same-origin cross-plugin GETs). */
-export async function api<T = unknown>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    ...init,
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
-  return body as T;
-}
-
-export function qs(params: Record<string, string | number | undefined | null>): string {
-  const sp = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== '') sp.set(k, String(v));
-  }
-  const s = sp.toString();
-  return s ? `?${s}` : '';
-}
+/** E2 收敛:api/qs 由 shared-client 提供(本文件保留为 re-export 壳,调用点零改动)。 */
+export { api, qs } from '../../../shared-client/src/index';

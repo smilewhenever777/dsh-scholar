@@ -10,7 +10,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
-import z from 'schemastery';
+import z from '@deepseek-ai/schemastery';
 import type { TrajConfig, TrajEdge, TrajNodeKind, TrajStatus } from './shared/types.js';
 import { getLastActiveWs } from './tools.js';
 import { TRAJ_NODE_KINDS, TRAJ_STATUSES } from './shared/types.js';
@@ -96,6 +96,11 @@ function sendJson(res: ServerResponse, code: number, payload: unknown): void {
 /** 403 unless loopback(与 dsh-server-dashboard 同款):0.1.5 的 Web 认证门不覆盖
  * 插件命名路由,/traj/* 需要自己的本机围栏 */
 function guardRoute(req: import('node:http').IncomingMessage, res: ServerResponse): boolean {
+  const site = String(req.headers['sec-fetch-site'] ?? '').toLowerCase();
+  if (site && site !== 'same-origin' && site !== 'none') {
+    sendJson(res, 403, { error: '跨源浏览器请求被拒绝' });
+    return false;
+  }
   // F02:Host 必须是回环域——DNS rebinding 把外域解析到 127.0.0.1 时 Host 是外域名
   const hostRaw = String(req.headers.host ?? '').toLowerCase();
   let hostName = hostRaw;

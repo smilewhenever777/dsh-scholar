@@ -454,7 +454,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
   /* ---------- toolbar ---------- */
   const toolbar = (
     <div style={{ flex: 'none' }}>
-      <div style={{ padding: '8px 10px 6px', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+      <div className="dshwb-toolbar" style={{ padding: '10px', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
         <SearchInput value={q} onChange={setQ} placeholder={t('card.searchPh')} />
         <IconButton
           label={t('paper.filters')}
@@ -542,7 +542,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
   );
 
   return (
-    <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+    <div className="dshwb-surface" style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       <SchStyles />
       {toolbar}
       {error && <div style={{ color: T.danger, padding: '2px 12px 6px', fontSize: 11 }}>{error}</div>}
@@ -583,7 +583,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
                 return (
                   <div key={g.key} style={{ marginBottom: 10 }}>
                     <div
-                      className="sch-card"
+                      className="dshwb-card sch-card"
                       onClick={() => toggleGroup(g.key)}
                       style={{
                         display: 'flex', alignItems: 'center', gap: 7, padding: '7px 9px',
@@ -626,7 +626,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
                           <button
                             key={c.id}
                             type="button"
-                            className="sch-card sch-press"
+                            className="dshwb-card sch-card sch-press"
                             onClick={() => setModal({ card: c, editing: false })}
                             style={{
                               display: 'flex', alignItems: 'center', gap: 7, width: '100%', textAlign: 'left',
@@ -718,7 +718,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
                           onDragStart={() => setDragId(c.id)}
                           onDragEnd={() => { setDragId(null); setDropCol(null); }}
                           onClick={() => setModal({ card: c, editing: false })}
-                          className={`sch-card sch-press${dragId === c.id ? ' sch-dragging' : ''}${droppedId === c.id ? ' sch-dropped' : ''}`}
+                          className={`dshwb-card sch-card sch-press${dragId === c.id ? ' sch-dragging' : ''}${droppedId === c.id ? ' sch-dropped' : ''}`}
                           style={{
                             textAlign: 'left', cursor: 'grab', border: '1px solid var(--dsw-alias-border-l2)',
                             background: T.cardBg, borderRadius: 9, padding: '8px 9px',
@@ -846,7 +846,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
                     type="button"
                     data-dsh-plugin="dsh-scholar"
                     data-dsh-part="idea-card"
-                    className="sch-card sch-press"
+                    className="dshwb-card sch-card sch-press"
                     onClick={() => setModal({ card: c, editing: false })}
                     style={{
                       ['--sch-i' as string]: Math.min(i, 20),
@@ -957,7 +957,7 @@ export function BookshelfView({ t }: { t: TFunc }) {
                 type="button"
                 data-dsh-plugin="dsh-scholar"
                 data-dsh-part="idea-card"
-                className="sch-card sch-press"
+                className="dshwb-card sch-card sch-press"
                 onClick={() => setModal({ card: c, editing: false })}
                 style={{
                   ['--sch-i' as string]: Math.min(i, 20),

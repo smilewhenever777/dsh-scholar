@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
-import z from 'schemastery';
+import z from '@deepseek-ai/schemastery';
 import type { CardQuery, CardSort, KnowledgeGraph, PaperQuery, PaperSort, ReadStatus, ScholarConfig } from './shared/types.js';
 import type { PaperStore } from './store.js';
 import {
@@ -230,6 +230,11 @@ function sendJson(res: ServerResponse, code: number, payload: unknown): void {
 /** 403 unless loopback(与 dsh-server-dashboard 同款):0.1.5 的 Web 认证门不覆盖
  * 插件命名路由,/scholar/* 需要自己的本机围栏 */
 function guardRoute(req: import('node:http').IncomingMessage, res: ServerResponse): boolean {
+  const site = String(req.headers['sec-fetch-site'] ?? '').toLowerCase();
+  if (site && site !== 'same-origin' && site !== 'none') {
+    sendJson(res, 403, { error: '跨源浏览器请求被拒绝' });
+    return false;
+  }
   // F02:Host 必须是回环域——DNS rebinding 把外域解析到 127.0.0.1 时 Host 是外域名
   const hostRaw = String(req.headers.host ?? '').toLowerCase();
   let hostName = hostRaw;
@@ -330,7 +335,9 @@ export function registerScholarRoutes(
       if (!guardRoute(req, res)) return;
       try {
         const store = await getStore();
-        sendJson(res, 200, { ...store.stats(), dir: store.dir });
+        // desktop 标记:桌面宿主进程由 Electron 以 ELECTRON_RUN_AS_NODE=1 派生(CLI 宿主无此变量,
+        // 进程 env 是确定性信号,比 UA 可靠),客户端据此做原生性能条让位
+        sendJson(res, 200, { ...store.stats(), dir: store.dir, desktop: (process.env as { ELECTRON_RUN_AS_NODE?: string }).ELECTRON_RUN_AS_NODE === '1' });
       } catch (err) {
         sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
       }
@@ -592,9 +599,9 @@ export function registerScholarRoutes(
               return sendJson(res, 400, { error: '非法的报告文件名' });
             }
             try {
-              await unlink(join(reportsDir, fname));
-              // 顺带清理同名 sidecar（对比原料 JSON）
-              await unlink(join(reportsDir, fname.replace(/\.html$/, '.json'))).catch(() => {});
+              // 共享租约+实例队列内删除（含同名 sidecar），与同步/本地写互斥
+              const deleted = await store.deleteReportFile(fname);
+              if (!deleted) return sendJson(res, 404, { error: '报告文件不存在' });
               return sendJson(res, 200, { ok: true, deleted: fname });
             } catch {
               return sendJson(res, 404, { error: '报告文件不存在' });

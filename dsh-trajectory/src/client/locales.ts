@@ -2,6 +2,11 @@
 import type { TrajEdgeKind, TrajNodeKind, TrajStatus } from '../shared/types';
 
 export const zh = {
+  'drawer.officialSidebar': '切换宿主右侧栏',
+  'settings.chooseDirectory': '选择目录…',
+  'file.revealed': '已显示文件位置',
+  'file.copied': '无法打开文件位置，路径已复制',
+  'file.failed': '无法打开或复制路径，请手动复制',
   'node.searchPaper': '关联论文',
   'node.searchCard': '关联想法',
   'node.searchHost': '关联服务器',
@@ -19,6 +24,7 @@ export const zh = {
   'drawer.float': '浮为窗口',
   'drawer.dock': '回贴侧栏',
   'drawer.close': '关闭',
+  'drawer.more': '更多面板操作',
   'drawer.resize': '拖拽调整宽度',
 
   'tab.graph': '主线图',
@@ -191,6 +197,11 @@ export const zh = {
 export type ZhDict = typeof zh;
 
 export const en: ZhDict = {
+  'drawer.officialSidebar': 'Toggle host right sidebar',
+  'settings.chooseDirectory': 'Choose directory…',
+  'file.revealed': 'File location revealed',
+  'file.copied': 'Could not reveal file; path copied',
+  'file.failed': 'Could not reveal or copy path; copy it manually',
   'node.searchPaper': 'Link paper',
   'node.searchCard': 'Link idea',
   'node.searchHost': 'Link server',
@@ -208,6 +219,7 @@ export const en: ZhDict = {
   'drawer.float': 'Float as window',
   'drawer.dock': 'Dock to sidebar',
   'drawer.close': 'Close',
+  'drawer.more': 'More panel actions',
   'drawer.resize': 'Drag to resize',
 
   'tab.graph': 'Mainline',

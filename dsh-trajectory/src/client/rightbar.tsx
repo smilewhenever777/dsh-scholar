@@ -129,7 +129,7 @@ function MainlineTabBody(props: { useTabInfo: () => { tab: any }; t: TFunc; sess
   };
 
   return (
-    <div style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10, minHeight: '100%', overflow: 'auto' }}>
+    <div className="dshwb-surface" style={{ boxSizing: 'border-box', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10, minHeight: '100%', overflow: 'auto' }}>
       <div>
         <div style={{ fontSize: 13, fontWeight: 700 }}>{project.name}</div>
         <div style={{ marginTop: 3, fontSize: 11, color: 'var(--dsw-alias-label-caption)' }}>
