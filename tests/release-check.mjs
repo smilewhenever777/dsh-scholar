@@ -10,6 +10,8 @@ const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8'
 const staged = process.argv.includes('--staged');
 const candidates = staged ? git('diff', '--cached', '--name-only', '--diff-filter=ACMR', '-z') : git('ls-files', '--cached', '--others', '--exclude-standard', '-z');
 const files = [...new Set(candidates.split('\0').filter(Boolean))];
+const allowedRoots = new Set(['dsh-scholar', 'dsh-server-dashboard', 'dsh-trajectory', 'shared-client', 'tests', '.githooks']);
+const allowedFiles = new Set(['.gitignore', 'README.md', 'package.json', 'package-lock.json']);
 // Staged mode reads index bytes and resolves links against the future checkout.
 const published = new Set((staged ? git('ls-files', '--cached', '-z').split('\0').filter(Boolean) : files)), issues = [], packages = [];
 const rules = [
@@ -27,6 +29,7 @@ const inspect = (file, source) => {
  }
 };
 for (const file of files) {
+ if (!(file.includes('/') ? allowedRoots.has(file.split('/')[0]) : allowedFiles.has(file))) issues.push({ file, rule: 'outside-public-scope' });
  if (/(?:^|\/)(?:node_modules|\.verify|dist-client|\.credentials|settings\.yaml|server\.log|\.env)(?:\/|\.|$)|\.(?:tgz|pem|key)$/i.test(file)) issues.push({ file, rule: 'private-or-generated-file' });
  let text;
  try {

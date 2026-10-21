@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "check:scope": "node tests/public-scope.mjs --history",
     "build": "node tests/run.mjs --build-only",
     "test": "node tests/run.mjs",
     "check:release": "node tests/release-check.mjs",

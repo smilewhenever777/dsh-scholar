@@ -23,6 +23,7 @@ async function run(name, args, cwd = root, npm = false) {
   if (code !== 0) throw Error(`${name} failed; see ${out}`);
 }
 const plugins = ['dsh-scholar', 'dsh-server-dashboard', 'dsh-trajectory'];
+await run('public-scope', ['tests/public-scope.mjs', '--history']);
 for (const plugin of plugins) await run(plugin + '-build', ['run', 'build'], resolve(root, plugin), true);
 if (!process.argv.includes('--build-only')) {
   for (const [plugin, script] of [['dsh-scholar','smoke-test.mjs'], ['dsh-server-dashboard','test-alerts.mjs'], ['dsh-trajectory','smoke-test.mjs']]) await run(plugin + '-smoke', ['scripts/' + script], resolve(root, plugin));

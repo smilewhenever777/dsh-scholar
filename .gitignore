@@ -10,6 +10,7 @@
 !/shared-client/
 !/package.json
 !/package-lock.json
+!/.githooks/
 
 # 内部开发日志（含研究方向/真实论文/会话细节，不公开）
 dsh-scholar/AUDIT-*.md
